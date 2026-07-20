@@ -151,7 +151,7 @@ def restrict_path_permissions(path: str | Path, *, recursive: bool = False) -> N
     POSIX uses mode 0600/0700.  Windows uses ``icacls`` because ``chmod`` does
     not provide a meaningful owner-only ACL there.
     """
-    target = Path(path)
+    target = Path(path).resolve()
     if not target.exists():
         raise FileNotFoundError(target)
 
