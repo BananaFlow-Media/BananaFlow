@@ -48,7 +48,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "download_selected": " Download Selected",
         "download_downloading": " Downloading…",
         "downloads_header_title": "What are we downloading today?",
-        "downloads_header_subtitle": "Paste a YouTube or Spotify link, or search for songs, albums, and playlists.",
+        "downloads_header_subtitle": "Paste a YouTube link or Spotify link (playlists, albums, tracks, artists) to automatically match and download audio.",
         "downloads_empty_title": "Waiting for content",
         "downloads_empty_subtitle": "Paste a link above to load metadata, previews, and actions.",
         "search_empty_title": "Search for music, videos, or playlists",
@@ -1402,7 +1402,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "download_selected": "הורד פריטים שנבחרו",
         "download_downloading": " מוריד…",
         "downloads_header_title": "מה נוריד היום?",
-        "downloads_header_subtitle": "הדבק קישור YouTube או Spotify, או חפש שירים, אלבומים או פלייליסטים.",
+        "downloads_header_subtitle": "הזן קישור מ-YouTube או Spotify (פלייליסטים, אלבומים, שירים ואמנים) – המערכת תאתר ותוריד אוטומטית את קטעי השמע התואמים.",
         "downloads_empty_title": "מוכן כשהתוכן יגיע",
         "downloads_empty_subtitle": "הדבק קישור למעלה כדי לטעון מידע, תצוגה מקדימה ופעולות.",
         "search_empty_title": "חפש מוזיקה, סרטונים או פלייליסטים",
@@ -1473,7 +1473,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "scrape_tooltip": "סרוק דף זה למציאת קישורי מדיה",
         "clipboard_on_tooltip": "ניטור הלוח פעיל — זיהוי אוטומטי של קישורי מדיה",
         "clipboard_off_tooltip": "ניטור הלוח כבוי — הפעל בהגדרות",
-        "url_placeholder": "הדבק קישור YouTube או Spotify, או כתוב שאילתת חיפוש…",
+        "url_placeholder": "הדבק קישור מ-YouTube או Spotify (שיר, אלבום, אמן, פלייליסט) או רשום שאילתת חיפוש…",
 
         # ── Batch import ────────────────────────────────────────────────────────
         "batch_import_failed": "ייבוא אצווה נכשל",

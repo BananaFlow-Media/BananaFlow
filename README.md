@@ -128,6 +128,8 @@ Downloading content you do not have the right to download may violate
 the law and the terms of the services involved. You are responsible for
 your own use — see [docs/legal/acceptable-use.md](docs/legal/acceptable-use.md).
 
+> **Disclaimer**: *BananaFlow is an independent open-source desktop application. It is not affiliated with, authorized, or endorsed by Spotify or Google/YouTube. Spotify link resolution operates by searching and downloading matching public audio streams from YouTube; BananaFlow does not download audio files directly from Spotify servers or circumvent Spotify DRM. All trademarks belong to their respective owners.*
+
 ## Contributing and support
 
 * Bugs and feature requests → [Issues](https://github.com/BananaFlow-Media/BananaFlow/issues)
