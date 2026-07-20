@@ -89,15 +89,51 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Scan for contributor filesystem paths
         run: |
-          set -u
-          matches=$(git grep -I -n -E '[Cc]:[/\\]+Users[/\\]|/Users/[a-z]|%USERPROFILE%' -- . \
-            ':!.github/workflows/repo-scans.yml' || true)
-          if [ -n "$matches" ]; then
-            echo "Local filesystem paths found in tracked files:" >&2
-            echo "$matches" >&2
-            exit 1
-          fi
-          echo "Local path scan clean."
+          python3 - <<'PYEOF'
+          import re
+          import subprocess
+          import sys
+
+          # A real contributor's home directory leaking into the repository is
+          # the failure this guards against. Generic placeholders, environment
+          # variables and deliberately fake paths in security fixtures are
+          # documentation and test data, not leaks, so the scan matches the
+          # user-name segment and ignores the known non-identifying ones.
+          PLACEHOLDERS = {
+              "you", "user", "username", "yourname", "your-name", "youruser",
+              "private-person", "someone", "example", "name", "me",
+              "runner", "administrator", "public",
+          }
+          PATH_RE = re.compile(
+              r"(?:[A-Za-z]:[\\/]+Users[\\/]+|/Users/|/home/)([A-Za-z0-9._-]+)"
+          )
+
+          files = subprocess.run(
+              ["git", "ls-files"], capture_output=True, text=True, check=True
+          ).stdout.split("\n")
+
+          offenders = []
+          for name in filter(None, files):
+              if name == ".github/workflows/repo-scans.yml":
+                  continue
+              try:
+                  text = open(name, encoding="utf-8").read()
+              except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+                  continue
+              for lineno, line in enumerate(text.splitlines(), 1):
+                  for who in PATH_RE.findall(line):
+                      bare = who.strip("<>{}[]$%").lower()
+                      if bare in PLACEHOLDERS or not bare:
+                          continue
+                      offenders.append(f"{name}:{lineno}: {line.strip()[:120]}")
+
+          if offenders:
+              print("Contributor filesystem paths found in tracked files:", file=sys.stderr)
+              for o in offenders:
+                  print("  " + o, file=sys.stderr)
+              sys.exit(1)
+          print("Local path scan clean.")
+          PYEOF
 
   link-check:
     name: Markdown link check
@@ -115,6 +151,7 @@ jobs:
               capture_output=True, text=True, check=True,
           ).stdout.split()
           link_re = re.compile(r"\]\(([^)]+)\)")
+          root = Path.cwd().resolve()
           fail = False
           for name in files:
               f = Path(name)
@@ -122,7 +159,13 @@ jobs:
                   target = link.split("#", 1)[0].strip()
                   if not target or target.startswith(("http://", "https://", "mailto:")):
                       continue
-                  if not (f.parent / target).exists() and not Path(target).exists():
+                  # Links that resolve above the repository root are GitHub's
+                  # own UI routes (../../issues, ../../discussions/...), not
+                  # files in the tree, so there is nothing on disk to check.
+                  resolved = (f.parent / target).resolve()
+                  if root not in resolved.parents and resolved != root:
+                      continue
+                  if not resolved.exists():
                       print(f"Broken relative link in {name} -> {link}", file=sys.stderr)
                       fail = True
           if fail:

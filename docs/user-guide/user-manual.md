@@ -956,7 +956,7 @@ download, and store; it is not presented as a DRM-bypass tool.
 
 ## License
 
-GPL-3.0-or-later — see [`LICENSE`](LICENSE). Contributions are accepted
+GPL-3.0-or-later — see [`LICENSE`](../../LICENSE). Contributions are accepted
 under the same license (inbound = outbound); see
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
