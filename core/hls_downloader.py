@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from utils.proc import run_hidden
 from utils.security import redact_text
 
 logger = logging.getLogger(__name__)
@@ -130,16 +131,12 @@ def download_hls(
     )
 
     start = time.monotonic()
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ffmpeg timed out after {timeout_sec}s") from exc
-    except FileNotFoundError:
+    # Hidden launch: FFmpeg is a console program, and a windowed build has
+    # no console to inherit, so Windows would give it a visible one.
+    proc = run_hidden(cmd, purpose="hls-remux", timeout=timeout_sec)
+    if proc.timed_out:
+        raise RuntimeError(f"ffmpeg timed out after {timeout_sec}s")
+    if proc.error:
         raise RuntimeError(
             "ffmpeg not found.  Install ffmpeg and ensure it is on PATH."
         )
@@ -202,13 +199,11 @@ def probe_stream(url: str, timeout_sec: int = 10) -> dict:
         "-show_streams",
         url,
     ]
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_sec
-        )
-        if result.returncode == 0:
+    result = run_hidden(cmd, purpose="hls-probe", timeout=timeout_sec)
+    if result.returncode == 0:
+        try:
             import json
             return json.loads(result.stdout)
-    except Exception:
-        pass
+        except ValueError:
+            logger.warning("hls_downloader: ffprobe returned unparsable JSON")
     return {}

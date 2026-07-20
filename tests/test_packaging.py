@@ -143,6 +143,44 @@ def test_spec_explicitly_collects_yt_dlp_ejs_data_files():
     )
 
 
+def test_every_custom_icon_svg_exists_and_is_bundled():
+    """The Converter sidebar icon went missing in the packaged build because
+    ui.app_window.CustomIcon loads an SVG from ui/assets/ at runtime, but the
+    spec never bundled that folder — so the frozen app had no
+    ui/assets/document_arrow_right_black.svg (Qt logged "Cannot open file"
+    on every repaint). Guard both halves: every CustomIcon("name") used in
+    the code has its black+white SVGs in source, AND the spec stages
+    ui/assets into the bundle.
+    """
+    ui_root = REPO_ROOT / "ui"
+    referenced: set[str] = set()
+    for path in ui_root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        for match in re.finditer(r'CustomIcon\(\s*["\']([^"\']+)["\']', path.read_text(encoding="utf-8")):
+            referenced.add(match.group(1))
+
+    assert referenced, "expected at least one CustomIcon(...) reference in ui/"
+
+    missing_files: list[str] = []
+    for name in sorted(referenced):
+        for variant in ("black", "white"):
+            svg = ui_root / "assets" / f"{name}_{variant}.svg"
+            if not svg.is_file():
+                missing_files.append(str(svg.relative_to(REPO_ROOT)))
+    assert not missing_files, (
+        "CustomIcon references SVG files that do not exist in ui/assets/:\n  "
+        + "\n  ".join(missing_files)
+    )
+
+    spec_text = (REPO_ROOT / "packaging" / "bananaflow.spec").read_text(encoding="utf-8")
+    assert "_stage_tree(ROOT / 'ui' / 'assets', 'ui/assets')" in spec_text, (
+        "packaging/bananaflow.spec must stage ui/assets into the bundle, or "
+        "every CustomIcon (e.g. the Converter's) loses its icon in the frozen "
+        "build even though the SVG exists in source."
+    )
+
+
 def test_spec_excludes_the_unused_qt_multimedia_duplicate_ffmpeg():
     """Issue #32: Qt Multimedia is never imported anywhere in this app (only
     pulled in because collect_submodules('qfluentwidgets') force-includes its

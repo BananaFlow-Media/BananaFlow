@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
 import threading
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QThread, Signal, Qt
 from PySide6.QtGui import QImage
+
+logger = logging.getLogger(__name__)
 
 
 class ArtworkThumbnailCache:
@@ -48,14 +51,21 @@ class ArtworkThumbnailWorker(QThread):
     def cancel(self) -> None: self._cancel.set()
 
     def run(self) -> None:
-        if self._cancel.is_set(): return
-        image = QImage.fromData(self._data)
-        if self._cancel.is_set(): return
-        if image.isNull(): self.failed.emit(self._token, "meta_artwork_invalid_image"); return
-        thumb = image.scaled(self._size, self._size, Qt.AspectRatioMode.KeepAspectRatio,
-                             Qt.TransformationMode.SmoothTransformation)
-        if self._cancel.is_set(): return
-        payload = QByteArray(); buffer = QBuffer(payload); buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        if not thumb.save(buffer, "PNG"):
-            self.failed.emit(self._token, "meta_artwork_invalid_image"); return
-        self.ready.emit(self._token, bytes(payload))
+        # Decoding attacker-supplied image bytes can raise; an escaping
+        # exception would emit neither signal and leave the thumbnail slot
+        # spinning, with the traceback lost to a nonexistent stderr.
+        try:
+            if self._cancel.is_set(): return
+            image = QImage.fromData(self._data)
+            if self._cancel.is_set(): return
+            if image.isNull(): self.failed.emit(self._token, "meta_artwork_invalid_image"); return
+            thumb = image.scaled(self._size, self._size, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+            if self._cancel.is_set(): return
+            payload = QByteArray(); buffer = QBuffer(payload); buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            if not thumb.save(buffer, "PNG"):
+                self.failed.emit(self._token, "meta_artwork_invalid_image"); return
+            self.ready.emit(self._token, bytes(payload))
+        except Exception:                   # noqa: BLE001 - must not escape a QThread
+            logger.exception("Artwork thumbnail generation failed")
+            self.failed.emit(self._token, "meta_artwork_invalid_image")

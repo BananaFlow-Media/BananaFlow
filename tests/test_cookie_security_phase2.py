@@ -29,24 +29,63 @@ def test_private_cookie_write_is_atomic_and_owner_only(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL command is platform-specific")
 def test_windows_acl_hardening_uses_current_account(tmp_path, monkeypatch):
-    from utils import security
+    from utils import proc, security
 
     target = tmp_path / "cookies.txt"
     target.write_text("test", encoding="utf-8")
     calls: list[list[str]] = []
 
-    def fake_run(command, **_kwargs):
+    def fake_run_hidden(command, *, purpose, **_kwargs):
         calls.append(list(command))
-        if command[0] == "whoami":
-            return SimpleNamespace(returncode=0, stdout="example\\owner\n")
-        return SimpleNamespace(returncode=0, stdout="")
+        return proc.ProcessResult(
+            purpose=purpose, program="icacls", returncode=0,
+        )
 
-    monkeypatch.setattr(security.subprocess, "run", fake_run)
+    monkeypatch.setattr(proc, "run_hidden", fake_run_hidden)
+    monkeypatch.setattr(security, "_CACHED_PRINCIPAL", "*S-1-5-21-99-99-99-1001")
     security.restrict_path_permissions(target)
+
     icacls = calls[-1]
     assert icacls[0] == "icacls"
     assert "/inheritance:r" in icacls
-    assert "example\\owner:(F)" in icacls
+    assert "*S-1-5-21-99-99-99-1001:(F)" in icacls
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL command is platform-specific")
+def test_acl_hardening_starts_no_extra_process_to_identify_the_user(monkeypatch):
+    """The principal must come from the process token, not from ``whoami``.
+
+    Every ``whoami.exe`` launch from a windowed build flashes a console
+    window, and hardening runs on startup and on every config save.
+    """
+    from utils import security
+
+    monkeypatch.setattr(security, "_CACHED_PRINCIPAL", None)
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("ACL hardening must not spawn a child process")
+
+    monkeypatch.setattr(security.subprocess, "run", fail)
+    principal = security._acl_principal()
+
+    assert principal.startswith("*S-1-")
+
+
+def test_acl_principal_is_resolved_once_per_process(monkeypatch):
+    """Repeated hardening must not repeat the identity lookup."""
+    from utils import security
+
+    monkeypatch.setattr(security, "_CACHED_PRINCIPAL", None)
+    calls = {"n": 0}
+
+    def counting_sid():
+        calls["n"] += 1
+        return "*S-1-5-21-1-2-3-1001"
+
+    monkeypatch.setattr(security, "_current_user_sid", counting_sid)
+    assert security._acl_principal() == "*S-1-5-21-1-2-3-1001"
+    assert security._acl_principal() == "*S-1-5-21-1-2-3-1001"
+    assert calls["n"] == 1
 
 
 def test_merge_cookies_replaces_matching_entry_and_keeps_other_sites(tmp_path):

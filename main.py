@@ -44,6 +44,13 @@ from utils.logging_config import setup_logging
 _debug_mode = "--debug" in sys.argv
 setup_logging(debug=_debug_mode)
 
+# A windowed build has no stderr, so Python's default "print the traceback"
+# handling of an unhandled exception discards it — including exceptions
+# escaping worker threads, which silently strand whatever the user started.
+# Route all of them to the log file before anything else can fail.
+from utils.crash_reporting import install as _install_crash_reporting
+_install_crash_reporting()
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,18 +116,16 @@ def main() -> int:
         return 1
 
     # 8. Preflight — surface missing FFmpeg / unwritable output / dead
-    #    network up front. Playwright + cookie file diagnostics are
-    #    informational and don't block startup. Wrapped in try/except so
-    #    a buggy preflight can never crash the app.
-    try:
-        from error_handler import run_preflight
-        preflight = run_preflight(
-            output_dir=cfg.output_dir,
-            cookies_file=cfg.cookies_file,
-        )
-        for line in preflight.details:
-            logger.info("[Preflight] %s", line)
-        if not preflight.all_ok():
+    #    network. This runs on a worker thread: the network probe and the
+    #    Playwright check (which starts Playwright's Node driver) are slow,
+    #    and running them here inline froze the already-visible window
+    #    until they finished, because app.exec() had not started yet.
+    def _on_preflight(preflight) -> None:
+        try:
+            for line in preflight.details:
+                logger.info("[Preflight] %s", line)
+            if preflight.all_ok():
+                return
             try:
                 from qfluentwidgets import MessageBox
                 from ui.i18n import render_preflight_warnings, t
@@ -133,12 +138,26 @@ def main() -> int:
                 box.cancelButton.hide()
                 box.exec()
             except Exception:
+                # If the dialog itself can't be shown, the warnings must not
+                # be lost — fall back to the (English) log rendering.
                 logger.warning(
                     "[Preflight] Could not show MessageBox; warnings:\n%s",
                     preflight.warning_text(),
                 )
+        except Exception:
+            logger.warning("[Preflight] Could not report result", exc_info=True)
+
+    try:
+        from ui.workers.preflight_worker import PreflightWorker
+        preflight_worker = PreflightWorker(
+            output_dir=cfg.output_dir,
+            cookies_file=cfg.cookies_file,
+            parent=window,
+        )
+        preflight_worker.completed.connect(_on_preflight)
+        preflight_worker.start()
     except Exception:
-        logger.warning("[Preflight] check failed (non-fatal)", exc_info=True)
+        logger.warning("[Preflight] check could not start (non-fatal)", exc_info=True)
 
     # 9. Event loop
     exit_code = app.exec()
@@ -167,6 +186,15 @@ def _run_internal_smoke_test(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # Must be the very first thing in a frozen build. If any code (ours or a
+    # dependency) ever starts a child via multiprocessing, PyInstaller's
+    # bootloader would otherwise re-run this script from the top in the
+    # child — launching a second full copy of the GUI, window and all.
+    # freeze_support() makes the child return immediately instead. It is a
+    # no-op from source, so it is safe unconditionally.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     if "--internal-smoke-test" in sys.argv:
         sys.exit(_run_internal_smoke_test(sys.argv))
     sys.exit(main())

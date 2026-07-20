@@ -145,11 +145,121 @@ class RedactingFormatter(logging.Formatter):
         return redact_text(super().format(record))
 
 
+def _current_user_sid() -> str:
+    """Return the current process token's user SID as ``*S-1-5-...``.
+
+    ``icacls`` accepts a principal either by name or, with a leading
+    asterisk, by SID.  The SID is strictly better here:
+
+    * It needs no child process.  The previous implementation shelled out
+      to ``whoami.exe`` on every call, and because a windowed build has
+      no console, Windows gave each one a brand-new console window that
+      flashed on screen.  ACL hardening happens on every startup and on
+      every config save, so those flashes came in bursts.
+    * It is locale-independent.  A localised Windows install renders
+      well-known account *names* in the system language, and matching
+      them by string is fragile; a SID never changes.
+
+    Raises OSError if the token cannot be read, so the caller still fails
+    closed rather than silently leaving a file world-readable.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TOKEN_QUERY = 0x0008
+    TokenUser = 1
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # Declaring the signatures is mandatory, not tidiness. Without a
+    # restype, ctypes assumes ``int`` and truncates the 64-bit pseudo-handle
+    # GetCurrentProcess returns, so OpenProcessToken fails with
+    # ERROR_INVALID_HANDLE on any 64-bit build.
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HPVOID] if hasattr(
+        wintypes, "HPVOID"
+    ) else [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
+    ):
+        raise OSError(f"OpenProcessToken failed ({ctypes.get_last_error()})")
+
+    try:
+        size = wintypes.DWORD()
+        # First call sizes the buffer; it is expected to fail with
+        # ERROR_INSUFFICIENT_BUFFER (122).
+        advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(size))
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+            token, TokenUser, buffer, size, ctypes.byref(size)
+        ):
+            raise OSError(f"GetTokenInformation failed ({ctypes.get_last_error()})")
+
+        # TOKEN_USER is a SID_AND_ATTRIBUTES whose first member is the SID pointer.
+        sid_pointer = ctypes.cast(
+            buffer, ctypes.POINTER(ctypes.c_void_p)
+        ).contents.value
+        string_sid = ctypes.c_wchar_p()
+        if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(string_sid)):
+            raise OSError(f"ConvertSidToStringSidW failed ({ctypes.get_last_error()})")
+        try:
+            value = string_sid.value or ""
+        finally:
+            kernel32.LocalFree(
+                ctypes.cast(string_sid, ctypes.c_void_p)
+            )
+    finally:
+        kernel32.CloseHandle(token)
+
+    if not value.startswith("S-1-"):
+        raise OSError("could not identify the current Windows account for ACL hardening")
+    return f"*{value}"
+
+
+_CACHED_PRINCIPAL: str | None = None
+
+
+def _acl_principal() -> str:
+    """Cached principal for ``icacls``.
+
+    The identity of the process owner cannot change while the process
+    runs, so this is resolved at most once.  The previous code paid for
+    an account lookup on every single hardening call.
+    """
+    global _CACHED_PRINCIPAL
+    if _CACHED_PRINCIPAL is None:
+        _CACHED_PRINCIPAL = _current_user_sid()
+    return _CACHED_PRINCIPAL
+
+
 def restrict_path_permissions(path: str | Path, *, recursive: bool = False) -> None:
     """Restrict ``path`` to the current user, raising if enforcement fails.
 
-    POSIX uses mode 0600/0700.  Windows uses ``icacls`` because ``chmod`` does
-    not provide a meaningful owner-only ACL there.
+    POSIX uses mode 0600/0700.  Windows uses ``icacls`` because ``chmod``
+    does not provide a meaningful owner-only ACL there.  The ``icacls``
+    child is started through :mod:`utils.proc`, so it runs with no
+    console window and its exit code and output are logged.
     """
     target = Path(path).resolve()
     if not target.exists():
@@ -166,29 +276,44 @@ def restrict_path_permissions(path: str | Path, *, recursive: bool = False) -> N
                 os.chmod(child, child_mode)
         return
 
-    whoami = subprocess.run(
-        ["whoami"], capture_output=True, text=True, timeout=10, check=False,
-    )
-    principal = whoami.stdout.strip()
-    if whoami.returncode != 0 or not principal or "\n" in principal or "\r" in principal:
-        raise OSError("could not identify the current Windows account for ACL hardening")
+    from utils.proc import run_hidden
 
+    principal = _acl_principal()
     grant = f"{principal}:(OI)(CI)F" if target.is_dir() else f"{principal}:(F)"
     command = ["icacls", str(target), "/inheritance:r", "/grant:r", grant, "/Q"]
     if recursive and target.is_dir():
         command.extend(["/T", "/C"])
-    result = subprocess.run(
-        command, capture_output=True, text=True, timeout=60, check=False,
-    )
+
+    result = run_hidden(command, purpose="acl-harden", timeout=60)
     if result.returncode != 0:
         raise OSError("Windows ACL hardening failed")
+
+
+_HARDENED_DIRECTORIES: set[str] = set()
+
+
+def harden_directory_once(directory: str | Path) -> None:
+    """Apply owner-only permissions to ``directory`` at most once per process.
+
+    A directory's ACL does not drift while the app is running, so
+    re-applying it on every write is pure cost.  It used to be a
+    *visible* cost: each application spawned ``icacls`` (and, before it,
+    ``whoami``), and ``AppConfig.save()`` alone triggered three of them.
+    Config is saved whenever a setting or an option-bar control changes,
+    so a normal session produced bursts of console windows.
+    """
+    resolved = str(Path(directory).resolve())
+    if resolved in _HARDENED_DIRECTORIES:
+        return
+    restrict_path_permissions(resolved, recursive=False)
+    _HARDENED_DIRECTORIES.add(resolved)
 
 
 def write_private_text(path: str | Path, text: str) -> Path:
     """Atomically write UTF-8 authentication data with owner-only access."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    restrict_path_permissions(destination.parent, recursive=False)
+    harden_directory_once(destination.parent)
     temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     try:
         temporary.write_text(text, encoding="utf-8")

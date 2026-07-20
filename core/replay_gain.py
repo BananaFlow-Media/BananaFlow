@@ -509,9 +509,11 @@ def _analyse_with_rsgain(path: Path) -> bool:
     rsgain easy -q FILE  writes tags directly; no Python tag-writing needed.
     """
     try:
-        result = subprocess.run(
+        from utils.proc import run_hidden
+
+        result = run_hidden(
             ["rsgain", "easy", "-q", str(path)],
-            capture_output=True,
+            purpose="replaygain-rsgain",
             timeout=120,
         )
         if result.returncode == 0:
@@ -520,7 +522,7 @@ def _analyse_with_rsgain(path: Path) -> bool:
         logger.warning(
             "[ReplayGain] rsgain failed (rc=%d): %s",
             result.returncode,
-            result.stderr.decode(errors="replace"),
+            result.stderr,
         )
         return False
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:

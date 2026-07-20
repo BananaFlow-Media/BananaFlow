@@ -29,10 +29,17 @@ def test_widget_geometry_is_not_double_scaled(scale_factor):
     env.pop("QT_AUTO_SCREEN_SCALE_FACTOR", None)
     env["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 
+    # Decode as UTF-8 explicitly. qfluentwidgets prints a startup banner
+    # containing an emoji (📢) to stdout on import; under a non-UTF-8
+    # Windows locale (e.g. cp1252) the default text=True decoder raises
+    # UnicodeDecodeError on that byte in the pipe-reader thread, the marker
+    # is lost, and the check fails for a reason that has nothing to do with
+    # DPI. Pinning the codec makes the probe's output readable everywhere.
     result = subprocess.run(
         [sys.executable, str(PROBE)],
         cwd=str(REPO_ROOT), env=env,
-        capture_output=True, text=True, timeout=90)
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=90)
 
     # The success marker is written and flushed before any interpreter
     # teardown, and this Windows/offscreen/Qt combination has a known,
