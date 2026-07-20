@@ -1,13 +1,24 @@
 """Cooperative QThreads for explicit online metadata and Artwork requests."""
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QThread, Signal
 import httpx
 
 from core.metadata_lookup import (
-    ArtworkResult, CancellationToken, LookupState, ProviderError,
+    ArtworkResult, CancellationToken, LookupResult, LookupState, ProviderError,
     ProviderErrorKind, ReleaseDetailResult,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _unknown_provider_error() -> ProviderError:
+    """The retryable catch-all a worker reports when nothing else matched."""
+    return ProviderError(
+        ProviderErrorKind.UNKNOWN, "meta_online_provider_error", True,
+    )
 
 
 class MetadataLookupWorker(QThread):
@@ -23,7 +34,19 @@ class MetadataLookupWorker(QThread):
         self.token.cancel()
 
     def run(self) -> None:
-        self.result_ready.emit(self.provider.lookup(self.request, self.token))
+        # ``result_ready`` is the only thing that takes the panel out of its
+        # "searching" state. An exception escaping here emitted nothing and
+        # printed the traceback to a stderr that does not exist in a
+        # windowed build, so the lookup appeared to hang forever.
+        try:
+            self.result_ready.emit(self.provider.lookup(self.request, self.token))
+        except Exception:                   # noqa: BLE001 - must not escape a QThread
+            logger.exception("Online metadata lookup failed")
+            self.result_ready.emit(LookupResult(
+                request=self.request,
+                state=LookupState.ERROR,
+                error=_unknown_provider_error(),
+            ))
 
 
 class ReleaseDetailWorker(QThread):
@@ -36,7 +59,17 @@ class ReleaseDetailWorker(QThread):
     def cancel(self) -> None: self.token.cancel()
 
     def run(self) -> None:
-        self.result_ready.emit(self.provider.lookup_release_detail(self.request, self.token))
+        try:
+            self.result_ready.emit(
+                self.provider.lookup_release_detail(self.request, self.token)
+            )
+        except Exception:                   # noqa: BLE001 - must not escape a QThread
+            logger.exception("Release detail lookup failed")
+            self.result_ready.emit(ReleaseDetailResult(
+                request=self.request,
+                state=LookupState.ERROR,
+                error=_unknown_provider_error(),
+            ))
 
 
 class ArtworkLookupWorker(QThread):

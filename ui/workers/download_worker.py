@@ -175,6 +175,22 @@ class DownloadWorker(QThread):
     # ── QThread.run ───────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        """Blocking call on the QThread — delegates entirely to orchestrator."""
-        delay_range = self._cfg.download_delay_range
-        self._orch.run_batch(self._jobs, delay_range=delay_range)
+        """Blocking call on the QThread — delegates entirely to orchestrator.
+
+        The guard is not defensive padding.  ``all_finished`` is what
+        returns the UI from its "downloading" state; if ``run_batch``
+        raised, that signal was never emitted, the download button stayed
+        disabled, and the traceback went to ``sys.stderr`` — which does
+        not exist in a windowed build.  The visible result was a click
+        that did nothing, permanently and with no error message.
+        """
+        try:
+            delay_range = self._cfg.download_delay_range
+            self._orch.run_batch(self._jobs, delay_range=delay_range)
+        except Exception as exc:            # noqa: BLE001 - must not escape a QThread
+            logger.exception("[DownloadWorker] Batch failed with an unhandled error")
+            from utils.security import redact_text
+            self.status_msg.emit(redact_text(exc))
+            # Release the UI. A None outcome is the established "batch did
+            # not produce a result" value for this signal.
+            self.all_finished.emit(None)

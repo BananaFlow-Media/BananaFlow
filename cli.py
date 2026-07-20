@@ -499,4 +499,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # See the note in main.py: mandatory for a frozen build so a
+    # multiprocessing child never re-runs this entry point.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     sys.exit(main())

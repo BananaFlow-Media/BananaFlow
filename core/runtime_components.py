@@ -346,10 +346,52 @@ def activate_bundled_components() -> BundledComponents:
         _configure_provider_script_environment(info)
 
     if info.plugins_dir is not None:
-        _register_plugin_dir(info.plugins_dir)
+        _defer_plugin_dir(info.plugins_dir)
 
     _activated = True
     return info
+
+
+_PENDING_PLUGIN_DIR: Optional[Path] = None
+
+
+def _defer_plugin_dir(plugins_dir: Path) -> None:
+    """Remember a plugin dir to register the first time yt-dlp is used.
+
+    Registering eagerly means importing ``yt_dlp`` during startup, and
+    that import is expensive: it pulls in yt-dlp's extractor machinery
+    before the main window exists.  Measured on the 1.0.0 Windows build,
+    startup spent roughly nine seconds inside
+    :func:`activate_bundled_components` for this reason alone, with
+    nothing on screen.
+
+    Deferring costs nothing, because in a frozen build the
+    executable-adjacent ``yt-dlp-plugins`` folder is the one yt-dlp's own
+    loader auto-discovers with no configuration at all — the explicit
+    registration only ever mattered for source-dev and non-standard
+    layouts, and those reach it through
+    :func:`ensure_plugin_dir_registered` before the first yt-dlp call.
+    """
+    global _PENDING_PLUGIN_DIR
+    _PENDING_PLUGIN_DIR = plugins_dir
+    # If yt-dlp is already imported the cost is already paid, so there is
+    # no reason to wait.
+    if "yt_dlp" in sys.modules:
+        ensure_plugin_dir_registered()
+
+
+def ensure_plugin_dir_registered() -> None:
+    """Flush a deferred plugin-dir registration.  Idempotent, never raises.
+
+    Call immediately before the first yt-dlp use.  By then importing
+    ``yt_dlp`` is free — the caller is about to import it anyway.
+    """
+    global _PENDING_PLUGIN_DIR
+    pending = _PENDING_PLUGIN_DIR
+    if pending is None:
+        return
+    _PENDING_PLUGIN_DIR = None
+    _register_plugin_dir(pending)
 
 
 def _configure_provider_script_environment(info: BundledComponents) -> None:
