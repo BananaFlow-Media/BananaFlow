@@ -1,0 +1,11 @@
+title = "BananaFlow secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated, ignored, or vendored build trees are not source inputs"
+paths = [
+  '''(^|/)(\.pytest_cache|\.tmp_appdata_.*|build|dist|test-evidence|venv)(/|$)''',
+  '''^packaging/(pot-provider-backend|pot-provider-cache|pot-provider-server|runtime|yt-dlp-plugins)/''',
+]

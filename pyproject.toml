@@ -1,0 +1,80 @@
+[build-system]
+# setuptools>=77 is the first release with stable PEP 639 support for the
+# SPDX `license` string + `license-files` fields used below; older
+# setuptools would fail the build on them.
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bananaflow"
+version = "1.0.0b1"
+description = "Desktop downloader for YouTube, YouTube Music, and Spotify — with GUI and CLI"
+requires-python = ">=3.10"
+readme = "README.md"
+# PEP 639: SPDX expression string. The old `license = { text = ... }` table
+# is rejected by setuptools >= 78, which broke every wheel build.
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "SOURCE_OFFER.md"]
+keywords = ["youtube", "spotify", "downloader", "music", "yt-dlp"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "yt-dlp[default]>=2026.6.9",
+    "yt-dlp-ejs",
+    "ffmpeg-python>=0.2.0",
+    "pyloudnorm>=0.1.1",
+    "soundfile>=0.12.1",
+    "mutagen>=1.47.0",
+    "syncedlyrics>=0.4.0",
+    "send2trash>=1.8.0",
+    "PySide6>=6.8.0",
+    "PySide6-Fluent-Widgets>=1.11.0",
+    "requests>=2.31.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.2.0",
+    "ytmusicapi>=1.7.0",
+    "Pillow>=12.3.0",
+    "python-dotenv>=1.0.1",
+    "certifi>=2025.1.1",
+    # Global hotkeys. Windows-only: on macOS/Linux the `keyboard` library
+    # needs root privileges, so we omit it there and the app falls back to
+    # "hotkeys disabled" gracefully (see ui/app_window._register_hotkeys).
+    "keyboard>=0.13.5; sys_platform == 'win32'",
+    "playwright>=1.42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]
+# Source/venv opt-in for the same GPL v3 bgutil provider plugin pinned
+# by the public Windows build. The packaged build also stages the upstream
+# Deno script backend and configures yt-dlp's official server_home path.
+# See THIRD_PARTY_NOTICES.md for license/source notices.
+po-token = [
+    "bgutil-ytdlp-pot-provider==1.3.1",
+]
+
+[project.scripts]
+bananaflow = "main:main"
+bananaflow-cli = "cli:main"
+
+# Top-level modules the entry points need at import time. packages.find
+# below only collects the core/ui/utils packages, so without this list a
+# non-editable `pip install` produced wheels whose `bananaflow` / `bananaflow-cli`
+# scripts failed with ModuleNotFoundError: main / cli / config / version.
+[tool.setuptools]
+py-modules = ["main", "cli", "config", "config_migrate", "error_handler", "version"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "ui*", "utils*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

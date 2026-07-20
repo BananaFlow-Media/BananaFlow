@@ -1,0 +1,43 @@
+# ── Core downloading engine ──────────────────────────────────────────────────
+# The [default] extra pins an exact matching yt-dlp-ejs release (YouTube JS
+# player logic) as a transitive dependency — do not also list yt-dlp-ejs
+# separately, it would just be an unpinned duplicate of that same pin.
+yt-dlp[default]>=2026.6.9  # The heart of the downloading engine (plus JS solvers)
+
+# PO Token Provider plugin: not a source-tree runtime requirement, but
+# the public Windows build pins and stages bgutil-ytdlp-pot-provider
+# plus its upstream Deno script backend via packaging/stage_pot_provider.py.
+# The provider is GPL v3-compatible with BananaFlow's GPL-3.0-or-later release.
+# Source/venv developers can still opt in with:
+#     pip install "bgutil-ytdlp-pot-provider==1.3.1"
+# BananaFlow passes yt-dlp the provider's official server_home argument when
+# the bundled backend is present; it never generates, stores, or injects
+# PO Tokens itself. See THIRD_PARTY_NOTICES.md for license notices.
+
+# ── Audio & Video post-processing ─────────────────────────────────────────────
+ffmpeg-python>=0.2.0       # Python bindings for media probing
+pyloudnorm>=0.1.1          # ReplayGain fallback (optional; rsgain binary preferred)
+soundfile>=0.12.1          # Required by pyloudnorm
+
+# ── Metadata & tag writing ────────────────────────────────────────────────────
+mutagen>=1.47.0            # Read/write metadata (MP3, MP4, FLAC, etc.)
+syncedlyrics>=0.4.0        # Lyrics (disabled by default)
+send2trash>=1.8.0          # Recycle Bin deletes for the Tag Editor (files & folders)
+
+# ── GUI Framework (PySide6 + Fluent Widgets) ──────────────────────────────────
+PySide6>=6.8.0                         # Latest stable Qt6 bindings
+PySide6-Fluent-Widgets>=1.11.0         # Adjusted to available versions
+
+# ── Networking & Scraping (The new "Universal" engine) ───────────────────────
+requests>=2.31.0           # Standard HTTP for thumbnails & updates
+httpx>=0.27.0              # Async HTTP - Crucial for the new page scraper
+beautifulsoup4>=4.12.0     # HTML parsing for deep link extraction
+lxml>=5.2.0                # Faster parser backend for BeautifulSoup
+ytmusicapi>=1.7.0          # Already added in Phase 1
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+Pillow>=12.3.0             # Image handling; 12.3.0 includes current security fixes
+python-dotenv>=1.0.1       # Environment variables (.env)
+certifi>=2025.1.1          # Ensure SSL certificates are up to date
+keyboard>=0.13.5; sys_platform == "win32"   # Global hotkeys — Windows only (needs root on macOS/Linux); app degrades gracefully
+playwright>=1.42.0         # Headless browser for scraping platform logic
