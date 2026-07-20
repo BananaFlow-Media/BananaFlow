@@ -75,15 +75,18 @@ def _node_major_version(version_output: str) -> Optional[int]:
 
 
 def _get_node_version_output(node_path: str) -> str:
-    """Run ``<node_path> --version`` and return stdout, or '' on any failure."""
-    try:
-        result = subprocess.run(
-            [node_path, "--version"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return result.stdout or ""
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    """Run ``<node_path> --version`` and return stdout, or '' on any failure.
+
+    node is a console program, so from a windowed build this must be
+    launched hidden or it flashes a console window during runtime
+    detection — which happens on the way into every yt-dlp call.
+    """
+    from utils.proc import run_hidden
+
+    result = run_hidden(
+        [node_path, "--version"], purpose="js-runtime-version", timeout=5,
+    )
+    return result.stdout or ""
 
 
 def _detect_js_runtimes() -> dict[str, dict]:
@@ -106,7 +109,14 @@ def _detect_js_runtimes() -> dict[str, dict]:
 def _detect_bundled_pot_provider_args() -> dict[str, dict[str, list[str]]]:
     """Return official yt-dlp extractor args for a bundled PO provider."""
     try:
-        from core.runtime_components import bundled_pot_provider_extractor_args
+        from core.runtime_components import (
+            bundled_pot_provider_extractor_args,
+            ensure_plugin_dir_registered,
+        )
+        # Startup deliberately skips this to avoid importing yt-dlp before
+        # the main window exists. Every path that builds yt-dlp options
+        # passes through here, which is the correct, cheap moment to do it.
+        ensure_plugin_dir_registered()
         return bundled_pot_provider_extractor_args()
     except Exception:
         return {}

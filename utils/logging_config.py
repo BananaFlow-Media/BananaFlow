@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from utils.security import RedactingFormatter, restrict_path_permissions
+from utils.security import RedactingFormatter, harden_directory_once
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -101,8 +101,20 @@ def setup_logging(
         resolved_dir = Path(log_dir)
 
     resolved_dir.mkdir(parents=True, exist_ok=True)
-    restrict_path_permissions(resolved_dir)
     log_path = resolved_dir / _LOG_FILE
+
+    # Harden the log directory, but never let that kill startup. This runs
+    # at import time in main.py, before QApplication exists and before any
+    # handler is attached, so an exception here used to escape as an
+    # unhandled error with no log line and no window — the user saw only a
+    # bare crash dialog. Logs are redacted by RedactingFormatter, so a
+    # failed ACL tightening is a warning, not a reason to refuse to start.
+    # It is recorded below, once handlers exist to record it.
+    hardening_error = ""
+    try:
+        harden_directory_once(resolved_dir)
+    except Exception as exc:                # noqa: BLE001 - reported below
+        hardening_error = str(exc)
 
     # ── Root logger ───────────────────────────────────────────────────────
     root = logging.getLogger()
@@ -139,4 +151,8 @@ def setup_logging(
     logging.getLogger(__name__).info(
         "Logging initialised  (debug=%s, path=%s)", debug, log_path,
     )
+    if hardening_error:
+        logging.getLogger(__name__).warning(
+            "Could not restrict permissions on the log directory: %s", hardening_error,
+        )
     return resolved_dir

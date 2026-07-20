@@ -819,16 +819,15 @@ def _run_bundled_provider_script_version(info) -> tuple[bool, str, str]:
     env["DENO_NO_UPDATE_CHECK"] = "1"
     env["FORCE_COLOR"] = "false"
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            env=env,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, "", str(exc)
+    # Deno is a console program; from a windowed build an unhidden launch
+    # puts a black window on screen for the length of the health check.
+    from utils.proc import run_hidden
+
+    result = run_hidden(
+        cmd, purpose="pot-provider-healthcheck", timeout=90, env=env,
+    )
+    if result.error or result.timed_out:
+        return False, "", result.error
 
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()

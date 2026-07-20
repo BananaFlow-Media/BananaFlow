@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from utils.proc import ProcessResult
 from utils.security import REDACTED, RedactingFormatter, redact_data, redact_text
 
 
@@ -108,9 +109,11 @@ def test_hls_debug_log_never_contains_cookie_or_sensitive_url(
     output.write_bytes(b"media")
     monkeypatch.setattr(hls_downloader, "_find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
-        hls_downloader.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stderr=""),
+        hls_downloader,
+        "run_hidden",
+        lambda *_args, purpose="", **_kwargs: ProcessResult(
+            purpose=purpose, program="ffmpeg", returncode=0,
+        ),
     )
 
     caplog.set_level(logging.DEBUG, logger=hls_downloader.__name__)
