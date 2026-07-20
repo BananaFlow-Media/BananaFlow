@@ -1,0 +1,50 @@
+name: 🌐 Site Compatibility
+description: A specific (non-YouTube/Spotify) site doesn't work, or a previously-working site broke.
+title: "[Site]: "
+labels: ["bug", "downloader", "needs reproduction"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+    validations:
+      required: true
+  - type: input
+    id: site
+    attributes:
+      label: Site (domain, not necessarily the exact private URL)
+      placeholder: e.g. example.com
+    validations:
+      required: true
+  - type: dropdown
+    id: extraction-path
+    attributes:
+      label: Which extraction path do you think is involved?
+      options:
+        - "Not sure"
+        - yt-dlp (site the tool normally supports)
+        - Generic/universal extractor (HLS/DASH stream interception)
+        - Generic paginated listing scraper
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: No media detected, wrong media detected, crashes, hangs, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output (reviewed for secrets before pasting)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: I understand generic-site support is best-effort, not guaranteed (see docs/legal/acceptable-use.md)
+          required: true

@@ -1,0 +1,44 @@
+name: ♿ Accessibility Problem
+description: Screen reader, keyboard navigation, high-contrast, RTL layout, or DPI-scaling issue.
+title: "[Accessibility]: "
+labels: ["bug", "accessibility", "needs reproduction"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+    validations:
+      required: true
+  - type: dropdown
+    id: assistive-tech
+    attributes:
+      label: Assistive technology / setting involved
+      options:
+        - Screen reader (NVDA/JAWS/Narrator/VoiceOver)
+        - Keyboard-only navigation
+        - High-contrast theme
+        - RTL (Hebrew) layout
+        - Display scaling / DPI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: Focus order wrong, element not announced, mirrored layout broken, text clipped at this DPI, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true

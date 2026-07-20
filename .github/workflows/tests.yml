@@ -1,0 +1,105 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # Windows is the release platform and the blocking gate. The ubuntu leg is
+    # kept for quick feedback but is NON-BLOCKING: the test suite is written
+    # Windows-first, and a handful of pre-existing tests assume Windows
+    # semantics that do not hold on Linux — hardcoded C:\ path literals
+    # (test_tag_editor_navigation_phase3), a case-insensitive filesystem for
+    # case-swap renames (test_tag_action_engine_phase9), and OS-specific file
+    # identity for own-operation classification (test_own_operation_suppression
+    # _phase13). These never ran on ubuntu before, because the single-process
+    # suite always crashed earlier (finding F-16); the isolated runner surfaced
+    # them. Porting the suite to Linux is real work, but separate from the
+    # v0.2.0 release closure, so it must not block it. The failures stay VISIBLE
+    # in the ubuntu logs and evidence artifact rather than being skipped.
+    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the release target and the blocking gate; ubuntu is
+        # non-blocking feedback (see continue-on-error above).
+        os: [windows-latest, ubuntu-latest]
+        # pyproject.toml requires-python = ">=3.10"; cover the lower bound
+        # and current stable versions.
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Qt runtime shared libraries (Linux only)
+        # ubuntu-latest runners have no Qt system libraries at all. Even
+        # the "offscreen" platform plugin (no real display needed) still
+        # dynamically links against these — without them PySide6 fails
+        # to *import*, not just to show a window, which would turn every
+        # GUI test into a hard error instead of the intended real run.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: Install the real application dependencies
+        # Installs from pyproject.toml's own dependency list (the "dev"
+        # extra adds pytest/pytest-mock) instead of a hand-typed,
+        # independently-maintained package list, so CI can never drift
+        # from what `pip install .` actually gives a user: this used to
+        # omit PySide6/PySide6-Fluent-Widgets/playwright entirely (silently
+        # skipping every GUI test in CI), add curl_cffi (not a project
+        # dependency anywhere — only yt-dlp's own vendored copy uses it),
+        # and pin yt-dlp below pyproject's real ">=2026.6.9" baseline.
+        # No Playwright browser binary is installed: nothing in the suite
+        # launches a real browser (see TestPlaywrightDegradation), only the
+        # Python package needs to be importable, so `playwright install
+        # chromium` would just add ~300MB of download for zero coverage.
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+        shell: bash
+
+      - name: Run full test suite (isolated, fresh process per file)
+        # The whole suite in one process is unreliable on BOTH platforms, so the
+        # gate uses the isolated runner everywhere (finding F-16). On Windows it
+        # dies natively at 0xC0000005 partway through with no summary —
+        # accumulated Qt state across GUI test files. On Linux a single Windows-
+        # only test faking os.name once turned into a session-ending
+        # INTERNALERROR that took the rest of the run down with it. The isolated
+        # runner gives every tracked file its own interpreter and reads the real
+        # child exit code, so a failure is contained to its file and the gate
+        # reflects the suite's actual state. It fails on a logical failure, a
+        # collection error, a timeout, a missing result, or an unclassified
+        # native exit. The plain `pytest tests/` command stays available for
+        # local single-file diagnosis (see the README) — it is just not the gate.
+        run: |
+          python scripts/run_isolated_tests.py --evidence-dir test-evidence
+        shell: bash
+        env:
+          PYTHONPATH: .
+
+      - name: Upload isolated test evidence
+        # Uploaded even when the gate fails — a red leg is exactly when the
+        # per-file exit codes and logs are worth reading.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: test-evidence-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: test-evidence/
+          if-no-files-found: warn
+          retention-days: 14

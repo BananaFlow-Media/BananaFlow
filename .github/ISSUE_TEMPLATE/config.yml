@@ -1,0 +1,20 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/BananaFlow-Media/BananaFlow/security/advisories/new
+    about: >-
+      Do NOT open a public Issue for a security vulnerability. Use GitHub
+      private vulnerability reporting instead. See SECURITY.md.
+  - name: 💬 Usage question / "how do I...?"
+    url: https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/help
+    about: Ask in Discussions → Help instead of opening an Issue.
+  - name: 🏗️ Large or architecture-changing proposal
+    url: https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development
+    about: >-
+      Align on the approach in Discussions → Development before investing
+      in a large PR. See CONTRIBUTING.md.
+  - name: 🌐 Translation / RTL coordination
+    url: https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations
+    about: >-
+      For terminology, wording or RTL conventions across the UI. A single
+      wrong or missing string is an Issue — use the Hebrew/Translation form.

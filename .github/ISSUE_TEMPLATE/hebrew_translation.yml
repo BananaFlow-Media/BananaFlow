@@ -1,0 +1,46 @@
+name: 🇮🇱 Hebrew / Translation
+description: A Hebrew (or English) UI string is wrong, missing, untranslated, or mistranslated.
+title: "[i18n]: "
+labels: ["translation", "needs reproduction"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+    validations:
+      required: true
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - Hebrew
+        - English
+        - Both / RTL-LTR mismatch
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Where in the app (screen/dialog/button)
+    validations:
+      required: true
+  - type: textarea
+    id: current-text
+    attributes:
+      label: Current text (copy/paste exactly, or a screenshot description)
+    validations:
+      required: true
+  - type: textarea
+    id: suggested-text
+    attributes:
+      label: What it should say instead, and why
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true

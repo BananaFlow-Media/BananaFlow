@@ -1,0 +1,19 @@
+# CODEOWNERS — approved at HUMAN GATE 8 (2026-07-17), Phase 9.
+# See MAINTAINERS.md for the corresponding maintainer roster.
+#
+# Order matters: later patterns override earlier ones. A pattern with no
+# matching pattern below it falls through to the global owner at the top.
+
+* @cdtauman
+
+# Security-sensitive paths get the same reviewer today (sole maintainer),
+# listed explicitly so this file documents intent even before a second
+# maintainer exists — a future second maintainer could take ownership of
+# a subset of these without touching the rest of the file.
+/core/cookie_wizard.py        @cdtauman
+/utils/security.py            @cdtauman
+/core/runtime_components.py   @cdtauman
+/utils/yt_dlp_opts.py          @cdtauman
+/SECURITY.md                   @cdtauman
+/.github/workflows/            @cdtauman
+/packaging/                    @cdtauman

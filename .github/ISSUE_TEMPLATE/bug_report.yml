@@ -1,0 +1,83 @@
+name: 🐛 Bug Report
+description: Something isn't working as expected (general bug, not a more specific category below).
+title: "[Bug]: "
+labels: ["bug", "needs reproduction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! If this is about installation, a
+        specific download failing, a specific site, the Converter, the
+        Tag Editor, accessibility, or a translation, please use the more
+        specific template instead — it collects the right details faster.
+
+        **Never paste cookies, tokens, passwords, or a live PO Token
+        value.** Review logs before pasting them.
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+      placeholder: e.g. 0.2.0 (Help → About, or `bananaflow-cli --version`)
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows 10/11
+        - macOS
+        - Linux (unsupported/experimental)
+    validations:
+      required: true
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: Install type
+      options:
+        - Packaged installer (.exe)
+        - Portable ZIP
+        - Source / pip install
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`bananaflow-cli --doctor` output (or Settings → YouTube Doctor)"
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output (reviewed for secrets before pasting)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: I did not include any cookies, tokens, passwords, or a live PO Token value
+          required: true

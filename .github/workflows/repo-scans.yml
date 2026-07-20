@@ -1,0 +1,131 @@
+name: Repository scans
+
+# Repository-hygiene gates that protect the public BananaFlow identity
+# and the contributor-attribution policy:
+#   * identity-scan     — no retired product identity may reappear.
+#   * attribution-scan  — no AI/bot author, committer or co-author
+#                         trailer may enter the history.
+#   * local-path-scan   — no contributor's local filesystem paths.
+#   * link-check        — no dead or retired repository URLs in docs.
+#
+# The app-data path-routing rule (no hard-coded app-data literals
+# outside utils/paths.py) is enforced by
+# tests/test_p0_gates.py::TestAppDataPathRouting in the Tests workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  identity-scan:
+    name: Identity scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Scan for retired identity strings
+        run: |
+          set -u
+          # Case-insensitive scan over every tracked text file. There is no
+          # allow-list: the retired identity must not appear anywhere in
+          # this repository, including docs and comments. The pattern is
+          # assembled from fragments so this workflow never contains the
+          # forbidden token itself.
+          pat="yt""spot|tauman""software"
+          matches=$(git grep -I -n -i -E "$pat" -- . || true)
+          if [ -n "$matches" ]; then
+            echo "Retired identity strings found:" >&2
+            echo "$matches" >&2
+            exit 1
+          fi
+          echo "Identity scan clean."
+
+  attribution-scan:
+    name: Attribution scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+      - name: Verify authors, committers and trailers
+        run: |
+          set -u
+          fail=0
+          # 1. No AI or bot identity as author or committer, anywhere.
+          bad_ids=$(git log --all --format='%h %an <%ae> | %cn <%ce>' \
+            | grep -iE 'claude|anthropic|\[bot\]|github-actions|copilot' || true)
+          if [ -n "$bad_ids" ]; then
+            echo "Forbidden author/committer identities:" >&2
+            echo "$bad_ids" >&2
+            fail=1
+          fi
+          # 2. No AI/bot co-author or sign-off trailers, and no AI
+          #    generation credits in any commit message.
+          bad_msgs=$(git log --all --format='%h %B%x00' \
+            | tr '\0' '\n' \
+            | grep -iE 'co-authored-by:.*(claude|anthropic|bot)|signed-off-by:.*(claude|anthropic|bot)|generated with.*(claude|ai)|created with.*(claude|ai)' \
+            || true)
+          if [ -n "$bad_msgs" ]; then
+            echo "Forbidden commit-message attribution:" >&2
+            echo "$bad_msgs" >&2
+            fail=1
+          fi
+          # 3. The root commit must be parentless (independent history).
+          roots=$(git rev-list --max-parents=0 HEAD | wc -l)
+          if [ "$roots" -ne 1 ]; then
+            echo "Expected exactly one parentless root commit, found $roots." >&2
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] && echo "Attribution scan clean."
+          exit "$fail"
+
+  local-path-scan:
+    name: Local path scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Scan for contributor filesystem paths
+        run: |
+          set -u
+          matches=$(git grep -I -n -E '[Cc]:[/\\]+Users[/\\]|/Users/[a-z]|%USERPROFILE%' -- . \
+            ':!.github/workflows/repo-scans.yml' || true)
+          if [ -n "$matches" ]; then
+            echo "Local filesystem paths found in tracked files:" >&2
+            echo "$matches" >&2
+            exit 1
+          fi
+          echo "Local path scan clean."
+
+  link-check:
+    name: Markdown link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Verify internal links resolve
+        run: |
+          python3 - <<'PYEOF'
+          import re, subprocess, sys
+          from pathlib import Path
+
+          files = subprocess.run(
+              ["git", "ls-files", "*.md"],
+              capture_output=True, text=True, check=True,
+          ).stdout.split()
+          link_re = re.compile(r"\]\(([^)]+)\)")
+          fail = False
+          for name in files:
+              f = Path(name)
+              for link in link_re.findall(f.read_text(encoding="utf-8")):
+                  target = link.split("#", 1)[0].strip()
+                  if not target or target.startswith(("http://", "https://", "mailto:")):
+                      continue
+                  if not (f.parent / target).exists() and not Path(target).exists():
+                      print(f"Broken relative link in {name} -> {link}", file=sys.stderr)
+                      fail = True
+          if fail:
+              sys.exit(1)
+          print("Link check clean.")
+          PYEOF

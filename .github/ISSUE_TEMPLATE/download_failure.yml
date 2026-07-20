@@ -1,0 +1,60 @@
+name: ⬇️ Download Failure
+description: A specific download (video/audio/playlist) fails, stalls, or produces a broken file.
+title: "[Download]: "
+labels: ["bug", "downloader", "needs reproduction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this only happens on one particular site (not YouTube/Spotify/
+        YouTube Music), use "Site Compatibility" instead.
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source
+      options:
+        - YouTube
+        - YouTube Music
+        - Spotify (metadata match → YouTube)
+        - Other/generic site
+    validations:
+      required: true
+  - type: input
+    id: url-type
+    attributes:
+      label: URL type (not necessarily the exact private URL)
+      placeholder: single video / playlist / channel / album / artist discography
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: Error message, stalls at X%, wrong format, corrupted output, PO Token error, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`bananaflow-cli --doctor` output (especially the PO Token Provider line)"
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output (reviewed for secrets/cookies/tokens before pasting)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: I did not include cookies, tokens, or a live PO Token value
+          required: true

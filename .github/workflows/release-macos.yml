@@ -1,0 +1,365 @@
+name: Build macOS release
+
+# Runs only on:
+#   * Manual dispatch from the Actions tab.
+#   * Tags matching v*.*.* (e.g. v1.0.0).
+#
+# Targets Apple Silicon (arm64) via the macos-14 runner. On a tag push
+# this workflow:
+#   1. Installs all Python deps + Playwright Chromium (bundled into .app)
+#   2. Runs tests
+#   3. Stages LGPL FFmpeg (arm64) into packaging/ffmpeg/
+#   4. Builds dist/BananaFlow.app with PyInstaller
+#   5. Ad-hoc codesigns the bundle (no Apple Developer ID)
+#   6. Wraps the .app in a DMG + SHA-256 checksum
+#   7. Publishes / updates the GitHub Release with the DMG attached.
+#
+# NOTE: builds are unsigned/un-notarized. To enable Developer ID signing
+# + notarization later, add the secrets referenced in the (disabled)
+# "Notarize" step and replace the ad-hoc identity.
+#
+# NOTE: the bundled PO Token Provider stack (bgutil plugin + Deno script
+# backend + Deno runtime) is a *Windows-package* feature — see
+# release-windows.yml and scripts/build_windows.ps1. The macOS build does
+# not stage it; YouTube Doctor on macOS reports provider readiness
+# honestly based on what is installed on the user's machine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_ffmpeg:
+        description: "Bundle LGPL FFmpeg (arm64) downloaded at build time"
+        required: false
+        default: "true"
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: PyInstaller .app on macos-14 (arm64)
+    runs-on: macos-14
+    timeout-minutes: 60
+    # id-token/attestations are additive to the workflow-default contents:read,
+    # needed only for the provenance-attestation step below; nothing else in
+    # this job gains write access.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + build dependencies
+        run: |
+          python -m pip install --upgrade pip pyinstaller pytest pytest-mock
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright Python package + download Chromium to user cache
+        run: |
+          python -m pip install playwright
+          # Download Chromium to ~/Library/Caches/ms-playwright (the default macOS
+          # location). We do NOT bundle it inside the PyInstaller app because
+          # Chromium on macOS is a nested .app bundle that PyInstaller cannot
+          # re-codesign. At runtime the frozen app uses this cache location.
+          python -m playwright install chromium
+
+      - name: Read app version
+        id: ver
+        run: |
+          v=$(python -c "from version import FULL_VERSION; print(FULL_VERSION)")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "App version: $v"
+
+      - name: Verify the tag matches the application version
+        # A tag that disagrees with version.FULL_VERSION would attach a macOS DMG
+        # named for one version to a release for another. Fail before building.
+        # FULL_VERSION already carries any pre-release suffix, so the tag must
+        # match it exactly.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${{ github.ref_name }}"
+          expected="v${{ steps.ver.outputs.version }}"
+          if [ "$tag" != "$expected" ]; then
+            echo "Tag '$tag' does not match version.FULL_VERSION ('${{ steps.ver.outputs.version }}'); it would ship artifacts named $expected." >&2
+            exit 1
+          fi
+          echo "Tag $tag matches version.FULL_VERSION."
+
+      - name: Run isolated test gate (fresh process per file)
+        # NOT `pytest tests/`: the whole suite in one process segfaults at Qt
+        # teardown on macOS partway through (exit 139), the same accumulated-
+        # state condition finding F-16 replaced on Windows. This runner isolates
+        # every tracked file, reads the real child exit code, and classifies the
+        # post-teardown fault against the reviewed baseline (which records the
+        # macOS SIGSEGV as well). It fails on a logical failure, a collection
+        # error, a timeout, a missing result, or an unclassified native exit.
+        run: |
+          python scripts/run_isolated_tests.py --evidence-dir test-evidence
+
+      - name: Upload isolated test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: test-evidence-macos-${{ steps.ver.outputs.version }}
+          path: test-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Stage LGPL FFmpeg (arm64) for bundling
+        # Pinned to an exact evermeet.cx version, not "getrelease" (a mutable
+        # alias for whatever is currently published). The SHA-256 values
+        # were computed once from these exact assets and are verified before
+        # extraction; any mismatch fails the build closed rather than
+        # bundling an unverified binary.
+        #
+        # To move to a newer build: check
+        # https://evermeet.cx/ffmpeg/info/ffmpeg/release (and .../ffprobe/release)
+        # for the current version, download both zips, compute their
+        # SHA-256, and update the version + both hashes together.
+        if: ${{ github.event_name == 'push' || github.event.inputs.bundle_ffmpeg == 'true' }}
+        run: |
+          version="8.1.2"
+          # No associative arrays: macOS runners execute this via the
+          # system /bin/bash, which is bash 3.2 (Apple has frozen it at
+          # the last GPLv2 release) and lacks that bash 4+ feature.
+          # A plain `case` keeps this portable to bash 3.2.
+          mkdir -p packaging/ffmpeg
+          for tool in ffmpeg ffprobe; do
+            case "$tool" in
+              ffmpeg)  expected="e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69" ;;
+              ffprobe) expected="399b93f0b9862f69767afa343e90c2f48d7e7958cadbb6deb76a012d0e3b7ce3" ;;
+            esac
+            echo "Downloading $tool $version…"
+            curl -fsSL "https://evermeet.cx/ffmpeg/$tool-$version.zip" -o "$tool.zip"
+            actual=$(shasum -a 256 "$tool.zip" | awk '{print $1}')
+            if [ "$actual" != "$expected" ]; then
+              echo "FFmpeg checksum mismatch for $tool-$version.zip" >&2
+              echo "Expected: $expected" >&2
+              echo "Actual:   $actual" >&2
+              exit 1
+            fi
+            echo "$tool checksum verified: $actual"
+            unzip -oq "$tool.zip" -d packaging/ffmpeg
+            chmod +x "packaging/ffmpeg/$tool"
+            rm -f "$tool.zip"
+          done
+          file packaging/ffmpeg/ffmpeg packaging/ffmpeg/ffprobe
+
+      - name: Build .app with PyInstaller
+        run: |
+          python -m PyInstaller --noconfirm --clean packaging/bananaflow.spec
+          test -d dist/BananaFlow.app || (echo "BananaFlow.app missing" && exit 1)
+
+      - name: Copy Chromium into bundle (post-PyInstaller)
+        run: |
+          # Place ms-playwright in Contents/Resources/ (not Contents/MacOS/).
+          # codesign seals Contents/MacOS/ when signing the main executable;
+          # files in Contents/Resources/ are treated as opaque resources and
+          # codesign does not attempt to sign binaries there.
+          # main.py reads PLAYWRIGHT_BROWSERS_PATH = Contents/Resources/ms-playwright.
+          #
+          # Playwright's own ffmpeg-* directory is deliberately NOT copied:
+          # it exists only for Playwright's screen-recording feature
+          # (record_video / record_har), which no BananaFlow code path calls
+          # (issue #46; measured in
+          # docs/performance/PACKAGE_AND_RUNTIME_PROFILE.md Section A.2).
+          # yt-dlp's real FFmpeg is staged into packaging/ffmpeg above and
+          # covers every actual media-handling need. packaging/bananaflow.spec
+          # skips the same directory on the Windows side.
+          RESOURCES="dist/BananaFlow.app/Contents/Resources"
+          CACHE=~/Library/Caches/ms-playwright
+          mkdir -p "$RESOURCES/ms-playwright"
+          for dir in "$CACHE"/chromium-* "$CACHE"/chromium_headless_shell-*; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            echo "Copying $name …"
+            cp -R "$dir" "$RESOURCES/ms-playwright/$name"
+          done
+          echo "ms-playwright contents:"
+          ls "$RESOURCES/ms-playwright/"
+          if ls "$RESOURCES/ms-playwright/" | grep -q '^ffmpeg-'; then
+            echo "Playwright's unused recording ffmpeg was bundled (issue #46)" >&2
+            exit 1
+          fi
+
+      - name: Copy license/source notice docs into bundle (post-PyInstaller)
+        # BananaFlow is GPL-3.0-or-later and bundles LGPL FFmpeg, Chromium, Deno
+        # and the bgutil provider. The conveyed binary must carry the license
+        # texts and the written source offer. scripts/build_windows.ps1 has
+        # always done this for the portable folder/installer; the macOS path
+        # shipped a DMG with none of it until this step existed.
+        #
+        # Contents/Resources/ for the same reason as ms-playwright above, and
+        # before codesign so the signature covers the final bundle contents.
+        run: |
+          RESOURCES="dist/BananaFlow.app/Contents/Resources"
+          mkdir -p "$RESOURCES"
+          for doc in LICENSE LICENSES.md NOTICE SOURCE_OFFER.md \
+                     CONTRIBUTING.md THIRD_PARTY_NOTICES.md README.md; do
+            if [ ! -f "$doc" ]; then
+              echo "Required release notice doc is missing: $doc" >&2
+              exit 1
+            fi
+            cp "$doc" "$RESOURCES/$doc"
+            echo "  staged $doc"
+          done
+
+      - name: Ad-hoc codesign the bundle
+        run: |
+          # Ad-hoc signing only (sign identity "-"). This is NOT Developer ID
+          # signing and NOT notarization — see the disabled step below and the
+          # README. Sign only our own executables; Chromium lives in
+          # Contents/Resources/ so codesign does not scan it when sealing
+          # Contents/MacOS/.
+          codesign --force --sign - dist/BananaFlow.app/Contents/MacOS/bananaflow
+          codesign --force --sign - dist/BananaFlow.app/Contents/MacOS/bananaflow-cli
+          # Verify honestly: a failed verification must fail the build, not be
+          # swallowed. The bundle is ad-hoc signed, so --verify must pass.
+          codesign --verify --strict --verbose=2 dist/BananaFlow.app/Contents/MacOS/bananaflow
+          codesign --verify --strict --verbose=2 dist/BananaFlow.app/Contents/MacOS/bananaflow-cli
+          echo "Ad-hoc signature verified (not Developer ID, not notarized)."
+
+      # ── OPTIONAL: Developer ID signing + notarization ──────────────────────
+      # Enable by adding these repo secrets and removing the `if: false`:
+      #   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY,
+      #   AC_API_KEY_ID, AC_API_ISSUER_ID, AC_API_KEY_BASE64
+      # No disabled placeholder step is kept here: constant-false workflow
+      # conditions hide dead CI code and fail actionlint. Add a real signing
+      # step only when the documented secrets and release process are ready.
+
+      - name: Verify CLI smoke (require 0.2.0 + doctor)
+        run: |
+          cli="dist/BananaFlow.app/Contents/MacOS/bananaflow-cli"
+          reported=$("$cli" --version)
+          echo "CLI reports: $reported"
+          case "$reported" in
+            *"${{ steps.ver.outputs.version }}"*) : ;;
+            *) echo "Packaged CLI reports '$reported', not ${{ steps.ver.outputs.version }}." >&2; exit 1 ;;
+          esac
+          # --doctor is the packaged health check. Bundled FFmpeg is present;
+          # the PO Token Provider/Deno stack is a Windows-only bundle, so a
+          # non-zero doctor exit on macOS is expected and not failed here — we
+          # assert the command runs and reports its version line, which proves
+          # the frozen CLI and its bundled resources load on macOS.
+          set +e
+          doctor=$("$cli" --doctor 2>&1)
+          echo "$doctor"
+          set -e
+          echo "$doctor" | grep -q "${{ steps.ver.outputs.version }}" \
+            || { echo "doctor did not report version ${{ steps.ver.outputs.version }}" >&2; exit 1; }
+
+      - name: Create DMG + checksum
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          dmg="bananaflow-$v-macos-arm64.dmg"
+          staging="$(mktemp -d)"
+          cp -R dist/BananaFlow.app "$staging/"
+          ln -s /Applications "$staging/Applications"
+          # Also at the DMG root so the license terms and written source
+          # offer are visible on mount, not only after installing the .app.
+          for doc in LICENSE LICENSES.md NOTICE SOURCE_OFFER.md \
+                     THIRD_PARTY_NOTICES.md; do
+            cp "$doc" "$staging/$doc"
+          done
+          hdiutil create -volname "BananaFlow" \
+            -srcfolder "$staging" -ov -format UDZO "dist/$dmg"
+          rm -rf "$staging"
+          # Fail if the DMG is missing, empty, or structurally invalid.
+          test -s "dist/$dmg" || { echo "DMG missing or empty" >&2; exit 1; }
+          hdiutil verify "dist/$dmg"
+          size=$(stat -f%z "dist/$dmg")
+          echo "DMG: $dmg ($size bytes)"
+          ( cd dist && shasum -a 256 "$dmg" > SHA256SUMS-macos.txt )
+          cat dist/SHA256SUMS-macos.txt
+
+      - name: Generate build provenance attestation
+        # Binds the released DMG to this exact workflow run, commit, and
+        # builder identity via a signed, GitHub-hosted attestation.
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-path: dist/bananaflow-*-macos-arm64.dmg
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: bananaflow-${{ steps.ver.outputs.version }}-macos-arm64
+          path: |
+            dist/bananaflow-*-macos-arm64.dmg
+            dist/SHA256SUMS-macos.txt
+          if-no-files-found: error
+          retention-days: 60
+
+  publish-draft:
+    name: Attach verified macOS artifacts to a draft release
+    # RELEASE_STRATEGY.md section 5 makes Windows the only official Beta
+    # target and marks macOS "Experimental; not a supported public Beta
+    # target" pending Developer ID signing, notarization and real-Mac
+    # Gatekeeper acceptance. A pre-release (Beta) tag therefore must not
+    # carry a macOS DMG at all -- v0.2.1-beta.2 attached one anyway, which
+    # contradicted the approved platform policy.
+    #
+    # The DMG is still built, smoke-tested, attested and uploaded as a
+    # 60-day CI artifact by the build job above, so macOS testers can get
+    # it; it just is not a public release asset. Before a *stable* tag ever
+    # attaches one, the Phase 1 platform policy has to be revisited (that
+    # is a HUMAN GATE, not something this condition should decide silently).
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      && !contains(github.ref_name, '-')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified macOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: bananaflow-${{ needs.build.outputs.version }}-macos-arm64
+          path: dist
+
+      - name: Determine pre-release status from the tag
+        # Must match release-windows.yml's logic exactly: both workflows'
+        # publish-draft jobs target the same GitHub Release for this tag,
+        # so they need to agree on the prerelease flag they assert.
+        id: prerelease
+        run: |
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" == *-* ]]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release (draft)
+        # A v*.*.* tag fires this workflow AND release-windows.yml, and both
+        # target the same release for the tag. This step must therefore be as
+        # unable to publish as the Windows one: draft:true and make_latest:false
+        # so that attaching the macOS DMG can never flip the shared release from
+        # draft to public. Publishing stays a single deliberate human action.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          draft: true
+          make_latest: 'false'
+          prerelease: ${{ steps.prerelease.outputs.value }}
+          files: |
+            dist/bananaflow-*-macos-arm64.dmg
+            dist/SHA256SUMS-macos.txt
+          generate_release_notes: true
+          # Keeps this job from silently discarding whatever custom body
+          # release-windows.yml's job wrote to the same shared release --
+          # see that workflow's matching comment for what this fixed.
+          append_body: true

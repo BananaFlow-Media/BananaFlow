@@ -1,0 +1,473 @@
+name: Build Windows release
+
+# Runs only on:
+#   * Manual dispatch from the Actions tab — builds and verifies everything,
+#     and deliberately publishes NOTHING. This is the release dry run.
+#   * Tags matching v*.*.* — same build, plus a DRAFT GitHub Release.
+# It does NOT run on every push or PR, so dev cycles are not blocked by long
+# PyInstaller + Playwright builds.
+#
+# The build itself is delegated to scripts/build_windows.ps1 — the same script
+# a maintainer runs locally — so CI can never quietly ship a different product
+# than the documented one. Before it runs, CI stages the same release inputs
+# the script expects:
+#   * LGPL FFmpeg into packaging/ffmpeg/        (downloaded here)
+#   * Deno runtime into packaging/runtime/      (scripts/fetch_deno_runtime.ps1,
+#                                                pinned version, SHA-256 verified)
+# build_windows.ps1 then installs bgutil-ytdlp-pot-provider, stages the plugin
+# + Deno script backend via packaging/stage_pot_provider.py, runs PyInstaller,
+# copies the license/notice docs, and produces the portable ZIP.
+#
+# Release policy
+# --------------
+# A tag build produces a **draft** release. It is never published, never marked
+# latest, and never announced. Passing every automated gate below is a
+# necessary condition for a release, not a sufficient one: the manual and
+# clean-machine checks in docs/release/RELEASING.md have to
+# be performed by a human against these exact artifacts first. Publishing is a
+# separate, deliberate human action — see docs/release/RELEASING.md.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+# Read-only by default; the build job asks for the one extra scope it needs.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build_windows.ps1 + Inno Setup on windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 120
+    # id-token/attestations are additive to the workflow-default contents:read,
+    # needed only for the provenance-attestation step below; nothing else in
+    # this job gains write access.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller pytest pytest-mock
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright & download Chromium
+        shell: pwsh
+        run: |
+          python -m playwright install chromium --with-deps
+
+      - name: Read app version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (& python -c "from version import FULL_VERSION; print(FULL_VERSION)").Trim()
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "App version: $v"
+
+      - name: Verify the tag matches the application version
+        # A tag that disagrees with version.FULL_VERSION would produce artifacts
+        # whose filenames and embedded metadata contradict the release they are
+        # attached to. Fail before anything is built, not after it is uploaded.
+        # FULL_VERSION already carries any pre-release suffix (e.g.
+        # "1.0.0-beta.1"), so the tag must match it exactly.
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $expected = "v${{ steps.ver.outputs.version }}"
+          if ($tag -ne $expected) {
+            throw "Tag '$tag' does not match version.FULL_VERSION ('${{ steps.ver.outputs.version }}'); artifacts would be named for $expected. Bump version.py or retag."
+          }
+          Write-Host "Tag $tag matches version.FULL_VERSION."
+
+      - name: Run isolated test gate (fresh process per file)
+        # NOT `pytest tests/`: that runs all 117 files in one process, which on
+        # Windows dies natively at 0xC0000005 partway through without printing
+        # a summary (accumulated Qt state, finding F-16). This runner isolates
+        # every tracked file and reads its real exit code, so a green gate here
+        # means the suite is genuinely green.
+        shell: pwsh
+        run: |
+          python scripts\run_isolated_tests.py --evidence-dir test-evidence
+
+      - name: Upload isolated test evidence
+        # always(): a failed gate is exactly when the per-file exit codes,
+        # JUnit XML and logs need to be readable.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: test-evidence-${{ steps.ver.outputs.version }}
+          path: test-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Download FFmpeg (LGPL) for bundling
+        # Pinned to an exact, immutable BtbN release tag and asset — never
+        # the mutable "latest" tag/alias, which can silently change what a
+        # release build bundles between runs with no way to audit what
+        # shipped. The SHA-256 below was computed once from this exact
+        # asset and is verified before extraction; any mismatch (a changed
+        # asset, a compromised mirror, a transfer error) fails the build
+        # closed rather than bundling an unverified binary.
+        #
+        # To move to a newer build: pick a new tag from
+        # https://github.com/BtbN/FFmpeg-Builds/releases (not "latest"),
+        # download the matching *-win64-lgpl.zip asset, compute its
+        # SHA-256, and update all three values together.
+        shell: pwsh
+        run: |
+          $tag = "autobuild-2026-07-15-14-01"
+          $asset = "ffmpeg-N-125628-ga5e6c0175a-win64-lgpl.zip"
+          $expectedSha256 = "0c5b629d720a6f13cbc5f5a03b140dec6447aaf6b969220e483275912ebc6aed"
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag/$asset"
+
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg-lgpl.zip
+          $actualSha256 = (Get-FileHash -Path ffmpeg-lgpl.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actualSha256 -ne $expectedSha256) {
+            Remove-Item -Force ffmpeg-lgpl.zip -ErrorAction SilentlyContinue
+            throw "FFmpeg checksum mismatch for $asset`nExpected: $expectedSha256`nActual:   $actualSha256"
+          }
+          Write-Host "FFmpeg checksum verified: $actualSha256"
+
+          Expand-Archive -Path ffmpeg-lgpl.zip -DestinationPath ffmpeg-tmp
+          New-Item -ItemType Directory -Force -Path packaging\ffmpeg | Out-Null
+          Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffmpeg.exe"  | Select-Object -First 1 | Copy-Item -Destination packaging\ffmpeg\ffmpeg.exe
+          Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffprobe.exe" | Select-Object -First 1 | Copy-Item -Destination packaging\ffmpeg\ffprobe.exe
+          Remove-Item -Recurse -Force ffmpeg-tmp, ffmpeg-lgpl.zip
+
+      - name: Stage Deno runtime (pinned, SHA-256 verified)
+        shell: pwsh
+        run: |
+          pwsh scripts\fetch_deno_runtime.ps1
+          if (-not (Test-Path packaging\runtime\deno.exe)) { throw "packaging/runtime/deno.exe was not staged" }
+
+      - name: Build release with scripts/build_windows.ps1
+        shell: pwsh
+        run: |
+          # -SkipTests: the isolated gate above already ran the exact same
+          # runner the script would invoke. The script installs
+          # bgutil-ytdlp-pot-provider, stages the PO Token Provider plugin +
+          # Deno script backend, regenerates version_info.txt, runs
+          # PyInstaller, copies license/notice docs, and produces the portable
+          # ZIP + checksums.
+          pwsh scripts\build_windows.ps1 -RequireBundledFfmpeg -SkipTests
+
+      - name: Verify frozen build is PO-ready (staged files + doctor)
+        shell: pwsh
+        run: |
+          $dist = "dist\bananaflow"
+          # bananaflow.exe / bananaflow-cli.exe always sit at the top level, but
+          # PyInstaller 6.x's default one-folder layout collects every
+          # other bundled data/binary entry into an executable-adjacent
+          # "_internal" folder instead of the top level. This mirrors the
+          # same two-location search scripts/build_windows.ps1 already
+          # uses for FFmpeg (and utils.paths.get_bundled_ffmpeg_dir() at
+          # runtime) so this check accepts either layout instead of
+          # always failing against a real PyInstaller 6.x build.
+          $topLevel = @("$dist\bananaflow.exe", "$dist\bananaflow-cli.exe")
+          foreach ($path in $topLevel) {
+            if (-not (Test-Path $path)) { throw "Missing staged release input: $path" }
+          }
+
+          $relative = @(
+            "ffmpeg.exe",
+            "ffprobe.exe",
+            "runtime\deno.exe",
+            "yt-dlp-plugins\bgutil-ytdlp-pot-provider\yt_dlp_plugins\extractor\getpot_bgutil.py",
+            "yt-dlp-plugins\bgutil-ytdlp-pot-provider\yt_dlp_plugins\extractor\getpot_bgutil_script.py",
+            "pot-provider-backend\bgutil-ytdlp-pot-provider\server\src\generate_once.ts",
+            "pot-provider-backend\bgutil-ytdlp-pot-provider\server\node_modules"
+          )
+          $searchDirs = @($dist, "$dist\_internal")
+          foreach ($rel in $relative) {
+            $found = $false
+            foreach ($dir in $searchDirs) {
+              if (Test-Path (Join-Path $dir $rel)) { $found = $true; break }
+            }
+            if (-not $found) {
+              $NewLine = [Environment]::NewLine
+              $SearchedList = (($searchDirs | ForEach-Object { "  - $_\$rel" }) -join $NewLine)
+              throw "Missing staged release input (checked both locations):$NewLine$SearchedList"
+            }
+          }
+          Write-Host "All staged PO Token Provider / runtime files are present."
+
+          $reported = & "$dist\bananaflow-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "bananaflow-cli.exe --version failed" }
+          Write-Host "CLI reports: $reported"
+          if ($reported -notmatch [regex]::Escape("${{ steps.ver.outputs.version }}")) {
+            throw "Packaged CLI reports '$reported', which does not contain the build version ${{ steps.ver.outputs.version }}."
+          }
+
+          # --doctor runs the real bundled-provider health check (bundled
+          # Deno executes bgutil's generate_once.ts --version). This is
+          # the promise README/SOURCE_OFFER make for the public Windows
+          # package: 'PO Token Provider ready: yes' out of the box.
+          $doctor = & "$dist\bananaflow-cli.exe" --doctor
+          $doctor | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "bananaflow-cli.exe --doctor reported a failing blocking check" }
+          if (-not ($doctor -match 'PO Token Provider ready\s*:\s*yes')) {
+            throw "Frozen build is NOT PO-ready — the docs promise a bundled, healthy PO Token Provider stack."
+          }
+          if (-not ($doctor -match 'bundled with BananaFlow')) {
+            throw "Doctor did not report the bundled JS runtime as selected."
+          }
+
+      - name: Packaged Tag Editor smoke (the real EXE)
+        # Drives the packaged GUI through the production navigation path into
+        # the Tag Editor. Runs against a scratch APPDATA it fully controls —
+        # which only became true once the draft store stopped reading the
+        # launching user's home directory (finding F-13); before that a stray
+        # draft could hang this step on a modal recovery prompt forever.
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP "smoke-appdata"
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          New-Item -ItemType Directory -Force -Path smoke-evidence | Out-Null
+          $result = Join-Path (Get-Location) "smoke-evidence\tag-editor-smoke.json"
+
+          $env:APPDATA = $scratch
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:BANANAFLOW_SMOKE_RESULT_FILE = $result
+
+          # bananaflow.exe is a windowed (console=False) binary, so `&` would not
+          # block and its stdout is not connected: Start-Process -Wait plus the
+          # result file is the only way to actually observe it.
+          $proc = Start-Process -FilePath "dist\bananaflow\bananaflow.exe" `
+                                -ArgumentList "--internal-smoke-test","tag-editor" `
+                                -Wait -PassThru -NoNewWindow
+          if (-not (Test-Path $result)) {
+            throw "The packaged smoke wrote no result file (exit $($proc.ExitCode)); it may have crashed before reporting."
+          }
+          $summary = Get-Content $result -Raw
+          $summary | Write-Host
+          $parsed = $summary | ConvertFrom-Json
+          $failed = @($parsed.steps | Where-Object { -not $_.ok })
+          if ($failed.Count -gt 0) {
+            throw "Packaged Tag Editor smoke failed steps: $($failed.step -join ', ')"
+          }
+          if (-not $parsed.ok) { throw "Packaged Tag Editor smoke reported ok=false" }
+
+          # Exit-code policy, mirroring scripts/run_isolated_tests.py: the
+          # complete passing result file is the evidence, and a native exit is
+          # only ever *classified*, never assumed benign.
+          #
+          # bananaflow.exe reliably exits 0xC0000409 during Qt interpreter teardown
+          # AFTER writing a complete, all-steps-passing result. That is a
+          # documented pre-existing condition, recorded against the packaged
+          # binary in the project's packaging audits, and is
+          # exactly why the smoke writes a result file rather than trusting its
+          # exit code (bananaflow.exe is console=False, so stdout is unavailable
+          # anyway). Failing on it would make every release build red over
+          # something the audit already classified.
+          #
+          # Anything else still fails: exit 1 is the smoke reporting its own
+          # failure, and any other native code is an unreviewed crash.
+          $code = $proc.ExitCode
+          $hex = "0x{0:X8}" -f ($code -band 0xFFFFFFFF)
+          if ($code -eq 0) {
+            Write-Host "Packaged Tag Editor smoke: all steps passed, clean exit."
+          } elseif ($code -eq -1073740791) {
+            Write-Host "::warning::Packaged smoke completed every step and wrote a complete passing result, then exited $hex in Qt teardown — the reviewed, pre-existing post-success condition."
+          } else {
+            throw "Packaged Tag Editor smoke exited $code ($hex), which has no reviewed classification. Every step passed, so this is a new native condition worth investigating rather than accepting."
+          }
+
+          # It must have written user data only inside the APPDATA we gave it.
+          $outside = Get-ChildItem -Path "dist\bananaflow" -Recurse -File |
+                     Where-Object { $_.LastWriteTime -gt $proc.StartTime }
+          if ($outside) {
+            throw "The packaged smoke wrote into the install directory: $($outside.FullName -join ', ')"
+          }
+          Write-Host "Packaged Tag Editor smoke: all steps passed."
+
+      - name: Upload packaged smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: smoke-evidence-${{ steps.ver.outputs.version }}
+          path: smoke-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' packaging\bananaflow.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed to compile the installer" }
+          $setup = Get-ChildItem -Path dist -Filter 'bananaflow-*-windows-setup.exe' -File
+          if (-not $setup) { throw "ISCC reported success but produced no installer" }
+          Write-Host "Installer: $($setup.Name) ($([math]::Round($setup.Length / 1MB, 1)) MB)"
+
+      - name: Verify artifact versions and checksums
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+
+          # Recompute over everything that will be uploaded: build_windows.ps1
+          # hashed the ZIP before the installer existed.
+          $releaseFiles = @(Get-ChildItem -Path dist -File -Filter 'bananaflow-*')
+          if ($releaseFiles.Count -lt 2) {
+            throw "Expected at least the portable ZIP and the installer in dist/, found: $($releaseFiles.Name -join ', ')"
+          }
+          $hashes = @()
+          foreach ($f in $releaseFiles) {
+            if ($f.Name -notmatch [regex]::Escape($version)) {
+              throw "Release file $($f.Name) does not carry version $version"
+            }
+            if ($f.Length -eq 0) { throw "Release file $($f.Name) is empty" }
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            $hashes += "$h  $($f.Name)"
+          }
+          $hashes | Set-Content -Path 'dist\SHA256SUMS.txt' -Encoding utf8
+          Get-Content 'dist\SHA256SUMS.txt'
+
+          # Every uploaded release file must be covered by the checksum file.
+          $covered = (Get-Content 'dist\SHA256SUMS.txt' | ForEach-Object { ($_ -split '\s+')[-1] })
+          foreach ($f in $releaseFiles) {
+            if ($covered -notcontains $f.Name) {
+              throw "SHA256SUMS.txt does not cover $($f.Name)"
+            }
+          }
+
+          # The installer's embedded ProductVersion must agree too — it is read
+          # from the built EXE by the .iss, so a mismatch means the propagation
+          # chain broke.
+          $setup = $releaseFiles | Where-Object { $_.Name -like '*-windows-setup.exe' }
+          $productVersion = (Get-Item $setup.FullName).VersionInfo.ProductVersion
+          Write-Host "Installer ProductVersion: $productVersion"
+          if ($productVersion -notmatch [regex]::Escape($version)) {
+            throw "Installer ProductVersion '$productVersion' does not match $version"
+          }
+          Write-Host "All release files carry $version and are covered by SHA256SUMS.txt."
+
+      - name: Generate build provenance attestation
+        # Binds the released ZIP/installer/checksums to this exact workflow
+        # run, commit, and builder identity via a signed, GitHub-hosted
+        # attestation — so a download can be verified as having actually
+        # come from this repository's CI (`gh attestation verify`) rather
+        # than from a website spoofing the same filename.
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-path: |
+            dist/bananaflow-*-windows-portable.zip
+            dist/bananaflow-*-windows-setup.exe
+
+      - name: Upload portable build (folder)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: bananaflow-${{ steps.ver.outputs.version }}-windows-folder
+          path: dist/bananaflow/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: bananaflow-${{ steps.ver.outputs.version }}-windows-release
+          path: |
+            dist/bananaflow-*-windows-portable.zip
+            dist/bananaflow-*-windows-setup.exe
+            dist/SHA256SUMS.txt
+            dist/sbom.cyclonedx.json
+            dist/SBOM_INVENTORY.md
+          if-no-files-found: error
+          retention-days: 60
+
+  publish-draft:
+    name: Attach verified Windows artifacts to a draft release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: bananaflow-${{ needs.build.outputs.version }}-windows-release
+          path: dist
+
+      - name: Determine pre-release status from the tag
+        # RELEASE_STRATEGY.md requires a SemVer pre-release tag (e.g.
+        # v0.2.1-beta.1) to be marked as a GitHub Pre-release; a clean
+        # vX.Y.Z tag is a Stable release. Derived from the tag itself so
+        # this never needs a manual flag per release.
+        id: prerelease
+        run: |
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" == *-* ]]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create DRAFT GitHub Release
+        # Only a real tag push publishes anything. A workflow_dispatch run —
+        # including one selecting a tag — is a dry run and creates no release,
+        # which is what makes the pre-tag rehearsal in docs/release/RELEASING.md safe
+        # to repeat.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          # draft: the artifacts are built and verified, but a release is a
+          # human decision. make_latest is pinned to false so that even if this
+          # is published later it cannot silently become the "latest" download
+          # without someone choosing that.
+          draft: true
+          make_latest: 'false'
+          prerelease: ${{ steps.prerelease.outputs.value }}
+          name: BananaFlow ${{ github.ref_name }}
+          generate_release_notes: true
+          # Without this, generate_release_notes silently discards the
+          # custom `body:` below instead of prepending to it -- found
+          # when Phase 12's real tag push produced a release body with
+          # none of this safety disclaimer text.
+          append_body: true
+          body: |
+            > **Automated release gates passed; manual release acceptance remains pending.**
+            >
+            > This draft was produced by `.github/workflows/release-windows.yml` from
+            > commit ${{ github.sha }}. Every automated gate below is green:
+            >
+            > - tag matches `version.FULL_VERSION` (${{ needs.build.outputs.version }})
+            > - isolated test suite (fresh process per file) green
+            > - `scripts/build_windows.ps1` build succeeded
+            > - packaged `bananaflow-cli.exe --version` and `--doctor` succeeded
+            > - bundled PO Token Provider reported ready
+            > - packaged Tag Editor smoke passed every step
+            > - Inno Setup installer compiled
+            > - SHA-256 checksums cover every attached file
+            >
+            > **Automated gates are a necessary condition for release, not a sufficient
+            > one.** The clean-machine, accessibility, RTL and installer checks in
+            > `docs/release/RELEASING.md` have not been performed
+            > against these artifacts. Do not publish this draft until they have real
+            > evidence, or until the product owner records an explicit release-risk
+            > decision. Publish the verified artifacts as-is — do not rebuild them.
+          files: |
+            dist/bananaflow-*-windows-setup.exe
+            dist/bananaflow-*-windows-portable.zip
+            dist/SHA256SUMS.txt
+            dist/sbom.cyclonedx.json
+            dist/SBOM_INVENTORY.md

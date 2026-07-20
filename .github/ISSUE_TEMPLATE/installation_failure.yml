@@ -1,0 +1,57 @@
+name: 📦 Installation Failure
+description: The installer, portable ZIP, or `pip install` setup fails or won't start.
+title: "[Install]: "
+labels: ["bug", "packaging", "needs reproduction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a site/download failure after a successful install, use
+        "Download Failure" or "Site Compatibility" instead.
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version / build you tried to install
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows 10/11
+        - macOS
+        - Linux (unsupported/experimental)
+    validations:
+      required: true
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: What are you installing?
+      options:
+        - Inno Setup installer (.exe)
+        - Portable ZIP
+        - Source / `pip install`
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: SmartScreen block, installer crash, missing FFmpeg/Playwright error, pip dependency conflict, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Installer output / error text / pip output (reviewed for secrets)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: I verified the download's SHA-256 against the release page (for installer/ZIP)
+          required: false

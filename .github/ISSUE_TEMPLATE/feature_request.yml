@@ -1,0 +1,37 @@
+name: 💡 Feature Request
+description: Propose a new feature or enhancement.
+title: "[Feature]: "
+labels: ["roadmap"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For an early-stage idea you want to discuss before writing a full
+        proposal, consider [Discussions → Ideas](../../discussions/categories/ideas)
+        instead — it's lower-friction for back-and-forth.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: Describe the situation today, not just the feature you want.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: This isn't a request to circumvent a site's access controls, DRM, or terms of service (see docs/legal/acceptable-use.md)
+          required: true

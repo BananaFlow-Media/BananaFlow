@@ -1,0 +1,45 @@
+name: 🎚️ Converter Problem
+description: Format/quality conversion, ReplayGain, or post-processing produces a wrong or broken result.
+title: "[Converter]: "
+labels: ["bug", "converter", "needs reproduction"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+    validations:
+      required: true
+  - type: input
+    id: formats
+    attributes:
+      label: Source format → target format
+      placeholder: e.g. webm/opus → mp3 320kbps
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: Conversion fails, wrong output format, audio artifacts, ReplayGain wrong, artwork lost, collision handling wrong, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: FFmpeg/conversion log output (reviewed for secrets before pasting)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: I confirmed FFmpeg is on PATH and up to date
+          required: false

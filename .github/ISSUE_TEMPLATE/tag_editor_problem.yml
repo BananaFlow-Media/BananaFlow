@@ -1,0 +1,50 @@
+name: 🏷️ Tag Editor Problem
+description: Metadata scanning, tag editing, batch rename, or the Tag Editor UI misbehaves.
+title: "[Tag Editor]: "
+labels: ["bug", "tag-editor", "needs reproduction"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: BananaFlow version
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Folder scan / metadata inspector
+        - Batch tag actions (rename/case/find-replace/etc.)
+        - Metadata online lookup (MusicBrainz/etc.)
+        - Duplicate detection
+        - Undo/rollback
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output (reviewed for secrets before pasting)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing Issues and Discussions first
+          required: true
+        - label: No real file paths/filenames with private information are included
+          required: true
