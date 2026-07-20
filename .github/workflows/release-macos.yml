@@ -241,7 +241,7 @@ jobs:
       # conditions hide dead CI code and fail actionlint. Add a real signing
       # step only when the documented secrets and release process are ready.
 
-      - name: Verify CLI smoke (require 0.2.0 + doctor)
+      - name: Verify CLI smoke (version match + doctor)
         run: |
           cli="dist/BananaFlow.app/Contents/MacOS/bananaflow-cli"
           reported=$("$cli" --version)
