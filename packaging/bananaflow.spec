@@ -211,6 +211,17 @@ datas += _stage_tree(HERE / 'yt-dlp-plugins', 'yt-dlp-plugins')
 datas += _stage_tree(HERE / 'runtime', 'runtime')
 datas += _stage_tree(HERE / 'pot-provider-backend', 'pot-provider-backend')
 
+# The app's own custom icons. ui.app_window.CustomIcon loads an SVG at
+# runtime from a path built off ui/app_window.py's __file__
+# (<module_dir>/assets/<name>_<black|white>.svg), so the frozen build needs
+# ui/assets/ dropped next to the ui package inside _internal. Without this
+# the Converter's sidebar icon silently fails to load and Qt logs, on every
+# repaint, "Cannot open file ...ui\assets\document_arrow_right_black.svg".
+# It is the only nav item using a local-SVG CustomIcon (all others are
+# qfluentwidgets FluentIcons, bundled with that package), which is why only
+# the Converter icon went missing in the packaged build.
+datas += _stage_tree(ROOT / 'ui' / 'assets', 'ui/assets')
+
 # Application icon — production derivatives taken from the approved
 # BananaFlow brand asset package (see packaging/BRAND_ASSETS.md for
 # provenance). Windows uses .ico, macOS uses .icns.
