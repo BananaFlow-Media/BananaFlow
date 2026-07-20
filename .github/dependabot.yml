@@ -1,3 +1,20 @@
+# Dependency monitoring policy.
+#
+# Dependabot keeps the dependency graph and vulnerability alerts current,
+# but it must NOT open pull requests: every pull request in this
+# repository is authored by the maintainer, so an automated account is
+# never a contributor here.
+#
+# `open-pull-requests-limit: 0` keeps each ecosystem registered and
+# monitored while suppressing automated version-update pull requests.
+# Raise the limit deliberately if the maintainer decides to accept
+# bot-authored pull requests; alerts and the CI dependency scans below
+# do not depend on it.
+#
+# Dependency risk is covered without bot pull requests by:
+#   * Dependabot vulnerability alerts (repository setting),
+#   * `pip-audit` and `dependency-review-action` in .github/workflows/security.yml,
+#   * the CycloneDX SBOM generated for every release.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -7,7 +24,7 @@ updates:
       day: monday
       time: "05:00"
       timezone: Asia/Jerusalem
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -16,4 +33,4 @@ updates:
       day: monday
       time: "05:30"
       timezone: Asia/Jerusalem
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
