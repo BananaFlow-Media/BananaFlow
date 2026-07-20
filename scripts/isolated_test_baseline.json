@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "_readme": [
+    "Reviewed classification of native process exits for scripts/run_isolated_tests.py.",
+    "This file is evidence, not a mute button: a file listed here is accepted ONLY when",
+    "it also wrote a complete, machine-readable pytest result in which every test passed,",
+    "and its process exit code matches the reviewed code below. A listed file that exits",
+    "cleanly is a success. A listed file that exits with a different code fails the gate.",
+    "An unlisted file that exits natively fails the gate.",
+    "Adding a file here requires the same evidence Phase 15 recorded: a complete passing",
+    "summary before the fault, and proof the fault is not attributable to current",
+    "production code. See docs/tag-editor/PHASE_15_FINAL_AUDIT.md sections 2.2-2.4."
+  ],
+  "known_native_exit": {
+    "codes": [3221225477, 3221226505, -11],
+    "hex": ["0xC0000005", "0xC0000409", "SIGSEGV"],
+    "condition": "A native fault raised in Qt interpreter teardown AFTER pytest printed and wrote a COMPLETE PASSING result. The specific code is environment-dependent: a local Windows box reports 0xC0000005 (STATUS_ACCESS_VIOLATION), the GitHub windows-latest runner reports 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN), and the ubuntu-latest runner reports -11 (SIGSEGV) for the same files, varying run to run. All are the same phenomenon: Qt interpreter teardown after a clean run. The safety property is the complete passing result written before the fault -- the runner enforces that separately, and a native death BEFORE a complete result is never classified here regardless of code.",
+    "evidence": "docs/tag-editor/PHASE_15_FINAL_AUDIT.md sections 2.4 and 10.1. 0xC0000005 observed locally; 0xC0000409-at-teardown observed on GitHub Actions windows-latest and -11/SIGSEGV on ubuntu-latest (run 29482330184, PR #3 CI), where the gate correctly REFUSED to accept each unreviewed code until its evidence was recorded. docs/tag-editor/MASTER_PLAN.md records the same behaviour at the Phase 0 baseline (b979147), where it relocated when the blamed file was excluded, proving accumulated Qt state rather than a defective test. tests/test_metadata_io_ui_phase12.py added 2026-07-18/19 after this exact complete-pass-then-SIGSEGV pattern recurred three separate times on ubuntu-latest across unrelated docs/scraper PRs (#66, #67, #70) with an empty diff for this file each time, and a rerun passed cleanly every time -- the same accumulated-Qt-teardown-state phenomenon, just not yet individually classified for this file.",
+    "distinct_from_retry": "This teardown 0xC0000409 (complete result written first) is NOT the F-11 converter condition below, which is a MID-RUN 0xC0000409 with no complete result. The complete_result flag is what separates them.",
+    "attributable_to_production_code": false,
+    "files": [
+      "tests/test_filesystem_monitoring_ui_phase13.py",
+      "tests/test_metadata_editor_toolbar_state.py",
+      "tests/test_metadata_inspector_phase6.py",
+      "tests/test_metadata_io_ui_phase12.py",
+      "tests/test_online_metadata_ui_phase11.py",
+      "tests/test_phase13_blocker_regressions.py",
+      "tests/test_phase14_accessibility_rtl_dpi.py",
+      "tests/test_phase4_folder_navigation_operations.py",
+      "tests/test_tag_action_corrective_phase9.py",
+      "tests/test_tag_action_ui_phase9.py",
+      "tests/test_tag_editor_workspace_state.py"
+    ]
+  },
+  "intermittent_native_retry": {
+    "codes": [3221226505, -11],
+    "hex": ["0xC0000409", "SIGSEGV"],
+    "max_attempts": 3,
+    "condition": "A native crash raised MID-RUN, before any summary, roughly one run in six. Environment-dependent code, like the teardown class above: STATUS_STACK_BUFFER_OVERRUN (0xC0000409) on Windows, SIGSEGV (-11) on macOS/Linux. No complete result is written, so the file is retried rather than classified. Accepted only when a later attempt produces a clean, complete, passing result; a logical failure is never retried.",
+    "evidence": "docs/tag-editor/PHASE_15_INITIAL_AUDIT.md finding F-11 - reproduced 1-in-6 at 8d2c497 and 2-in-6 at the pre-Phase-14 base 711f0c3, with an empty diff for the converter files across Phase 14, proving it pre-dates the current code. The macOS SIGSEGV manifestation was observed on the release-macos.yml dispatch run 29505337809 (converter passed cleanly on the prior macOS dispatch 29500668760), confirming the same non-determinism.",
+    "attributable_to_production_code": false,
+    "files": [
+      "tests/test_converter.py"
+    ]
+  }
+}
