@@ -150,7 +150,7 @@ iscc packaging/bananaflow.iss                 # optional Inno Setup installer
 Must be run **on macOS** (Apple Silicon / arm64):
 ```bash
 chmod +x scripts/build_macos.sh
-./scripts/build_macos.sh                  # → dist/BananaFlow.app + dist/bananaflow-<ver>-macos-arm64.dmg
+./scripts/build_macos.sh                  # → dist/BananaFlow.app + dist/BananaFlow-v<ver>-macos-arm64.dmg
 ```
 Both builds are also produced automatically by GitHub Actions on a `vX.Y.Z`
 tag (`.github/workflows/release-windows.yml` and `release-macos.yml`).

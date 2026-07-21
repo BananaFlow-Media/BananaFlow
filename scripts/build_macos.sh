@@ -4,7 +4,7 @@
 # ============================================================
 # Produces:
 #   dist/BananaFlow.app                         — the application bundle
-#   dist/bananaflow-<version>-macos-arm64.dmg   — a drag-to-Applications DMG
+#   dist/BananaFlow-v<version>-macos-arm64.dmg   — a drag-to-Applications DMG
 #   dist/SHA256SUMS.txt                     — checksum for the DMG
 #
 # Steps:
@@ -183,7 +183,7 @@ codesign --verify --deep --strict --verbose=2 "$APP" || {
 }
 
 # ── DMG ────────────────────────────────────────────────────────────────────
-DMG_NAME="bananaflow-$APP_VERSION-macos-$ARCH.dmg"
+DMG_NAME="BananaFlow-v$APP_VERSION-macos-$ARCH.dmg"
 DMG_PATH="$ROOT/dist/$DMG_NAME"
 echo "==> Creating DMG: $DMG_NAME"
 

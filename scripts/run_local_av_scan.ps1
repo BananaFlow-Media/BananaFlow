@@ -68,8 +68,8 @@ Write-Host "    Signature date    : $($status.AntivirusSignatureLastUpdated)"
 $targets = @(
     @{ Label = 'gui-exe';       Path = Join-Path $DistDir 'bananaflow\bananaflow.exe' },
     @{ Label = 'cli-exe';       Path = Join-Path $DistDir 'bananaflow\bananaflow-cli.exe' },
-    @{ Label = 'installer-exe'; Path = (Get-ChildItem -Path $DistDir -Filter 'bananaflow-*-windows-setup.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1).FullName },
-    @{ Label = 'portable-zip';  Path = (Get-ChildItem -Path $DistDir -Filter 'bananaflow-*-windows-portable.zip' -File -ErrorAction SilentlyContinue | Select-Object -First 1).FullName }
+    @{ Label = 'installer-exe'; Path = (Get-ChildItem -Path $DistDir -Filter 'BananaFlow-*-windows-setup.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1).FullName },
+    @{ Label = 'portable-zip';  Path = (Get-ChildItem -Path $DistDir -Filter 'BananaFlow-*-windows-portable.zip' -File -ErrorAction SilentlyContinue | Select-Object -First 1).FullName }
 )
 
 $results = @()

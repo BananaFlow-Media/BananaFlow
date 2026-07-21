@@ -128,7 +128,7 @@ def test_macos_dmg_is_not_attached_to_a_prerelease_tag():
 
     # The DMG must still reach testers as a CI artifact, not vanish entirely.
     assert "Upload macOS artifacts" in text
-    assert "dist/bananaflow-*-macos-arm64.dmg" in text.split("Upload macOS artifacts", 1)[1]
+    assert "dist/BananaFlow-*-macos-arm64.dmg" in text.split("Upload macOS artifacts", 1)[1]
 
 
 def test_prerelease_flag_is_derived_from_the_tag_not_hardcoded(workflow: str):

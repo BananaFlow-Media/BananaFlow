@@ -265,7 +265,7 @@ jobs:
       - name: Create DMG + checksum
         run: |
           v="${{ steps.ver.outputs.version }}"
-          dmg="bananaflow-$v-macos-arm64.dmg"
+          dmg="BananaFlow-v$v-macos-arm64.dmg"
           staging="$(mktemp -d)"
           cp -R dist/BananaFlow.app "$staging/"
           ln -s /Applications "$staging/Applications"
@@ -291,14 +291,14 @@ jobs:
         # builder identity via a signed, GitHub-hosted attestation.
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
-          subject-path: dist/bananaflow-*-macos-arm64.dmg
+          subject-path: dist/BananaFlow-*-macos-arm64.dmg
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: bananaflow-${{ steps.ver.outputs.version }}-macos-arm64
           path: |
-            dist/bananaflow-*-macos-arm64.dmg
+            dist/BananaFlow-*-macos-arm64.dmg
             dist/SHA256SUMS-macos.txt
           if-no-files-found: error
           retention-days: 60
@@ -356,7 +356,7 @@ jobs:
           make_latest: 'false'
           prerelease: ${{ steps.prerelease.outputs.value }}
           files: |
-            dist/bananaflow-*-macos-arm64.dmg
+            dist/BananaFlow-*-macos-arm64.dmg
             dist/SHA256SUMS-macos.txt
           generate_release_notes: true
           # Keeps this job from silently discarding whatever custom body

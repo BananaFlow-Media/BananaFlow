@@ -11,9 +11,9 @@
     4. Regenerates packaging/version_info.txt from version.py.
     5. Runs PyInstaller against packaging/bananaflow.spec.
     6. Produces:
-         dist/bananaflow/                               - one-folder portable build (input for Inno Setup)
-         dist/bananaflow-<version>-windows-portable.zip - portable ZIP for direct distribution
-         dist/SHA256SUMS.txt                        - SHA-256 checksums for the ZIP
+         dist/bananaflow/                                        - one-folder portable build (input for Inno Setup)
+         dist/BananaFlow-v<version>-windows-x64-portable.zip     - portable ZIP for direct distribution
+         dist/SHA256SUMS.txt                                     - SHA-256 checksums for the ZIP
          test-evidence/                             - per-file JUnit XML, logs, JSON aggregate
     7. Prints a short summary with sizes and exact next-step commands.
 
@@ -381,7 +381,7 @@ foreach ($name in $ReleaseDocs) {
 }
 
 # Portable ZIP.
-$ZipName = "bananaflow-$AppVersion-windows-portable.zip"
+$ZipName = "BananaFlow-v$AppVersion-windows-x64-portable.zip"
 $ZipPath = Join-Path $RepoRoot "dist\$ZipName"
 Write-Host "==> Creating portable ZIP: $ZipName" -ForegroundColor Cyan
 New-PortableZip -SourceDir $DistDir -ZipPath $ZipPath -RepoRoot $RepoRoot
@@ -391,7 +391,7 @@ $ChecksumPath = Join-Path $RepoRoot 'dist\SHA256SUMS.txt'
 Write-Host "==> Writing SHA-256 checksums" -ForegroundColor Cyan
 $hashes = @()
 foreach ($f in Get-ChildItem -Path (Join-Path $RepoRoot 'dist') -File `
-                              -Filter 'bananaflow-*' ) {
+                              -Filter 'BananaFlow-*' ) {
     $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
     $hashes += "$h  $($f.Name)"
 }
