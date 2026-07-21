@@ -316,7 +316,7 @@ jobs:
         run: |
           & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' packaging\bananaflow.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed to compile the installer" }
-          $setup = Get-ChildItem -Path dist -Filter 'BananaFlow-*-windows-setup.exe' -File
+          $setup = Get-ChildItem -Path dist -Filter 'BananaFlow-*-windows-x64-setup.exe' -File
           if (-not $setup) { throw "ISCC reported success but produced no installer" }
           Write-Host "Installer: $($setup.Name) ($([math]::Round($setup.Length / 1MB, 1)) MB)"
 
@@ -354,7 +354,7 @@ jobs:
           # The installer's embedded ProductVersion must agree too — it is read
           # from the built EXE by the .iss, so a mismatch means the propagation
           # chain broke.
-          $setup = $releaseFiles | Where-Object { $_.Name -like '*-windows-setup.exe' }
+          $setup = $releaseFiles | Where-Object { $_.Name -like '*-windows-x64-setup.exe' }
           $productVersion = (Get-Item $setup.FullName).VersionInfo.ProductVersion
           Write-Host "Installer ProductVersion: $productVersion"
           if ($productVersion -notmatch [regex]::Escape($version)) {
@@ -371,8 +371,8 @@ jobs:
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-path: |
-            dist/BananaFlow-*-windows-portable.zip
-            dist/BananaFlow-*-windows-setup.exe
+            dist/BananaFlow-*-windows-x64-portable.zip
+            dist/BananaFlow-*-windows-x64-setup.exe
 
       - name: Upload portable build (folder)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -387,8 +387,8 @@ jobs:
         with:
           name: bananaflow-${{ steps.ver.outputs.version }}-windows-release
           path: |
-            dist/BananaFlow-*-windows-portable.zip
-            dist/BananaFlow-*-windows-setup.exe
+            dist/BananaFlow-*-windows-x64-portable.zip
+            dist/BananaFlow-*-windows-x64-setup.exe
             dist/SHA256SUMS.txt
             dist/sbom.cyclonedx.json
             dist/SBOM_INVENTORY.md
@@ -466,8 +466,8 @@ jobs:
             > evidence, or until the product owner records an explicit release-risk
             > decision. Publish the verified artifacts as-is — do not rebuild them.
           files: |
-            dist/BananaFlow-*-windows-setup.exe
-            dist/BananaFlow-*-windows-portable.zip
+            dist/BananaFlow-*-windows-x64-setup.exe
+            dist/BananaFlow-*-windows-x64-portable.zip
             dist/SHA256SUMS.txt
             dist/sbom.cyclonedx.json
             dist/SBOM_INVENTORY.md
