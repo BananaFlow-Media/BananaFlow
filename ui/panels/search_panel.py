@@ -186,6 +186,15 @@ class SearchPanel(QWidget):
         self._config.last_search_query    = ""
         self._config.last_search_platform = self.get_platform()
 
+    def run_query(self, query: str) -> None:
+        """Programmatically run a search, e.g. forwarded from the URL bar
+        when the user types free text instead of pasting a URL."""
+        query = query.strip()
+        if not query:
+            return
+        self._search_box.setText(query)
+        self._on_search(query)
+
     # ── Build ──────────────────────────────────────────────────────────────────
 
     def _build(self) -> None:

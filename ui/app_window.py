@@ -41,7 +41,10 @@ from core.search_engine import SearchResult, ResultKind
 from core.update_state import UpdateStateStore, app_update_id, component_update_id
 from ui.workers.offline_monitor import OfflineMonitor
 from core.downloader import AudioQuality, DownloadEngine, DownloadRequest, MediaType, VideoQuality
-from core.playlist_parser import ParseResult, SourcePlatform, UrlKind, classify_url
+from core.playlist_parser import (
+    ParseResult, SourcePlatform, UrlKind, classify_url,
+    is_malformed_url_attempt, looks_like_url,
+)
 from error_handler import classify_error, ErrorInfo, ErrorSeverity, probe_connectivity
 
 # ── Controllers ────────────────────────────────────────────────────────────────
@@ -1287,6 +1290,22 @@ class AppWindow(FluentWindow):
 
     def _start_fetch(self, url: str) -> None:
         """Entry point for all fetching, intercepting channel URLs to ask what to scrape."""
+        if not looks_like_url(url):
+            if is_malformed_url_attempt(url):
+                # Starts with "scheme://" but isn't a real URL (broken/typo'd
+                # paste) — tell the user instead of silently treating it as
+                # a search query, which would be a confusing thing to search for.
+                self._status_bar.show_temporary(t("invalid_url_title"), StatusKind.WARNING)
+                show_warning(self, t("invalid_url_title"), t("invalid_url_detail"))
+                return
+            # The URL bar's placeholder invites free-text search too — forward
+            # non-URL input to the Search tab instead of handing raw text to
+            # yt-dlp/Playwright, which can only navigate to real URLs.
+            self._url_bar.clear_url()
+            self.switchTo(self._search_panel)
+            self._search_panel.run_query(url)
+            return
+
         platform, kind = classify_url(url)
         if platform == SourcePlatform.YOUTUBE and kind == UrlKind.ARTIST:
             from ui.controllers.channel_flow_controller import ChannelFlowController

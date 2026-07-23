@@ -122,6 +122,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "clipboard_on_tooltip": "Clipboard monitor is ON — auto-detecting media URLs",
         "clipboard_off_tooltip": "Clipboard monitor is OFF — enable in Settings",
         "url_placeholder": "Paste a YouTube or Spotify URL, or type a search query…",
+        "invalid_url_title": "Invalid URL",
+        "invalid_url_detail": "That looks like a broken or incomplete URL. Check the address and try again.",
 
         # ── Batch import ────────────────────────────────────────────────────────
         "batch_import_failed": "Batch Import Failed",
@@ -1474,6 +1476,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "clipboard_on_tooltip": "ניטור הלוח פעיל — זיהוי אוטומטי של קישורי מדיה",
         "clipboard_off_tooltip": "ניטור הלוח כבוי — הפעל בהגדרות",
         "url_placeholder": "הדבק קישור מ-YouTube או Spotify (שיר, אלבום, אמן, פלייליסט) או רשום שאילתת חיפוש…",
+        "invalid_url_title": "כתובת URL לא תקינה",
+        "invalid_url_detail": "זה נראה כמו כתובת URL שבורה או לא שלמה. בדוק את הכתובת ונסה שוב.",
 
         # ── Batch import ────────────────────────────────────────────────────────
         "batch_import_failed": "ייבוא אצווה נכשל",
@@ -2907,6 +2911,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "err_unsupported_url_detail": (
             "yt-dlp לא מצא מחלץ מתאים לכתובת הזו.\n\n"
             "ודא שהכתובת היא קישור ישיר לסרטון, לפלייליסט או לאלבום."
+        ),
+        "err_truncated_url_title": "קישור לסרטון חסר",
+        "err_truncated_url_detail": (
+            "לקישור ה-YouTube הזה חסרים תווים ממזהה הסרטון, ולכן הוא לא "
+            "מצביע על סרטון אמיתי.\n\n"
+            "העתק שוב את הקישור המלא (משורת הכתובת או מכפתור השיתוף) ונסה שוב."
         ),
         "err_network_title": "שגיאת רשת",
         "err_network_detail": (

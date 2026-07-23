@@ -166,6 +166,56 @@ _SPOTIFY_RE      = re.compile(
 # Common pattern for user/channel video listing pages across many sites
 _USER_LISTING_RE = re.compile(r"/users?/[^/]+/(videos?|uploads?|playlists?|content)", re.IGNORECASE)
 
+# Hostname/domain shape, with or without a scheme: "youtube.com", "example.co.uk".
+# Requires an ASCII TLD-like ending, so e.g. a Hebrew netloc ("https://ברקוני")
+# is rejected even though urlparse() happily accepts it as a syntactic netloc.
+_HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)+[a-zA-Z]{2,63}$")
+_IPV4_RE     = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+# A generic "scheme://" prefix (http, https, or anything else): a strong
+# signal the user *intended* to paste a URL, even if what follows is broken.
+_SCHEME_ATTEMPT_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
+def _valid_host(host: str) -> bool:
+    """True if ``host`` (a netloc or bare domain, no path) looks like a real hostname."""
+    host = host.strip().split(":", 1)[0]  # drop a trailing :port
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    return bool(_HOSTNAME_RE.match(host)) or bool(_IPV4_RE.match(host))
+
+
+def looks_like_url(text: str) -> bool:
+    """
+    Heuristic check for "is this navigable as a URL" vs. free-text search input.
+    The URL bar doubles as a search box (its placeholder invites either), so the
+    UI needs this to decide whether to fetch the text directly or forward it to
+    the Search tab instead of handing raw non-URL text to Playwright/yt-dlp.
+    """
+    text = text.strip()
+    if not text or " " in text:
+        return False
+    parsed = urlparse(text)
+    if parsed.scheme in ("http", "https"):
+        return bool(parsed.netloc) and _valid_host(parsed.netloc)
+    if not parsed.scheme:
+        return _valid_host(text.split("/", 1)[0])
+    return False
+
+
+def is_malformed_url_attempt(text: str) -> bool:
+    """
+    True when the text clearly *tries* to be a URL (starts with a
+    "scheme://" prefix like "https://") but fails looks_like_url — e.g. a
+    truncated paste or a typo'd address. The UI should tell the user their
+    URL is invalid in this case rather than silently forwarding it to
+    search, which is reserved for plain text that was never meant as a URL.
+    """
+    text = text.strip()
+    return bool(_SCHEME_ATTEMPT_RE.match(text)) and not looks_like_url(text)
+
 
 def classify_url(url: str) -> tuple[SourcePlatform, UrlKind]:
     """
@@ -585,14 +635,24 @@ class PlaylistParser:
     ) -> ParseResult:
         """Parse via yt-dlp directly with robust error propagation."""
         result = ParseResult(url=url, kind=kind, platform=platform)
-        ydl_opts = self._build_opts(cookies_file=cookies_file, logger=_SilentLogger())
+        extract_logger = _SilentLogger()
+        ydl_opts = self._build_opts(cookies_file=cookies_file, logger=extract_logger)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
             if not info:
-                result.error = "Failed to extract metadata (empty response from yt-dlp)."
+                # build_parse_ydl_opts sets ignoreerrors=True, so a real extractor
+                # failure (private/removed/restricted video, etc.) doesn't raise —
+                # it lands in extract_logger instead and info comes back empty.
+                # Surface that real reason instead of a meaningless placeholder,
+                # so classify_error() downstream can match it to a specific,
+                # actionable message instead of the generic fallback.
+                real_reason = (
+                    (extract_logger.errors or extract_logger.warnings or [None])[-1]
+                )
+                result.error = real_reason or "Failed to extract metadata (empty response from yt-dlp)."
                 return result
 
             entries = info.get("entries") if isinstance(info, dict) else None

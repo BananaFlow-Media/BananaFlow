@@ -206,6 +206,13 @@ ERROR_TEXTS_EN: dict[str, str] = {
         "yt-dlp could not find a supported extractor for this URL.\n\n"
         "Check that the URL is a direct video, playlist, or album link.",
 
+    "err_truncated_url_title": "Incomplete video link",
+    "err_truncated_url_detail":
+        "This YouTube link is missing characters from its video ID, so it "
+        "doesn't point to a real video.\n\n"
+        "Copy the full link again (from the address bar or the Share button) "
+        "and try again.",
+
     "err_network_title": "Network error",
     "err_network_detail":
         "A network error occurred while communicating with the server.\n\n"
@@ -335,6 +342,13 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         re.compile(r"copyright|dmca|blocked in some countries on copyright", re.I),
         "err_copyright",
         ErrorSeverity.ERROR,
+        None,
+    ),
+    # Truncated video ID (e.g. a copy-pasted link missing its last character)
+    (
+        re.compile(r"incomplete youtube id|looks truncated", re.I),
+        "err_truncated_url",
+        ErrorSeverity.WARNING,
         None,
     ),
     # Invalid / unsupported URL
