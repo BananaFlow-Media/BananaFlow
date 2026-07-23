@@ -82,6 +82,7 @@ class TestNoInlineDateFormatting:
     _ALLOWED_NON_DISPLAY = {
         "core/change_drafts.py",          # draft filename stamp
         "core/history_db.py",             # ISO-8601 storage + filename stamp
+        "core/match_cache.py",            # ISO-8601 storage stamp (matched_at)
         "ui/controllers/metadata_controller.py",  # export filename stamp
         "utils/time_format.py",           # the shared formatter itself
     }
