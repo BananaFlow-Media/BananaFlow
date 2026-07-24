@@ -65,17 +65,25 @@ _UNSET = object()
 # ──────────────────────────────────────────────────────────────────────────────
 
 class JobState(Enum):
-    QUEUED    = "queued"
-    ACTIVE    = "active"
-    COMPLETED = "completed"
-    FAILED    = "failed"
-    PAUSED    = "paused"
-    CANCELLED = "cancelled"
+    QUEUED       = "queued"
+    ACTIVE       = "active"
+    COMPLETED    = "completed"
+    PREEXISTING  = "preexisting"  # duplicate-skip: file already existed, no download ran
+    FAILED       = "failed"
+    PAUSED       = "paused"
+    CANCELLED    = "cancelled"
 
 
 # Terminal states no longer contribute a live speed and are "done" for the
 # purpose of the outstanding-work denominator.
-_TERMINAL = {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}
+_TERMINAL = {JobState.COMPLETED, JobState.PREEXISTING, JobState.FAILED, JobState.CANCELLED}
+
+# States that count as a full-size, fully-done job for progress-weighting
+# purposes (see _progress_locked). PREEXISTING is a terminal success exactly
+# like COMPLETED — the file was found already correct on disk, so no bytes
+# ever needed to move — but it is tracked separately so the batch summary can
+# report "N downloaded, M already existed" instead of collapsing the two.
+_DONE_FOR_PROGRESS = {JobState.COMPLETED, JobState.PREEXISTING}
 
 
 @dataclass
@@ -128,7 +136,8 @@ class BatchSnapshot:
     total:      int
     queued:     int
     active:     int
-    completed:  int
+    completed:  int            # successes: real downloads + preexisting
+    preexisting: int           # subset of `completed` that were duplicate-skips
     failed:     int
     paused:     int
     cancelled:  int
@@ -143,6 +152,11 @@ class BatchSnapshot:
     @property
     def finished(self) -> int:
         return self.completed + self.failed + self.cancelled
+
+    @property
+    def downloaded(self) -> int:
+        """Subset of `completed` that were actual downloads (not duplicate-skips)."""
+        return self.completed - self.preexisting
 
     @property
     def is_empty(self) -> bool:
@@ -300,6 +314,24 @@ class BatchProgressAggregator:
                 job.downloaded_bytes = int(job.total_bytes)
             self._recompute_speed_locked()
 
+    def mark_preexisting(self, key: str) -> None:
+        """Mark a job as a terminal success without a download: a duplicate-skip
+        found the target file already correct on disk. Counts as `completed`
+        (see BatchSnapshot.completed) but is tracked separately in
+        `BatchSnapshot.preexisting` so the batch summary can distinguish
+        "downloaded" from "already existed"."""
+        with self._lock:
+            job = self._jobs.setdefault(key, JobProgress(key=key))
+            if job.state in (JobState.FAILED, JobState.CANCELLED):
+                return
+            job.submitted = True
+            job.state = JobState.PREEXISTING
+            job.fraction = 1.0
+            job.speed_bps = 0.0
+            job.eta_seconds = None
+            job.ended_at = self._time()
+            self._recompute_speed_locked()
+
     def fail(self, key: str) -> None:
         self._terminate(key, JobState.FAILED)
 
@@ -416,7 +448,7 @@ class BatchProgressAggregator:
         if mean_known is None:
             # No byte information anywhere yet — normalized fraction average.
             frac_sum = sum(
-                1.0 if j.state == JobState.COMPLETED else j.fraction
+                1.0 if j.state in _DONE_FOR_PROGRESS else j.fraction
                 for j in jobs
             )
             raw = frac_sum / total_jobs
@@ -431,12 +463,12 @@ class BatchProgressAggregator:
                     if j.total_bytes_is_estimate:
                         uses_estimates = True
                     done = float(min(j.downloaded_bytes, j.total_bytes))
-                    if j.state == JobState.COMPLETED:
+                    if j.state in _DONE_FOR_PROGRESS:
                         done = size
                 else:
                     size = mean_known
                     uses_estimates = True
-                    if j.state == JobState.COMPLETED:
+                    if j.state in _DONE_FOR_PROGRESS:
                         done = size
                     else:
                         done = j.fraction * size
@@ -583,7 +615,8 @@ class BatchProgressAggregator:
             total=len(self._jobs),
             queued=counts[JobState.QUEUED],
             active=counts[JobState.ACTIVE],
-            completed=counts[JobState.COMPLETED],
+            completed=counts[JobState.COMPLETED] + counts[JobState.PREEXISTING],
+            preexisting=counts[JobState.PREEXISTING],
             failed=counts[JobState.FAILED],
             paused=counts[JobState.PAUSED],
             cancelled=counts[JobState.CANCELLED],

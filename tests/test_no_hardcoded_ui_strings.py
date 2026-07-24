@@ -127,3 +127,48 @@ def test_status_strings_carry_no_emoji():
             text = TRANSLATIONS[lang][key]
             bad = [ch for ch in text if ch in forbidden]
             assert not bad, f"{lang}:{key} still contains emoji {bad}: {text!r}"
+
+
+# ── Preexisting-breakdown summary wording (pinned) ───────────────────────────
+# The first draft of this message said "{n} download{plural} completed
+# (...)" — mislabelling the WHOLE batch as "downloads" even though some of
+# it was a duplicate-skip that never downloaded anything. The fix anchors on
+# completed/total instead. Pinned here so the wording can't silently regress.
+
+def test_completed_with_preexisting_wording_pinned():
+    from ui.i18n import TRANSLATIONS
+    assert TRANSLATIONS["en"]["status_completed_with_preexisting"] == (
+        "{completed} of {total} completed — {downloaded} downloaded, "
+        "{preexisting} already existed."
+    )
+    assert TRANSLATIONS["he"]["status_completed_with_preexisting"] == (
+        "{completed} מתוך {total} הושלמו — {downloaded} הורדו, "
+        "{preexisting} כבר היו קיימים."
+    )
+
+
+def test_completed_with_preexisting_renders_expected_example():
+    """The bug-report example (40 already-existing + 19 downloaded = 59/59)
+    as a concrete, permanent regression pin."""
+    from ui.i18n import TRANSLATIONS
+    template = TRANSLATIONS["en"]["status_completed_with_preexisting"]
+    rendered = template.format(completed=59, total=59, downloaded=19, preexisting=40)
+    assert rendered == "59 of 59 completed — 19 downloaded, 40 already existed."
+
+
+def test_completed_with_preexisting_call_site_uses_completed_and_total():
+    """The call site must supply the real batch totals (completed=/total=),
+    not a bare n= that conflates "completed" with "downloaded"."""
+    import re
+    source = _read("ui/app_window.py")
+    match = re.search(
+        r't\(\s*"status_completed_with_preexisting",(.*?)\)', source, re.S,
+    )
+    assert match, "status_completed_with_preexisting call site not found"
+    call_args = match.group(1)
+    assert "completed=" in call_args
+    assert "total=" in call_args
+    assert re.search(r'(?<![A-Za-z_])n=', call_args) is None, (
+        "regressed to a bare n= — must use completed=/total= (see "
+        "test_completed_with_preexisting_wording_pinned)"
+    )

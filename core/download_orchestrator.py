@@ -68,6 +68,7 @@ class OrchestratorCallbacks(Protocol):
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None: ...
     def on_track_status(self, key: str, status: str) -> None: ...
     def on_track_finished(self, key: str, output_path: str) -> None: ...
+    def on_track_preexisting(self, key: str, output_path: str) -> None: ...
     def on_track_error(self, key: str, error: ErrorInfo) -> None: ...
     def on_overall_progress(self, fraction: float) -> None: ...
     def on_metrics(self, speed: str, eta: str) -> None: ...
@@ -182,14 +183,26 @@ class DownloadOrchestrator:
     # ── Main entry point (blocking — call from background thread) ─────────────
 
     def run_batch(
-        self, 
+        self,
         jobs: list[tuple[str, DownloadRequest]],
-        delay_range: Optional[Tuple[float, float]] = None
+        delay_range: Optional[Tuple[float, float]] = None,
+        preexisting: Optional[list[tuple[str, str]]] = None,
     ) -> BatchResult:
         """
         Execute a batch of downloads with bounded parallelism and optional staggered start.
+
+        ``preexisting`` is a list of (key, existing_path) pairs for jobs the
+        caller has already resolved to a file that exists on disk (the
+        duplicate-skip policy) — no engine work runs for them. They are
+        registered in the aggregator as terminal successes (JobState.
+        PREEXISTING) up front, before the pool starts, so the batch total /
+        completed counters and the final summary are correct even when a
+        batch is entirely duplicate-skips (see core.batch_progress).
         """
-        if not jobs:
+        preexisting = preexisting or []
+        total_jobs = len(jobs) + len(preexisting)
+
+        if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
             logger.debug("[Orchestrator] Empty batch — skipping")
             self._aggregator.reset()
@@ -201,26 +214,29 @@ class DownloadOrchestrator:
                 outcome=BatchOutcome.COMPLETED,
             )
 
+        all_keys = [key for key, _ in jobs] + [key for key, _ in preexisting]
+
         # Check for pre-cancellation
         if self._engine._cancel_event.is_set():
             logger.info("[Orchestrator] run_batch() — started in cancelled state")
-            # Mark all as cancelled
-            self._aggregator.reset([key for key, _ in jobs])
-            for key, _ in jobs:
+            # Mark all as cancelled — including preexisting entries: a batch
+            # that starts already-cancelled produces no successes at all.
+            self._aggregator.reset(all_keys)
+            for key in all_keys:
                 self._aggregator.cancel(key)
                 self._safe_cb("on_track_status", key, "cancelled")
             self._safe_cb("on_batch_finished", BatchOutcome.CANCELLED_BY_USER)
             return BatchResult(
-                total=len(jobs), completed=0, failed=0, cancelled=True,
+                total=total_jobs, completed=0, failed=0, cancelled=True,
                 outcome=BatchOutcome.CANCELLED_BY_USER,
             )
 
-        self._total     = len(jobs)
+        self._total     = total_jobs
         self._completed = 0
         self._failed    = 0
         stagger_delay_range = tuple(delay_range) if delay_range else None
         self._aggregator.reset(
-            [key for key, _ in jobs],
+            all_keys,
             conservative_delay_range=CONSERVATIVE_DELAY_RANGE,
             stagger_delay_range=stagger_delay_range,
         )
@@ -230,6 +246,20 @@ class DownloadOrchestrator:
         with self._gate_lock:
             self._gate_last_release = None
         run_start = time.monotonic()
+
+        # Resolve duplicate-skips immediately — no engine work, no gate, no
+        # stagger. Reported up front so the UI shows these cards as done
+        # right away instead of waiting behind the real download jobs.
+        for key, existing_path in preexisting:
+            self._aggregator.mark_preexisting(key)
+            with self._progress_lock:
+                self._completed += 1
+            self._safe_cb("on_track_preexisting", key, existing_path)
+            self._safe_cb("on_job_count_changed", self._completed, self._total)
+        if preexisting:
+            snapshot = self._aggregator.snapshot()
+            self._safe_cb("on_overall_progress", snapshot.progress)
+            self._safe_cb("on_batch_snapshot", snapshot)
 
         # Only serialize YouTube jobs when there's more than one in this
         # batch — a lone YouTube job (e.g. single-track download, or a
@@ -365,10 +395,17 @@ class DownloadOrchestrator:
             )
         else:
             s = "s" if self._total != 1 else ""
-            self._safe_cb(
-                "on_status_message",
-                f"Done — {self._total} track{s} downloaded.",
-            )
+            if snapshot.preexisting > 0:
+                self._safe_cb(
+                    "on_status_message",
+                    f"Done — {self._total} track{s} "
+                    f"({snapshot.downloaded} downloaded, {snapshot.preexisting} already existed).",
+                )
+            else:
+                self._safe_cb(
+                    "on_status_message",
+                    f"Done — {self._total} track{s} downloaded.",
+                )
 
         self._safe_cb("on_batch_finished", outcome)
 

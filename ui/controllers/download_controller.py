@@ -219,8 +219,16 @@ class DownloadController(QObject):
         is_solo         = len(selected) == 1
 
         jobs: list[tuple[str, DownloadRequest]] = []
+        # Duplicate-skip resolutions (policy "skip", or "warn" declined): the
+        # file already exists on disk and no download will run for it. These
+        # must still be registered with the orchestrator as terminal
+        # successes — see _on_track_preexisting — so batch totals stay
+        # correct (e.g. 40 already-existing + 19 downloaded == 59/59, not
+        # 19/19).
+        preexisting_jobs: list[tuple[str, str]] = []
 
         for card in selected:
+            key = str(id(card))
             track_playlist_name:   Optional[str] = None
             is_parent_discography: bool          = False
 
@@ -338,6 +346,9 @@ class DownloadController(QObject):
                 if dup is not None:
                     if self._cfg.duplicate_action == "skip":
                         card.set_status("done")
+                        card.set_progress(1.0)
+                        self._key_to_card[key] = card
+                        preexisting_jobs.append((key, str(dup)))
                         continue
                     else:  # "warn"
                         should_overwrite = confirm(
@@ -349,6 +360,9 @@ class DownloadController(QObject):
                         )
                         if not should_overwrite:
                             card.set_status("done")
+                            card.set_progress(1.0)
+                            self._key_to_card[key] = card
+                            preexisting_jobs.append((key, str(dup)))
                             continue
 
             # Map the card.platform string to a SourcePlatform enum so the
@@ -428,11 +442,10 @@ class DownloadController(QObject):
 
                 req.url_resolver = _resolve
 
-            key = str(id(card))
             self._key_to_card[key] = card
             jobs.append((key, req))
 
-        if not jobs:
+        if not jobs and not preexisting_jobs:
             return
 
         self._engine._cancel_event.clear()  # noqa: SLF001
@@ -444,21 +457,26 @@ class DownloadController(QObject):
         self._engine_start_logged = False
         self._first_byte_logged = False
         logger.info(
-            "[timing][click] queue built: %d job(s) in %.3fs",
-            len(jobs), time.monotonic() - t_click,
+            "[timing][click] queue built: %d job(s), %d preexisting in %.3fs",
+            len(jobs), len(preexisting_jobs), time.monotonic() - t_click,
         )
 
-        for card in selected:
+        # Only reset cards that will actually download — a duplicate-skip
+        # card was already set to "done" above and must not be clobbered
+        # back to "queued" here.
+        for key, _ in jobs:
+            card = self._key_to_card[key]
             card.set_status("queued")
             card.set_progress(0.0)
 
-        n = len(jobs)
+        n = len(jobs) + len(preexisting_jobs)
         self.cancel_visible.emit(True)
         self.downloading_changed.emit(True)
 
         from ui.workers.download_worker import DownloadWorker
         self._dl_worker = DownloadWorker(
             jobs=jobs,
+            preexisting=preexisting_jobs,
             engine=self._engine,
             config=self._cfg,
             db=self._db,
@@ -469,6 +487,7 @@ class DownloadController(QObject):
         self._dl_worker.track_speed.connect(self._on_track_speed)
         self._dl_worker.track_status.connect(self._on_track_status)
         self._dl_worker.track_finished.connect(self._on_track_finished)
+        self._dl_worker.track_preexisting.connect(self._on_track_preexisting)
         self._dl_worker.overall_progress.connect(self._on_worker_overall_progress)
         self._dl_worker.metrics.connect(self._on_worker_metrics)
         self._dl_worker.batch_snapshot.connect(self._on_worker_batch_snapshot)
@@ -714,6 +733,20 @@ class DownloadController(QObject):
             card.set_status("done")
             card.set_progress(1.0)
         self.show_success_bar.emit(output_path)
+
+    def _on_track_preexisting(self, key: str, output_path: str) -> None:
+        """Duplicate-skip resolution: the file already existed, nothing was
+        downloaded. The card was already set to "done" synchronously in
+        start_batch() for instant feedback — this just confirms it once the
+        orchestrator has formally registered the job. No success toast: the
+        old "skip" behavior was silent, and 40 toasts for pre-existing files
+        would be noise, not signal."""
+        if not self._is_active_worker_signal():
+            return
+        card = self._key_to_card.get(key)
+        if card:
+            card.set_status("done")
+            card.set_progress(1.0)
 
     def _on_track_error(self, key: str, err: object) -> None:
         if not self._is_active_worker_signal():

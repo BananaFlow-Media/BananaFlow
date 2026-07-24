@@ -1283,10 +1283,25 @@ class AppWindow(FluentWindow):
             )
         else:  # COMPLETED
             self._queue_panel.set_pause_resume_state(False)
-            self._status_bar.show_temporary(
-                t("status_completed_summary", n=done, plural=("" if done == 1 else "s")),
-                StatusKind.SUCCESS,
-            )
+            preexisting = snap.preexisting if snap else 0
+            if preexisting > 0:
+                # Anchor on completed/total, not a bare "N downloads" count —
+                # some of "completed" was a duplicate-skip that never
+                # downloaded anything, so the whole batch must not be
+                # labelled "downloads".
+                self._status_bar.show_temporary(
+                    t(
+                        "status_completed_with_preexisting",
+                        completed=done, total=total,
+                        downloaded=done - preexisting, preexisting=preexisting,
+                    ),
+                    StatusKind.SUCCESS,
+                )
+            else:
+                self._status_bar.show_temporary(
+                    t("status_completed_summary", n=done, plural=("" if done == 1 else "s")),
+                    StatusKind.SUCCESS,
+                )
 
         if clear_queue:
             self._cfg.queue_state = []
