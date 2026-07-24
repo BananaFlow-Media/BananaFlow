@@ -414,6 +414,10 @@ class AppWindow(FluentWindow):
         # _on_download / closeEvent).
         from core.match_prefetcher import MatchPrefetcher
         self._match_prefetcher = MatchPrefetcher()
+        # Per-fetch one-shot state: fire the 8-track prefetch the moment the
+        # first 8 pending cards exist (mid-scrape), exactly once per fetch.
+        self._prefetch_started = False
+        self._prefetch_pending_count = 0
 
     # ──────────────────────────────────────────────────────────────────────────
     # FluentWindow configuration
@@ -1303,8 +1307,14 @@ class AppWindow(FluentWindow):
     def _start_fetch(self, url: str) -> None:
         """Entry point for all fetching, intercepting channel URLs to ask what to scrape."""
         # A new fetch supersedes any in-flight fast-start prefetch from the
-        # previous catalog.
+        # previous catalog, and re-arms the one-shot early-prefetch trigger.
         self._match_prefetcher.cancel()
+        self._prefetch_started = False
+        self._prefetch_pending_count = 0
+        # Warm yt-dlp plugins now, at fetch start — independent of (and earlier
+        # than) the per-track pre-resolve, so the one-time load never lands on
+        # the first download's critical path.
+        self._match_prefetcher.warm_up_async()
         if not looks_like_url(url):
             if is_malformed_url_attempt(url):
                 # Starts with "scheme://" but isn't a real URL (broken/typo'd
@@ -1369,19 +1379,22 @@ class AppWindow(FluentWindow):
             StatusKind.SUCCESS,
         )
 
-        # Fast-start: while the catalog is on screen, warm yt-dlp plugins and
-        # pre-resolve the first few pending (two-stage Spotify) matches into the
-        # cache so a later Download click starts downloading without waiting on
-        # the match round-trip. No-op for fully-matched catalogs.
+        # Fallback for catalogs with fewer than 8 pending tracks: the mid-scrape
+        # trigger in _add_track_to_queue never reached the window, so fire once
+        # here now the full (small) catalog is known. One-shot guard prevents a
+        # double start for catalogs that already tripped the early trigger.
         self._start_match_prefetch()
 
     def _start_match_prefetch(self) -> None:
         """Kick the cancellable fast-start prefetch for the leading pending
-        (two-stage Spotify) tracks in the queue. No-op when nothing is pending.
+        (two-stage Spotify) tracks in the queue. One-shot per fetch, and a
+        no-op when nothing is pending.
 
         Only the first few pending cards are pre-resolved — never the whole
         catalog — and via the same resolve path, so match quality is unchanged.
         """
+        if self._prefetch_started:
+            return
         tds: list[dict] = []
         for card in self._queue_panel.get_all_cards():
             if getattr(card, "match_status", "matched") != "pending":
@@ -1395,6 +1408,7 @@ class AppWindow(FluentWindow):
             if len(tds) >= 8:  # matches MatchPrefetcher's default window
                 break
         if tds:
+            self._prefetch_started = True  # one-shot per fetch
             self._match_prefetcher.start(
                 tds, cookies_file=self._cfg.cookies_file or None
             )
@@ -1507,6 +1521,15 @@ class AppWindow(FluentWindow):
 
         self._index_to_card[idx] = card
         self._update_dl_bar()
+
+        # Fast-start: fire the 8-track pre-resolve the instant the first 8
+        # pending (two-stage Spotify) cards exist — mid-scrape, not after the
+        # whole catalog finishes. One-shot per fetch (guarded in the helper),
+        # so this never restarts the prefetch on every card.
+        if get("match_status", "matched") == "pending" and not self._prefetch_started:
+            self._prefetch_pending_count += 1
+            if self._prefetch_pending_count >= 8:
+                self._start_match_prefetch()
 
         thumb_url = get("thumbnail_url", "")
         if thumb_url:

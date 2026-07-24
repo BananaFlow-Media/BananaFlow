@@ -96,6 +96,23 @@ class MatchPrefetcher:
             )
             self._thread.start()
 
+    def warm_up_async(self) -> None:
+        """Warm yt-dlp's plugin registry once, off the caller's thread.
+
+        Kicked at fetch start so the one-time ``load_all_plugins()`` cost is
+        already paid by the time the first download runs — independent of, and
+        earlier than, the per-track pre-resolve. Idempotent and cheap: a second
+        call after the flag is set is a no-op inside ``warm_up_plugins``.
+        """
+        def _warm() -> None:
+            try:
+                from core.runtime_components import warm_up_plugins
+                warm_up_plugins()
+            except Exception as exc:  # noqa: BLE001 - warm-up must never raise out
+                logger.debug("[prefetch] async warm-up failed: %s", exc)
+
+        threading.Thread(target=_warm, name="plugin-warmup", daemon=True).start()
+
     def cancel(self) -> None:
         """Signal the background run to stop as soon as possible.
 

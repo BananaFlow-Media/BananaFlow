@@ -151,6 +151,11 @@ class DownloadOrchestrator:
         # reset per batch in run_batch.
         self._phase_lock = threading.Lock()
         self._phase_times: dict[str, list[float]] = {}
+        # Gate-starvation accounting: monotonic time the conservative gate was
+        # last released, so the next acquire can measure how long the download
+        # pipeline sat idle waiting for a match to become ready. Reset per batch.
+        self._gate_lock = threading.Lock()
+        self._gate_last_release: Optional[float] = None
 
     # ── Public API (call from any thread) ─────────────────────────────────────
 
@@ -222,6 +227,8 @@ class DownloadOrchestrator:
         self._cancel_events.clear()
         with self._phase_lock:
             self._phase_times.clear()
+        with self._gate_lock:
+            self._gate_last_release = None
         run_start = time.monotonic()
 
         # Only serialize YouTube jobs when there's more than one in this
@@ -260,14 +267,13 @@ class DownloadOrchestrator:
                 if self._engine._cancel_event.is_set():
                     break
                     
-                # Stagger the starts so the batch does not hit the server
-                # as a burst — keeps the request rate under typical limits.
-                # The first pool-fill (the first n_workers jobs) is submitted
-                # WITHOUT stagger so their matches resolve in parallel right
-                # away and pipeline behind the conservative download gate; only
-                # jobs beyond that opening wave are staggered. Actual download
-                # politeness is still enforced by the conservative YouTube gate.
-                if delay_range and self._should_stagger(i, n_workers):
+                # Stagger the starts so the batch does not hit the server as a
+                # burst. Lazy (Spotify two-stage) jobs skip the stagger for the
+                # opening pool-fill so their matches resolve in parallel and
+                # pipeline behind the conservative gate; regular downloads keep
+                # the original per-job stagger (see _should_stagger).
+                is_lazy = getattr(req, "url_resolver", None) is not None
+                if delay_range and self._should_stagger(i, n_workers, is_lazy):
                     sleep_time = random.uniform(*delay_range)
                     logger.debug(f"[Orchestrator] Staggering start: sleeping {sleep_time:.2f}s")
                     sleep_start = time.time()
@@ -383,14 +389,23 @@ class DownloadOrchestrator:
     # ── Stagger / timing helpers ──────────────────────────────────────────────
 
     @staticmethod
-    def _should_stagger(i: int, n_workers: int) -> bool:
+    def _should_stagger(i: int, n_workers: int, is_lazy: bool) -> bool:
         """Whether job ``i`` gets the inter-start stagger sleep.
 
-        The opening wave (the first ``n_workers`` jobs, indices 0..n_workers-1)
-        is never staggered — those fill the pool immediately so their matches
-        resolve in parallel. Only jobs beyond the opening wave are staggered.
+        Lazy (Spotify two-stage) jobs carry a ``url_resolver``: their opening
+        wave (the first ``n_workers`` jobs) is submitted WITHOUT stagger so
+        their matches resolve in parallel — the actual downloads still serialize
+        behind the conservative gate, so there is no request burst. Only lazy
+        jobs beyond the opening wave are staggered.
+
+        Regular jobs (direct URLs, no resolver) keep the original burst-
+        politeness behaviour — every job after the first is staggered — because
+        for them the opening wave IS a burst of real downloads (e.g. fast mode
+        or non-YouTube, where no gate serializes them).
         """
-        return i >= n_workers
+        if is_lazy:
+            return i >= n_workers
+        return i > 0
 
     def _record_phase(self, name: str, seconds: float) -> None:
         """Accumulate a per-phase duration for the end-of-batch timing summary."""
@@ -400,21 +415,51 @@ class DownloadOrchestrator:
             slot[1] += 1
 
     def _log_phase_summary(self, wall_seconds: float) -> None:
-        """Emit one aggregate timing line splitting resolver / gate / cooldown /
-        download so we can see where a batch's wall-clock actually goes."""
+        """Emit the aggregate timing summary for the batch.
+
+        Two distinct kinds of number, kept separate on purpose:
+
+        * **cumulative worker time** — per-phase sums across *parallel* workers
+          (resolver_wait, gate_wait, download_time, first_byte_wait, cooldown).
+          These overlap in wall-clock and can exceed ``wall_seconds``; they are
+          NOT a partition of it. Presented as totals + averages only.
+        * **critical path** — the serialized download pipeline that actually
+          bounds a conservative batch: ``gate_idle`` (starvation — the pipe sat
+          idle waiting for a match) plus the serial download+cooldown chain.
+          This is what to compare against wall time.
+        """
         with self._phase_lock:
             phases = {k: tuple(v) for k, v in self._phase_times.items()}
-        parts = []
-        for name in ("resolver_wait", "gate_wait", "download_time", "cooldown"):
+
+        cumulative = []
+        for name in (
+            "resolver_wait", "gate_wait", "download_time", "first_byte_wait", "cooldown",
+        ):
             total, count = phases.get(name, (0.0, 0.0))
             if count:
-                parts.append(
+                cumulative.append(
                     f"{name}={total:.1f}s(n={int(count)}, avg={total / count:.2f}s)"
                 )
         logger.info(
-            "[timing][batch] wall=%.1fs %s",
-            wall_seconds, " ".join(parts) if parts else "(no phase data)",
+            "[timing][batch] wall=%.1fs | cumulative worker time (parallel, "
+            "not a partition of wall): %s",
+            wall_seconds, " ".join(cumulative) if cumulative else "(no phase data)",
         )
+
+        # Critical path is only meaningful when the conservative gate serialized
+        # this batch; without it there is no single serial pipeline to bound.
+        if self._youtube_serialize:
+            gate_idle_total = phases.get("gate_idle", (0.0, 0.0))[0]
+            download_total = phases.get("download_time", (0.0, 0.0))[0]
+            cooldown_total = phases.get("cooldown", (0.0, 0.0))[0]
+            serial_work = download_total + cooldown_total
+            idle_pct = (gate_idle_total / wall_seconds * 100.0) if wall_seconds > 0 else 0.0
+            logger.info(
+                "[timing][batch] critical path: gate_idle(starvation)=%.1fs (%.0f%% of "
+                "wall) serial_download+cooldown=%.1fs — near-zero gate_idle means the "
+                "cooldown/download chain is the bottleneck, not match availability.",
+                gate_idle_total, idle_pct, serial_work,
+            )
 
     # ── Per-job runner (pool thread) ──────────────────────────────────────────
 
@@ -502,9 +547,19 @@ class DownloadOrchestrator:
             )
             gate_start = time.monotonic()
             self._youtube_gate.acquire()
-            gate_wait = time.monotonic() - gate_start
+            acquired_at = time.monotonic()
+            gate_wait = acquired_at - gate_start
             self._record_phase("gate_wait", gate_wait)
             logger.debug("[timing][track] %s gate_wait=%.2fs", key, gate_wait)
+            # Gate starvation: time between the previous holder releasing and
+            # this acquire. ~0 means a matched job was always ready to go (the
+            # pipeline never starved); large means the download pipe sat idle
+            # waiting on a match — the signal that match availability, not the
+            # cooldown, is the bottleneck.
+            with self._gate_lock:
+                last_release = self._gate_last_release
+            if last_release is not None:
+                self._record_phase("gate_idle", max(0.0, acquired_at - last_release))
             if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
                 self._youtube_gate.release()
                 self._aggregator.cancel(key)
@@ -520,6 +575,8 @@ class DownloadOrchestrator:
             logger.debug("[timing][track] %s download_time=%.2fs", key, download_time)
             if conservative_youtube:
                 self._youtube_cooldown(cancel_ev, key)
+                with self._gate_lock:
+                    self._gate_last_release = time.monotonic()
                 self._youtube_gate.release()
 
     def _youtube_cooldown(self, cancel_ev: threading.Event, key: str) -> None:
@@ -550,9 +607,24 @@ class DownloadOrchestrator:
         self._safe_cb("on_track_status", key, "downloading")
         logger.debug("[Orchestrator] Starting %s", key)
 
+        # "downloading" is emitted here, before any byte arrives. Time the gap
+        # to the first non-zero progress separately so the honest "download
+        # actually started" moment (first byte) is distinguished from the
+        # engine-start status.
+        engine_start_ts = time.monotonic()
+        first_byte_seen = [False]
         update_counter = [0]
 
         def on_progress(p: DownloadProgress) -> None:
+            if not first_byte_seen[0] and ((p.downloaded_bytes or 0) > 0 or (p.fraction or 0) > 0):
+                first_byte_seen[0] = True
+                first_byte_wait = time.monotonic() - engine_start_ts
+                self._record_phase("first_byte_wait", first_byte_wait)
+                logger.debug(
+                    "[timing][track] %s first_byte_wait=%.2fs (engine start -> first byte)",
+                    key, first_byte_wait,
+                )
+
             if p.thumbnail_url and not getattr(req, "_thumb_sent", False):
                 # Prefer the original thumbnail (e.g. Spotify) if we had one
                 thumb_to_send = req.thumbnail_url if req.thumbnail_url else p.thumbnail_url
