@@ -406,6 +406,14 @@ class AppWindow(FluentWindow):
             db=self._db,
             parent=self,
         )
+        # Fast-start match prefetch for two-stage Spotify catalogs: warms
+        # yt-dlp plugins and pre-resolves the first few pending tracks into the
+        # match cache while the catalog is on screen, so the first download
+        # after a click starts without paying the match round-trip. Cancellable;
+        # a single reused instance (see _on_fetch_finished / _start_fetch /
+        # _on_download / closeEvent).
+        from core.match_prefetcher import MatchPrefetcher
+        self._match_prefetcher = MatchPrefetcher()
 
     # ──────────────────────────────────────────────────────────────────────────
     # FluentWindow configuration
@@ -926,6 +934,10 @@ class AppWindow(FluentWindow):
                 parent=self,
             )
             return
+        # The download workers now own match resolution; stop the fast-start
+        # prefetch so the two don't race the same lookups. Matches it already
+        # cached remain and give the opening tracks instant, cache-hit resolves.
+        self._match_prefetcher.cancel()
         opts = self._options_bar.get_options()
         self._download_ctrl.start_batch(
             selected, opts, self._last_url_kind, self._last_playlist_title
@@ -1290,6 +1302,9 @@ class AppWindow(FluentWindow):
 
     def _start_fetch(self, url: str) -> None:
         """Entry point for all fetching, intercepting channel URLs to ask what to scrape."""
+        # A new fetch supersedes any in-flight fast-start prefetch from the
+        # previous catalog.
+        self._match_prefetcher.cancel()
         if not looks_like_url(url):
             if is_malformed_url_attempt(url):
                 # Starts with "scheme://" but isn't a real URL (broken/typo'd
@@ -1353,6 +1368,36 @@ class AppWindow(FluentWindow):
             t("fetch_done", n=n, plural=("" if n == 1 else "s")),
             StatusKind.SUCCESS,
         )
+
+        # Fast-start: while the catalog is on screen, warm yt-dlp plugins and
+        # pre-resolve the first few pending (two-stage Spotify) matches into the
+        # cache so a later Download click starts downloading without waiting on
+        # the match round-trip. No-op for fully-matched catalogs.
+        self._start_match_prefetch()
+
+    def _start_match_prefetch(self) -> None:
+        """Kick the cancellable fast-start prefetch for the leading pending
+        (two-stage Spotify) tracks in the queue. No-op when nothing is pending.
+
+        Only the first few pending cards are pre-resolved — never the whole
+        catalog — and via the same resolve path, so match quality is unchanged.
+        """
+        tds: list[dict] = []
+        for card in self._queue_panel.get_all_cards():
+            if getattr(card, "match_status", "matched") != "pending":
+                continue
+            tds.append({
+                "spotify_id":   getattr(card, "spotify_id", ""),
+                "title":        card.title,
+                "artist":       card.artist,
+                "duration_sec": getattr(card, "duration_sec", None),
+            })
+            if len(tds) >= 8:  # matches MatchPrefetcher's default window
+                break
+        if tds:
+            self._match_prefetcher.start(
+                tds, cookies_file=self._cfg.cookies_file or None
+            )
 
     def _on_fetch_error(self, msg: str) -> None:
         err = classify_error(Exception(msg))
@@ -1734,6 +1779,11 @@ class AppWindow(FluentWindow):
             self._clipboard_worker.stop()
 
         # 4. Cancel + join workers
+        # getattr-guarded like _net_monitor/_svc below: tolerate a close that
+        # fires before _build_controllers finished (e.g. a first-run crash).
+        prefetcher = getattr(self, "_match_prefetcher", None)
+        if prefetcher is not None:
+            prefetcher.cancel()  # daemon thread; signal it to stop
         dl_worker = self._download_ctrl._dl_worker  # noqa: SLF001
         if dl_worker and dl_worker.isRunning():
             logger.info("[AppWindow] Shutting down DownloadWorker…")

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -127,6 +128,12 @@ class DownloadController(QObject):
         # so all writes go through _set_termination_intent().
         self._termination_intent: Optional[BatchOutcome] = None
 
+        # Fast-start timing: wall-clock of the last Download click and whether
+        # the "click -> first download start" line has been logged for it yet.
+        # Diagnostics only (see the [timing] logs) — never affects flow.
+        self._batch_click_ts: Optional[float] = None
+        self._first_download_logged: bool = False
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start_batch(
@@ -142,6 +149,8 @@ class DownloadController(QObject):
         lives here.
         """
         from ui.dialogs.styled_dialog import confirm, show_warning
+
+        t_click = time.monotonic()
 
         if not selected:
             # "Nothing selected" is not a global-status condition \u2014 the
@@ -425,6 +434,17 @@ class DownloadController(QObject):
             return
 
         self._engine._cancel_event.clear()  # noqa: SLF001
+
+        # Fast-start diagnostics: how long from the click to a built job queue,
+        # and (later, on the first "downloading" status) to the first download
+        # actually starting. See _on_track_status.
+        self._batch_click_ts = t_click
+        self._first_download_logged = False
+        logger.info(
+            "[timing][click] queue built: %d job(s) in %.3fs",
+            len(jobs), time.monotonic() - t_click,
+        )
+
         for card in selected:
             card.set_status("queued")
             card.set_progress(0.0)
@@ -651,6 +671,19 @@ class DownloadController(QObject):
     def _on_track_status(self, key: str, status: str) -> None:
         if not self._is_active_worker_signal():
             return
+        # First track to actually reach "downloading" ends the click→first-
+        # download window. This is the headline latency the fast-start work
+        # targets — logged once per batch.
+        if (
+            status == "downloading"
+            and not self._first_download_logged
+            and self._batch_click_ts is not None
+        ):
+            self._first_download_logged = True
+            logger.info(
+                "[timing][click] first download start: %.3fs after click",
+                time.monotonic() - self._batch_click_ts,
+            )
         card = self._key_to_card.get(key)
         if card:
             card.set_status(status)

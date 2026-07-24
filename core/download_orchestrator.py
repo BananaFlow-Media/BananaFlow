@@ -144,6 +144,14 @@ class DownloadOrchestrator:
         self._youtube_gate = threading.Semaphore(CONSERVATIVE_MAX_PARALLEL_YOUTUBE)
         self._youtube_serialize = False
 
+        # Per-phase timing accounting (diagnostics only — never affects flow).
+        # Split so we can see where a batch spends its wall-clock time and
+        # decide later whether the conservative gate/cooldown policy itself is
+        # the bottleneck. name -> [total_seconds, count]. Guarded by its lock;
+        # reset per batch in run_batch.
+        self._phase_lock = threading.Lock()
+        self._phase_times: dict[str, list[float]] = {}
+
     # ── Public API (call from any thread) ─────────────────────────────────────
 
     def cancel(self) -> None:
@@ -212,6 +220,9 @@ class DownloadOrchestrator:
             stagger_delay_range=stagger_delay_range,
         )
         self._cancel_events.clear()
+        with self._phase_lock:
+            self._phase_times.clear()
+        run_start = time.monotonic()
 
         # Only serialize YouTube jobs when there's more than one in this
         # batch — a lone YouTube job (e.g. single-track download, or a
@@ -251,7 +262,12 @@ class DownloadOrchestrator:
                     
                 # Stagger the starts so the batch does not hit the server
                 # as a burst — keeps the request rate under typical limits.
-                if i > 0 and delay_range:
+                # The first pool-fill (the first n_workers jobs) is submitted
+                # WITHOUT stagger so their matches resolve in parallel right
+                # away and pipeline behind the conservative download gate; only
+                # jobs beyond that opening wave are staggered. Actual download
+                # politeness is still enforced by the conservative YouTube gate.
+                if delay_range and self._should_stagger(i, n_workers):
                     sleep_time = random.uniform(*delay_range)
                     logger.debug(f"[Orchestrator] Staggering start: sleeping {sleep_time:.2f}s")
                     sleep_start = time.time()
@@ -354,6 +370,7 @@ class DownloadOrchestrator:
             "[Orchestrator] Batch finished: total=%d completed=%d failed=%d cancelled=%s outcome=%s",
             self._total, self._completed, self._failed, was_cancelled, outcome.value,
         )
+        self._log_phase_summary(time.monotonic() - run_start)
 
         return BatchResult(
             total=self._total,
@@ -361,6 +378,42 @@ class DownloadOrchestrator:
             failed=self._failed,
             cancelled=was_cancelled,
             outcome=outcome,
+        )
+
+    # ── Stagger / timing helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _should_stagger(i: int, n_workers: int) -> bool:
+        """Whether job ``i`` gets the inter-start stagger sleep.
+
+        The opening wave (the first ``n_workers`` jobs, indices 0..n_workers-1)
+        is never staggered — those fill the pool immediately so their matches
+        resolve in parallel. Only jobs beyond the opening wave are staggered.
+        """
+        return i >= n_workers
+
+    def _record_phase(self, name: str, seconds: float) -> None:
+        """Accumulate a per-phase duration for the end-of-batch timing summary."""
+        with self._phase_lock:
+            slot = self._phase_times.setdefault(name, [0.0, 0.0])
+            slot[0] += seconds
+            slot[1] += 1
+
+    def _log_phase_summary(self, wall_seconds: float) -> None:
+        """Emit one aggregate timing line splitting resolver / gate / cooldown /
+        download so we can see where a batch's wall-clock actually goes."""
+        with self._phase_lock:
+            phases = {k: tuple(v) for k, v in self._phase_times.items()}
+        parts = []
+        for name in ("resolver_wait", "gate_wait", "download_time", "cooldown"):
+            total, count = phases.get(name, (0.0, 0.0))
+            if count:
+                parts.append(
+                    f"{name}={total:.1f}s(n={int(count)}, avg={total / count:.2f}s)"
+                )
+        logger.info(
+            "[timing][batch] wall=%.1fs %s",
+            wall_seconds, " ".join(parts) if parts else "(no phase data)",
         )
 
     # ── Per-job runner (pool thread) ──────────────────────────────────────────
@@ -398,11 +451,15 @@ class DownloadOrchestrator:
             self._aggregator.cancel(key)
             self._safe_cb("on_track_status", key, "cancelled")
             return True
+        resolve_start = time.monotonic()
         try:
             resolved = resolver(cancel_ev)
         except Exception as exc:  # noqa: BLE001 - a bad match must not sink the job
             logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
             resolved = ""
+        resolver_wait = time.monotonic() - resolve_start
+        self._record_phase("resolver_wait", resolver_wait)
+        logger.debug("[timing][track] %s resolver_wait=%.2fs", key, resolver_wait)
         if resolved:
             req.url = resolved
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
@@ -443,16 +500,24 @@ class DownloadOrchestrator:
                 CONSERVATIVE_MAX_PARALLEL_YOUTUBE,
                 CONSERVATIVE_DELAY_RANGE[0], CONSERVATIVE_DELAY_RANGE[1], key,
             )
+            gate_start = time.monotonic()
             self._youtube_gate.acquire()
+            gate_wait = time.monotonic() - gate_start
+            self._record_phase("gate_wait", gate_wait)
+            logger.debug("[timing][track] %s gate_wait=%.2fs", key, gate_wait)
             if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
                 self._youtube_gate.release()
                 self._aggregator.cancel(key)
                 self._safe_cb("on_track_status", key, "cancelled")
                 return
 
+        download_start = time.monotonic()
         try:
             self._download_one_locked(key, req, cancel_ev)
         finally:
+            download_time = time.monotonic() - download_start
+            self._record_phase("download_time", download_time)
+            logger.debug("[timing][track] %s download_time=%.2fs", key, download_time)
             if conservative_youtube:
                 self._youtube_cooldown(cancel_ev, key)
                 self._youtube_gate.release()
@@ -468,10 +533,11 @@ class DownloadOrchestrator:
         slept = 0.0
         while slept < delay:
             if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
-                return
+                break
             chunk = min(0.2, delay - slept)
             time.sleep(chunk)
             slept += chunk
+        self._record_phase("cooldown", slept)
 
     def _download_one_locked(self, key: str, req: DownloadRequest, cancel_ev: threading.Event) -> None:
         """The actual per-job download logic, run either directly (non-YouTube
