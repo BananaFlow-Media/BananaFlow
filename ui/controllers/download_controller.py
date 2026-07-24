@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -127,6 +128,14 @@ class DownloadController(QObject):
         # so all writes go through _set_termination_intent().
         self._termination_intent: Optional[BatchOutcome] = None
 
+        # Fast-start timing: wall-clock of the last Download click and one-shot
+        # flags for the two headline latencies logged per batch — the engine
+        # starting (status "downloading") and the first byte actually arriving
+        # (first non-zero progress). Diagnostics only — never affects flow.
+        self._batch_click_ts: Optional[float] = None
+        self._engine_start_logged: bool = False
+        self._first_byte_logged: bool = False
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start_batch(
@@ -142,6 +151,8 @@ class DownloadController(QObject):
         lives here.
         """
         from ui.dialogs.styled_dialog import confirm, show_warning
+
+        t_click = time.monotonic()
 
         if not selected:
             # "Nothing selected" is not a global-status condition \u2014 the
@@ -425,6 +436,18 @@ class DownloadController(QObject):
             return
 
         self._engine._cancel_event.clear()  # noqa: SLF001
+
+        # Fast-start diagnostics: how long from the click to a built job queue,
+        # and (later, on the first "downloading" status) to the first download
+        # actually starting. See _on_track_status.
+        self._batch_click_ts = t_click
+        self._engine_start_logged = False
+        self._first_byte_logged = False
+        logger.info(
+            "[timing][click] queue built: %d job(s) in %.3fs",
+            len(jobs), time.monotonic() - t_click,
+        )
+
         for card in selected:
             card.set_status("queued")
             card.set_progress(0.0)
@@ -631,6 +654,20 @@ class DownloadController(QObject):
     def _on_track_progress(self, key: str, fraction: float) -> None:
         if not self._is_active_worker_signal():
             return
+        # First non-zero progress anywhere in the batch = the first byte, the
+        # honest "download actually started" moment. Checked BEFORE the UI
+        # throttle below so a tiny first tick is never swallowed. This is the
+        # headline click->first-download latency the fast-start work targets.
+        if (
+            fraction > 0.0
+            and not self._first_byte_logged
+            and self._batch_click_ts is not None
+        ):
+            self._first_byte_logged = True
+            logger.info(
+                "[timing][click] first byte (download started): %.3fs after click",
+                time.monotonic() - self._batch_click_ts,
+            )
         prev = self._card_progress.get(key, 0.0)
         if fraction - prev < 0.01 and fraction < 1.0:
             return
@@ -651,6 +688,20 @@ class DownloadController(QObject):
     def _on_track_status(self, key: str, status: str) -> None:
         if not self._is_active_worker_signal():
             return
+        # First track to reach "downloading" = the engine started (URL resolved,
+        # gate acquired, about to hand off to yt-dlp) — but NOT yet the first
+        # byte (extract_info still runs). Logged separately from first-byte so
+        # the two costs are visible; the first-byte line is the true headline.
+        if (
+            status == "downloading"
+            and not self._engine_start_logged
+            and self._batch_click_ts is not None
+        ):
+            self._engine_start_logged = True
+            logger.info(
+                "[timing][click] first engine start (downloading): %.3fs after click",
+                time.monotonic() - self._batch_click_ts,
+            )
         card = self._key_to_card.get(key)
         if card:
             card.set_status(status)
