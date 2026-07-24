@@ -1283,10 +1283,21 @@ class AppWindow(FluentWindow):
             )
         else:  # COMPLETED
             self._queue_panel.set_pause_resume_state(False)
-            self._status_bar.show_temporary(
-                t("status_completed_summary", n=done, plural=("" if done == 1 else "s")),
-                StatusKind.SUCCESS,
-            )
+            preexisting = snap.preexisting if snap else 0
+            if preexisting > 0:
+                self._status_bar.show_temporary(
+                    t(
+                        "status_completed_with_preexisting",
+                        n=done, plural=("" if done == 1 else "s"),
+                        downloaded=done - preexisting, preexisting=preexisting,
+                    ),
+                    StatusKind.SUCCESS,
+                )
+            else:
+                self._status_bar.show_temporary(
+                    t("status_completed_summary", n=done, plural=("" if done == 1 else "s")),
+                    StatusKind.SUCCESS,
+                )
 
         if clear_queue:
             self._cfg.queue_state = []

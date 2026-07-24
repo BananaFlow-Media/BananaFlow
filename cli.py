@@ -111,6 +111,16 @@ class TerminalCallbacks:
         name = Path(output_path).name if output_path else "unknown"
         print(f"\r  ✅  [{n}/{self._total}] {name}", file=sys.stderr)
 
+    def on_track_preexisting(self, key: str, output_path: str) -> None:
+        # Duplicate-skip: the file already existed, nothing was downloaded —
+        # still a terminal success for the running total (see
+        # core.batch_progress.JobState.PREEXISTING).
+        with self._lock:
+            self._completed += 1
+            n = self._completed
+        name = Path(output_path).name if output_path else "unknown"
+        print(f"\r  ⏭️  [{n}/{self._total}] {name} (already exists)", file=sys.stderr)
+
     def on_track_error(self, key: str, error) -> None:
         with self._lock:
             self._failed += 1

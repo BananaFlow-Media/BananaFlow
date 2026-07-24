@@ -310,3 +310,58 @@ class TestCancellationSemantics:
         assert snap.completed == 1
         assert snap.cancelled == 1
         assert snap.progress < 1.0
+
+
+# ── Duplicate-skip ("preexisting") accounting ────────────────────────────────
+# Root-cause coverage for the "19/19 instead of 59/59" bug: a batch of 40
+# duplicate-skips + 19 real downloads must report 59/59 completed, with the
+# 40 skips distinguishable from the 19 real downloads.
+
+class TestPreexistingAccounting:
+    def test_preexisting_counts_as_completed(self):
+        keys = [f"skip{i}" for i in range(40)] + [f"dl{i}" for i in range(19)]
+        a = _agg(keys)
+        for i in range(40):
+            a.mark_preexisting(f"skip{i}")
+        for i in range(19):
+            a.complete(f"dl{i}", final_bytes=100)
+        snap = a.snapshot()
+        assert snap.total == 59
+        assert snap.completed == 59
+        assert snap.preexisting == 40
+        assert snap.downloaded == 19
+        assert snap.progress == pytest.approx(1.0)
+
+    def test_preexisting_is_terminal_success(self):
+        a = _agg(["a"])
+        a.mark_preexisting("a")
+        snap = a.snapshot()
+        assert snap.completed == 1
+        assert snap.preexisting == 1
+        assert snap.progress == pytest.approx(1.0)
+        assert snap.speed_bps == 0.0
+        assert snap.finished == 1
+
+        # A terminal state cannot be reopened by a stray late update.
+        a.update("a", downloaded_bytes=1, total_bytes=100, fraction=0.01)
+        snap2 = a.snapshot()
+        assert snap2.completed == 1
+        assert snap2.preexisting == 1
+
+    def test_preexisting_does_not_contend_with_failed_or_cancelled(self):
+        a = _agg(["a"])
+        a.fail("a")
+        a.mark_preexisting("a")  # must not resurrect a terminal failure
+        snap = a.snapshot()
+        assert snap.failed == 1
+        assert snap.preexisting == 0
+
+    def test_mixed_batch_progress_not_diluted_by_preexisting(self):
+        """An in-flight real download's progress must be weighted correctly
+        alongside instantly-terminal preexisting jobs, not averaged down."""
+        a = _agg(["skip", "dl"])
+        a.mark_preexisting("skip")
+        a.update("dl", downloaded_bytes=50, total_bytes=100)
+        snap = a.snapshot()
+        # skip contributes 100/100 done, dl contributes 50/100 done.
+        assert snap.progress == pytest.approx(0.75)

@@ -965,8 +965,8 @@ class TestCLICallbackContract:
 
         cb = TerminalCallbacks(total=1, quiet=True)
         snapshot = BatchSnapshot(
-            total=1, queued=0, active=1, completed=0, failed=0, paused=0,
-            cancelled=0, progress=0.5, byte_weighted=True, speed_bps=0.0,
+            total=1, queued=0, active=1, completed=0, preexisting=0, failed=0,
+            paused=0, cancelled=0, progress=0.5, byte_weighted=True, speed_bps=0.0,
             raw_speed_bps=0.0, eta_seconds=None, eta_is_estimate=True,
         )
         # DownloadOrchestrator._safe_cb calls fn(*args) positionally with

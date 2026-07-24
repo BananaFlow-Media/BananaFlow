@@ -69,6 +69,9 @@ class _SignalAdapter:
     def on_track_finished(self, key: str, output_path: str) -> None:
         self._w.track_finished.emit(key, output_path)
 
+    def on_track_preexisting(self, key: str, output_path: str) -> None:
+        self._w.track_preexisting.emit(key, output_path)
+
     def on_track_error(self, key: str, error: ErrorInfo) -> None:
         self._w.job_error.emit(key, error)
 
@@ -118,6 +121,7 @@ class DownloadWorker(QThread):
     track_speed      = Signal(str, float, float)
     track_status     = Signal(str, str)
     track_finished   = Signal(str, str)
+    track_preexisting = Signal(str, str)   # (key, existing_path) — duplicate-skip, no download ran
     overall_progress = Signal(float)
     metrics          = Signal(str, str)
     batch_snapshot   = Signal(object)          # core.batch_progress.BatchSnapshot
@@ -136,10 +140,12 @@ class DownloadWorker(QThread):
         config:      AppConfig,
         db:          Optional[HistoryDB] = None,
         max_workers: int = 3,
+        preexisting: Optional[list[tuple[str, str]]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._jobs   = jobs
+        self._preexisting = preexisting or []
         self._cfg    = config
         self._orch   = DownloadOrchestrator(
             engine=engine,
@@ -186,7 +192,9 @@ class DownloadWorker(QThread):
         """
         try:
             delay_range = self._cfg.download_delay_range
-            self._orch.run_batch(self._jobs, delay_range=delay_range)
+            self._orch.run_batch(
+                self._jobs, delay_range=delay_range, preexisting=self._preexisting,
+            )
         except Exception as exc:            # noqa: BLE001 - must not escape a QThread
             logger.exception("[DownloadWorker] Batch failed with an unhandled error")
             from utils.security import redact_text

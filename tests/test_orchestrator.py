@@ -64,6 +64,7 @@ class FakeCallbacks:
     def __init__(self):
         self.track_statuses: list[tuple[str, str]] = []
         self.track_finished: list[tuple[str, str]] = []
+        self.track_preexisting: list[tuple[str, str]] = []
         self.track_errors: list[tuple[str, ErrorInfo]] = []
         self.overall: list[float] = []
         self.messages: list[str] = []
@@ -77,6 +78,8 @@ class FakeCallbacks:
         self.track_statuses.append((key, status))
     def on_track_finished(self, key, path):
         self.track_finished.append((key, path))
+    def on_track_preexisting(self, key, path):
+        self.track_preexisting.append((key, path))
     def on_track_error(self, key, error):
         self.track_errors.append((key, error))
     def on_overall_progress(self, fraction):
@@ -185,6 +188,80 @@ class TestDownloadOrchestrator:
         assert result.total == 0
         assert result.completed == 0
         assert cb.batch_done is True
+
+
+class TestPreexistingJobs:
+    """Duplicate-skip jobs: no engine.download() call, terminal success,
+    correctly folded into the batch total. Root-cause coverage for the
+    "19/19 instead of 59/59" bug — see DownloadOrchestrator.run_batch's
+    `preexisting` parameter."""
+
+    def test_preexisting_never_touches_the_engine(self):
+        from core.download_orchestrator import DownloadOrchestrator
+        engine = FakeEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=2)
+
+        result = orch.run_batch([], preexisting=[("skip1", "/music/a.mp3")])
+
+        assert result.total == 1
+        assert result.completed == 1
+        assert result.failed == 0
+        assert engine._downloaded == []  # no real download ran
+        assert cb.track_preexisting == [("skip1", "/music/a.mp3")]
+        assert cb.track_finished == []  # not the same callback as a real finish
+
+    def test_mixed_batch_total_is_downloads_plus_preexisting(self):
+        from core.download_orchestrator import DownloadOrchestrator
+        engine = FakeEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=3)
+
+        jobs = [_make_job(f"dl{i}", f"http://dl{i}") for i in range(19)]
+        preexisting = [(f"skip{i}", f"/music/skip{i}.mp3") for i in range(40)]
+
+        result = orch.run_batch(jobs, preexisting=preexisting)
+
+        assert result.total == 59
+        assert result.completed == 59
+        assert result.failed == 0
+        assert len(cb.track_finished) == 19       # real downloads
+        assert len(cb.track_preexisting) == 40     # duplicate-skips
+        assert cb.snapshots[-1].preexisting == 40
+        assert cb.snapshots[-1].downloaded == 19
+        assert "already existed" in cb.messages[-1]
+
+    def test_all_preexisting_batch_is_not_treated_as_empty(self):
+        """An empty `jobs` list with non-empty `preexisting` must still be a
+        real, completed batch — not the "no fake 100%" empty-batch path."""
+        from core.download_orchestrator import DownloadOrchestrator
+        from core.batch_outcome import BatchOutcome
+        engine = FakeEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb)
+
+        result = orch.run_batch([], preexisting=[("skip1", "/a.mp3"), ("skip2", "/b.mp3")])
+
+        assert result.total == 2
+        assert result.completed == 2
+        assert result.outcome == BatchOutcome.COMPLETED
+        assert cb.overall[-1] == pytest.approx(1.0)
+
+    def test_precancelled_batch_marks_preexisting_cancelled_not_done(self):
+        from core.download_orchestrator import DownloadOrchestrator
+        engine = FakeEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb)
+        engine._cancel_event.set()
+
+        result = orch.run_batch(
+            [_make_job("a", "http://a")], preexisting=[("skip1", "/a.mp3")],
+        )
+
+        assert result.cancelled is True
+        statuses = dict(cb.track_statuses)
+        assert statuses.get("skip1") == "cancelled"
+        assert cb.track_preexisting == []  # never resolved as a success
 
 
 class TestBatchOutcome:
