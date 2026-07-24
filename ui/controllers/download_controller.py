@@ -150,7 +150,7 @@ class DownloadController(QObject):
         DownloadWorker.  All job-building logic that was in AppWindow._on_download
         lives here.
         """
-        from ui.dialogs.styled_dialog import confirm, show_warning
+        from ui.dialogs.styled_dialog import show_warning
 
         t_click = time.monotonic()
 
@@ -219,13 +219,101 @@ class DownloadController(QObject):
         is_solo         = len(selected) == 1
 
         jobs: list[tuple[str, DownloadRequest]] = []
-        # Duplicate-skip resolutions (policy "skip", or "warn" declined): the
-        # file already exists on disk and no download will run for it. These
-        # must still be registered with the orchestrator as terminal
+        # Duplicate-skip resolutions (policy "skip", or "warn" -> skip all):
+        # the file already exists on disk and no download will run for it.
+        # These must still be registered with the orchestrator as terminal
         # successes — see _on_track_preexisting — so batch totals stay
         # correct (e.g. 40 already-existing + 19 downloaded == 59/59, not
         # 19/19).
         preexisting_jobs: list[tuple[str, str]] = []
+        # Cards found duplicate under the "warn" policy: resolution is
+        # deferred until every card has been scanned, so the whole batch's
+        # duplicates can be presented in ONE dialog (see below) instead of
+        # one confirm() popup per file.
+        pending_warn: list[dict] = []
+
+        def _build_request(
+            card, output_dir: str, track_playlist_name: Optional[str],
+            is_parent_discography: bool, track_index: Optional[int], is_clean: bool,
+        ) -> DownloadRequest:
+            # Map the card.platform string to a SourcePlatform enum so the
+            # orchestrator can persist the correct platform on the history
+            # record. Unknown / missing values pass through as None and the
+            # orchestrator records them as "unknown".
+            card_platform_str = (card.platform or "").lower()
+            req_platform = {
+                "youtube": SourcePlatform.YOUTUBE,
+                "ytmusic": SourcePlatform.YOUTUBE_MUSIC,
+                "spotify": SourcePlatform.SPOTIFY,
+                "generic": SourcePlatform.GENERIC,
+            }.get(card_platform_str)
+
+            from utils.url_cleaner import clean_youtube_url
+
+            req = DownloadRequest(
+                url=clean_youtube_url(card.track_url),
+                output_dir=output_dir,
+                media_type=media_type,
+                audio_quality=audio_q,
+                video_quality=video_q,
+                audio_format=audio_codec,
+                video_format=video_format,
+                embed_thumbnail=self._cfg.embed_thumbnail,
+                embed_metadata=self._cfg.embed_metadata,
+                forced_title=card.title,
+                forced_artist=card.artist,
+                forced_album=card.album,
+                forced_duration=getattr(card, "duration_sec", None),
+                forced_index=track_index,
+                cookies_file=self._cfg.cookies_file or None,
+                cookies_browser=self._cfg.cookies_browser or None,
+                playlist_name=self._get_dynamic_folder(
+                    card, track_playlist_name, is_parent_discography
+                ),
+                thumbnail_url=card.thumbnail_url,
+                platform=req_platform,
+                sponsorblock=self._cfg.sponsorblock_enabled,
+                sponsorblock_categories=self._cfg.get("sponsorblock_categories") or None,
+                embed_lyrics=self._cfg.lyrics_enabled,
+                replay_gain=self._cfg.replay_gain_enabled,
+                musicbrainz=self._cfg.musicbrainz_enabled,
+                square_thumbnails=self._cfg.square_thumbnails,
+                expand_thumbnails=self._cfg.expand_thumbnails,
+                clean_filename=is_clean,
+                proxy_url=self._cfg.get("youtube_proxy_url") or None,
+                is_solo=is_solo,
+                stream_type=_parse_stream_type(getattr(card, "category", "")),
+                category=getattr(card, "category", "") or None,
+                youtube_reliability_mode=self._cfg.youtube_reliability_mode,
+            )
+
+            # Two-stage Spotify import: a card whose YouTube match was deferred
+            # carries match_status == "pending". Attach a lazy resolver so the
+            # download pool matches it to YouTube the instant before it starts
+            # downloading — pipelining the (possibly large) catalog's matching
+            # with the downloads instead of blocking every download on it.
+            if getattr(card, "match_status", "matched") == "pending":
+                td = {
+                    "spotify_id":       getattr(card, "spotify_id", ""),
+                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
+                    "title":            card.title,
+                    "artist":           card.artist,
+                    "duration_sec":     getattr(card, "duration_sec", None),
+                }
+                cookies = self._cfg.cookies_file or None
+
+                def _resolve(ev, _td=td, _cookies=cookies):
+                    from core.scraper import resolve_track_to_youtube
+                    from utils.url_cleaner import clean_youtube_url as _clean
+                    resolved = resolve_track_to_youtube(
+                        _td, cookies_file=_cookies,
+                        cancel_check=lambda: ev is not None and ev.is_set(),
+                    )
+                    return _clean(resolved)
+
+                req.url_resolver = _resolve
+
+            return req
 
         for card in selected:
             key = str(id(card))
@@ -350,100 +438,48 @@ class DownloadController(QObject):
                         self._key_to_card[key] = card
                         preexisting_jobs.append((key, str(dup)))
                         continue
-                    else:  # "warn"
-                        should_overwrite = confirm(
-                            self.parent(),
-                            t("duplicate_detected_title"),
-                            t("duplicate_detected_msg", title=card.title, path=dup),
-                            accept_text=t("meta_ok"),
-                            cancel_text=t("cancel_btn"),
-                        )
-                        if not should_overwrite:
-                            card.set_status("done")
-                            card.set_progress(1.0)
-                            self._key_to_card[key] = card
-                            preexisting_jobs.append((key, str(dup)))
-                            continue
+                    else:  # "warn" — collect for the one batched dialog below;
+                        # do not build the request or decide skip/replace yet.
+                        pending_warn.append({
+                            "card": card, "key": key, "dup": str(dup),
+                            "output_dir": output_dir,
+                            "track_playlist_name": track_playlist_name,
+                            "is_parent_discography": is_parent_discography,
+                            "track_index": track_index,
+                            "is_clean": is_clean,
+                        })
+                        continue
 
-            # Map the card.platform string to a SourcePlatform enum so the
-            # orchestrator can persist the correct platform on the history
-            # record. Unknown / missing values pass through as None and the
-            # orchestrator records them as "unknown".
-            card_platform_str = (card.platform or "").lower()
-            req_platform = {
-                "youtube": SourcePlatform.YOUTUBE,
-                "ytmusic": SourcePlatform.YOUTUBE_MUSIC,
-                "spotify": SourcePlatform.SPOTIFY,
-                "generic": SourcePlatform.GENERIC,
-            }.get(card_platform_str)
-
-            from utils.url_cleaner import clean_youtube_url
-
-            req = DownloadRequest(
-                url=clean_youtube_url(card.track_url),
-                output_dir=output_dir,
-                media_type=media_type,
-                audio_quality=audio_q,
-                video_quality=video_q,
-                audio_format=audio_codec,
-                video_format=video_format,
-                embed_thumbnail=self._cfg.embed_thumbnail,
-                embed_metadata=self._cfg.embed_metadata,
-                forced_title=card.title,
-                forced_artist=card.artist,
-                forced_album=card.album,
-                forced_duration=getattr(card, "duration_sec", None),
-                forced_index=track_index,
-                cookies_file=self._cfg.cookies_file or None,
-                cookies_browser=self._cfg.cookies_browser or None,
-                playlist_name=self._get_dynamic_folder(
-                    card, track_playlist_name, is_parent_discography
-                ),
-                thumbnail_url=card.thumbnail_url,
-                platform=req_platform,
-                sponsorblock=self._cfg.sponsorblock_enabled,
-                sponsorblock_categories=self._cfg.get("sponsorblock_categories") or None,
-                embed_lyrics=self._cfg.lyrics_enabled,
-                replay_gain=self._cfg.replay_gain_enabled,
-                musicbrainz=self._cfg.musicbrainz_enabled,
-                square_thumbnails=self._cfg.square_thumbnails,
-                expand_thumbnails=self._cfg.expand_thumbnails,
-                clean_filename=is_clean,
-                proxy_url=self._cfg.get("youtube_proxy_url") or None,
-                is_solo=is_solo,
-                stream_type=_parse_stream_type(getattr(card, "category", "")),
-                category=getattr(card, "category", "") or None,
-                youtube_reliability_mode=self._cfg.youtube_reliability_mode,
+            req = _build_request(
+                card, output_dir, track_playlist_name,
+                is_parent_discography, track_index, is_clean,
             )
-
-            # Two-stage Spotify import: a card whose YouTube match was deferred
-            # carries match_status == "pending". Attach a lazy resolver so the
-            # download pool matches it to YouTube the instant before it starts
-            # downloading — pipelining the (possibly large) catalog's matching
-            # with the downloads instead of blocking every download on it.
-            if getattr(card, "match_status", "matched") == "pending":
-                td = {
-                    "spotify_id":       getattr(card, "spotify_id", ""),
-                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
-                    "title":            card.title,
-                    "artist":           card.artist,
-                    "duration_sec":     getattr(card, "duration_sec", None),
-                }
-                cookies = self._cfg.cookies_file or None
-
-                def _resolve(ev, _td=td, _cookies=cookies):
-                    from core.scraper import resolve_track_to_youtube
-                    from utils.url_cleaner import clean_youtube_url as _clean
-                    resolved = resolve_track_to_youtube(
-                        _td, cookies_file=_cookies,
-                        cancel_check=lambda: ev is not None and ev.is_set(),
-                    )
-                    return _clean(resolved)
-
-                req.url_resolver = _resolve
-
             self._key_to_card[key] = card
             jobs.append((key, req))
+
+        # One consolidated dialog for every "warn"-policy duplicate found in
+        # this batch — never one confirm() popup per file (see
+        # ui.dialogs.batch_duplicate_dialog).
+        if pending_warn:
+            from ui.dialogs.batch_duplicate_dialog import ask_batch_duplicate_action
+            skip_all = ask_batch_duplicate_action(
+                self.parent(),
+                [(p["card"].title, p["dup"]) for p in pending_warn],
+            )
+            for p in pending_warn:
+                card, key = p["card"], p["key"]
+                if skip_all:
+                    card.set_status("done")
+                    card.set_progress(1.0)
+                    self._key_to_card[key] = card
+                    preexisting_jobs.append((key, p["dup"]))
+                else:
+                    req = _build_request(
+                        card, p["output_dir"], p["track_playlist_name"],
+                        p["is_parent_discography"], p["track_index"], p["is_clean"],
+                    )
+                    self._key_to_card[key] = card
+                    jobs.append((key, req))
 
         if not jobs and not preexisting_jobs:
             return
