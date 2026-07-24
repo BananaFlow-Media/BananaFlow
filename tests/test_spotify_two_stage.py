@@ -17,6 +17,7 @@ in for `DownloadEngine`).
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -28,27 +29,27 @@ from core.download_orchestrator import DownloadOrchestrator
 # Stage 1 — metadata-only emit
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestEmitMetadataOnly:
+class TestEmitPendingTrack:
     def test_tags_pending_and_adds_placeholder_url(self):
-        from core.scraper import _emit_metadata_only
+        from core.scraper import _emit_pending_track
         fired = []
-        items = [
+        for td in (
             {"title": "Song A", "artist": "Artist"},
             {"title": "Song B", "artist": "Artist", "url": ""},
-        ]
-        _emit_metadata_only(items, on_item=fired.append)
+        ):
+            _emit_pending_track(td, on_item=fired.append)
 
         assert len(fired) == 2
-        for it in items:
+        for it in fired:
             assert it["url"].startswith("ytsearch1:")
             assert it["match_status"] == "pending"
 
     def test_keeps_existing_nonempty_url(self):
-        from core.scraper import _emit_metadata_only
-        items = [{"title": "S", "artist": "A", "url": "ytsearch1:preset audio"}]
-        _emit_metadata_only(items, on_item=None)
-        assert items[0]["url"] == "ytsearch1:preset audio"
-        assert items[0]["match_status"] == "pending"
+        from core.scraper import _emit_pending_track
+        td = {"title": "S", "artist": "A", "url": "ytsearch1:preset audio"}
+        _emit_pending_track(td, on_item=None)
+        assert td["url"] == "ytsearch1:preset audio"
+        assert td["match_status"] == "pending"
 
 
 class TestTrackMetaFields:
@@ -172,6 +173,230 @@ class TestOrchestratorLazyResolve:
 # ──────────────────────────────────────────────────────────────────────────────
 # Intra-resolve cancellation
 # ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Conservative-mode serialization for lazy-resolver (Spotify) downloads
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _ConcurrencyEngine:
+    """Fake engine that records the peak number of *simultaneous* downloads."""
+
+    def __init__(self) -> None:
+        self._cancel_event = threading.Event()
+        self._lock = threading.Lock()
+        self._current = 0
+        self.max_concurrent = 0
+        self.downloaded_urls: list[str] = []
+
+    def cancel_all(self) -> None:
+        self._cancel_event.set()
+
+    def download(self, req: DownloadRequest) -> None:
+        with self._lock:
+            self._current += 1
+            self.max_concurrent = max(self.max_concurrent, self._current)
+            self.downloaded_urls.append(req.url)
+        time.sleep(0.05)  # hold the "download" so real overlap would be visible
+        with self._lock:
+            self._current -= 1
+        if req.on_finished:
+            req.on_finished(
+                DownloadProgress(status=DownloadStatus.FINISHED, url=req.url, output_path="/tmp/o.mp3")
+            )
+
+
+class TestConservativeSerialization:
+    def test_lazy_resolver_youtube_downloads_are_serialized(self, monkeypatch):
+        # Skip the 5-10s inter-job cooldown so the test is fast; the semaphore
+        # (CONSERVATIVE_MAX_PARALLEL_YOUTUBE == 1) is what enforces serial order.
+        monkeypatch.setattr(
+            DownloadOrchestrator, "_youtube_cooldown", lambda self, ev, key: None
+        )
+
+        engine = _ConcurrencyEngine()
+        # max_workers=4: without the gate the resolved YouTube downloads would
+        # overlap. Matching (the resolver) may still run in parallel.
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=4)
+
+        def make_job(i):
+            req = _req(f"placeholder://{i}")
+            req.youtube_reliability_mode = "conservative"
+            req.url_resolver = lambda ev, _i=i: f"https://www.youtube.com/watch?v=VID{_i}"
+            return (f"k{i}", req)
+
+        jobs = [make_job(i) for i in range(3)]
+        orch.run_batch(jobs)
+
+        # Despite max_workers=4, conservative mode serialized the downloads.
+        assert engine.max_concurrent == 1
+        assert len(engine.downloaded_urls) == 3
+        assert all("youtube.com" in u for u in engine.downloaded_urls)
+
+    def test_fast_mode_lazy_downloads_are_not_serialized(self, monkeypatch):
+        monkeypatch.setattr(
+            DownloadOrchestrator, "_youtube_cooldown", lambda self, ev, key: None
+        )
+        engine = _ConcurrencyEngine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=4)
+
+        def make_job(i):
+            req = _req(f"placeholder://{i}")
+            req.youtube_reliability_mode = "fast"  # not conservative → no gate
+            req.url_resolver = lambda ev, _i=i: f"https://www.youtube.com/watch?v=VID{_i}"
+            return (f"k{i}", req)
+
+        orch.run_batch([make_job(i) for i in range(3)])
+        # Fast mode allows real parallelism (control for the test above).
+        assert engine.max_concurrent > 1
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Progressive stage-1 emit — a fake Playwright page drives the scroll scrape
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _Loc:
+    """Tolerant fake of a Playwright Locator: every method returns a safe
+    default so the scraper never crashes on an unmodelled call."""
+
+    def __init__(self, *, count=0, text="", attrs=None, children=None,
+                 items=None, items_seq=None):
+        self._count = count
+        self._text = text
+        self._attrs = attrs or {}
+        self._children = children or {}
+        self._items = items
+        self._items_seq = items_seq  # list of lists; one popped per .all()
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return self._count
+
+    def all(self):
+        if self._items_seq is not None:
+            return self._items_seq.pop(0) if self._items_seq else []
+        return self._items if self._items is not None else []
+
+    def inner_text(self):
+        return self._text
+
+    def get_attribute(self, name):
+        return self._attrs.get(name)
+
+    def locator(self, sel):
+        for key, child in self._children.items():
+            if key in sel:
+                return child
+        return _Loc()
+
+    def filter(self, **kwargs):
+        return _Loc(count=0)
+
+    def scroll_into_view_if_needed(self):
+        pass
+
+    def evaluate(self, *a, **k):
+        return self._attrs.get("__eval__", "")
+
+
+def _row(idx, title, events):
+    """A fake tracklist row that appends an event when its title is read (a
+    proxy for 'this track was scraped in this pass')."""
+    link = _Loc(count=1, attrs={"href": f"/track/id{idx}"},
+                children={"div": _Loc(count=1, text=title)})
+    return _Loc(
+        count=1,
+        attrs={"aria-rowindex": str(idx)},
+        children={
+            "a[data-testid='internal-track-link']": link,
+            "a[href*='/artist/']": _Loc(items=[_Loc(count=1, text="Artist")]),
+            "img": _Loc(count=1, attrs={"src": "http://img/x"}),
+            "div, span": _Loc(count=0),
+            "div[dir='auto']": _Loc(count=1, text=title),
+        },
+    )
+
+
+class _FakePage:
+    def __init__(self, passes, events):
+        self._events = events
+        grid = _Loc(children={
+            "div[data-testid='tracklist-row']": _Loc(items_seq=list(passes)),
+        })
+        self._grid = grid
+
+    def goto(self, *a, **k):
+        pass
+
+    def content(self):
+        return ""  # no embedded JSON → forces the scroll path
+
+    def wait_for_selector(self, *a, **k):
+        pass
+
+    def wait_for_timeout(self, *a, **k):
+        self._events.append("scroll")
+
+    def evaluate(self, *a, **k):
+        return "Test Catalog"
+
+    def locator(self, sel):
+        if "entity-image" in sel or "main img" in sel:
+            return _Loc(count=0)  # skip header thumbnail
+        if "role='grid'" in sel or "track-list" in sel:
+            return self._grid
+        return _Loc()
+
+
+class TestProgressiveScrapeEmit:
+    def test_first_item_is_emitted_before_the_scrape_finishes(self, monkeypatch):
+        """In metadata_only mode the grid scraper must publish each track from
+        inside the scroll loop — so the first track is delivered before later
+        tracks are even scraped, not all at once after the whole scroll."""
+        from core import scraper
+
+        events: list[str] = []
+
+        # Real _emit_pending_track, but record the emission order in `events`.
+        real_emit = scraper._emit_pending_track
+
+        def recording_emit(track_dict, on_item=None):
+            def _rec(td):
+                events.append(f"emit:{td['title']}")
+                sink.append(td)
+            real_emit(track_dict, _rec)
+
+        sink: list[dict] = []
+        monkeypatch.setattr(scraper, "_emit_pending_track", recording_emit)
+
+        # Pass 1 yields Song 1; pass 2 yields Song 1 (dup) + Song 2; pass 3 empty.
+        passes = [
+            [_row(1, "Song 1", events)],
+            [_row(1, "Song 1", events), _row(2, "Song 2", events)],
+            [],
+        ]
+        page = _FakePage(passes, events)
+
+        title, items = scraper._scrape_spotify_grid_on_page(
+            page, "https://open.spotify.com/album/x", "Album",
+            on_item=lambda td: None, metadata_only=True,
+        )
+
+        # Both tracks emitted, tagged pending, with a ytsearch placeholder URL.
+        assert [d["title"] for d in sink] == ["Song 1", "Song 2"]
+        assert all(d["match_status"] == "pending" for d in sink)
+        assert all(d["url"].startswith("ytsearch1:") for d in sink)
+
+        # Interleaving: Song 1 was emitted, then a scroll happened, then Song 2
+        # was emitted — proving emission occurs during the scrape, not after it.
+        assert "emit:Song 1" in events and "emit:Song 2" in events
+        i1 = events.index("emit:Song 1")
+        i2 = events.index("emit:Song 2")
+        assert i1 < i2
+        assert "scroll" in events[i1:i2]
+
 
 class TestResolveCancel:
     def test_cancel_returns_last_resort_before_ytdlp_fallback(self, monkeypatch):

@@ -648,13 +648,19 @@ class PlaylistParser:
     ) -> str:
         """Stage 1 of the two-stage Spotify import.
 
-        Publishes every track of an artist / album / playlist immediately with
-        metadata only (no YouTube matching yet — that is deferred to download
-        time via ``DownloadRequest.url_resolver``). Prefers the metadata
-        resolver (Web API / proxy) when configured; falls back to a
-        metadata-only Playwright scrape otherwise. Returns the catalog title.
+        Publishes every track of an artist / album / playlist **progressively**
+        as it is scraped, with metadata only — no YouTube matching yet (that is
+        deferred to download time via ``DownloadRequest.url_resolver``). Uses the
+        metadata-only Playwright scrape, which fills the UI incrementally and is
+        promptly cancellable via ``cancel_check`` (a configured proxy would be a
+        single blocking call — neither progressive nor cancellable mid-flight —
+        so it is intentionally not used for this stage). Returns the catalog
+        title.
         """
         from ui.i18n import t
+        from core.scraper import (
+            scrape_spotify_playlist, scrape_spotify_album, scrape_spotify_artist,
+        )
         cancel_cb = self._cancel.is_set
         count = [0]
 
@@ -666,33 +672,6 @@ class PlaylistParser:
 
         self._notify(on_progress, t("collecting_catalog"))
 
-        # ── Primary: metadata resolver via configured proxy ───────────────────
-        # SpotifyResolver.resolve() only resolves through a configured proxy;
-        # without one it raises, so only attempt it when a proxy is set.
-        resolver_title = None
-        try:
-            from utils.spotify_resolver import SpotifyResolver
-            proxy_url, proxy_token = SpotifyResolver._get_proxy_config()
-            if proxy_url and proxy_token:
-                items = SpotifyResolver.resolve(
-                    url, on_item=_pending_on_item, cancel_check=cancel_cb,
-                )
-                if items:
-                    resolver_title = self._spotify_catalog_title(items, url)
-        except Exception as exc:
-            logger.info("[PlaylistParser] Spotify resolver unavailable, "
-                        "falling back to browser scrape: %s", exc)
-
-        # If the resolver already published any tracks, use them — never run the
-        # Playwright fallback on top, or the catalog would be emitted twice.
-        if count[0] > 0 or self._cancel.is_set():
-            self._notify(on_progress, t("found_n_tracks", n=count[0]))
-            return resolver_title or "Spotify"
-
-        # ── Fallback: metadata-only Playwright scrape ─────────────────────────
-        from core.scraper import (
-            scrape_spotify_playlist, scrape_spotify_album, scrape_spotify_artist,
-        )
         scraper = {
             UrlKind.PLAYLIST: scrape_spotify_playlist,
             UrlKind.ALBUM:    scrape_spotify_album,
@@ -704,16 +683,6 @@ class PlaylistParser:
         )
         self._notify(on_progress, t("found_n_tracks", n=count[0]))
         return title
-
-    @staticmethod
-    def _spotify_catalog_title(items: list[dict], url: str) -> str:
-        """Best-effort catalog title from resolver items (parent artist /
-        album name), falling back to a generic label."""
-        for it in items:
-            name = it.get("parent_artist") or it.get("album") or ""
-            if name:
-                return name
-        return "Spotify"
 
     # ── yt-dlp options ─────────────────────────────────────────────────────────
 
