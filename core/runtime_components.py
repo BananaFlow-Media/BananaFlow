@@ -66,6 +66,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -353,6 +354,13 @@ def activate_bundled_components() -> BundledComponents:
 
 
 _PENDING_PLUGIN_DIR: Optional[Path] = None
+# Serializes the deferred-registration flush *and* the one-time plugin
+# warm-up below.  Both mutate yt-dlp's ``all_plugins_loaded`` flag, and
+# without a lock several worker threads can each observe it False and
+# concurrently re-run yt-dlp's plugin loader — which re-execs every plugin
+# module regardless of ``sys.modules`` and raises
+# "PoTokenProvider … already registered".
+_PLUGIN_REG_LOCK = threading.Lock()
 
 
 def _defer_plugin_dir(plugins_dir: Path) -> None:
@@ -373,7 +381,8 @@ def _defer_plugin_dir(plugins_dir: Path) -> None:
     :func:`ensure_plugin_dir_registered` before the first yt-dlp call.
     """
     global _PENDING_PLUGIN_DIR
-    _PENDING_PLUGIN_DIR = plugins_dir
+    with _PLUGIN_REG_LOCK:
+        _PENDING_PLUGIN_DIR = plugins_dir
     # If yt-dlp is already imported the cost is already paid, so there is
     # no reason to wait.
     if "yt_dlp" in sys.modules:
@@ -385,13 +394,47 @@ def ensure_plugin_dir_registered() -> None:
 
     Call immediately before the first yt-dlp use.  By then importing
     ``yt_dlp`` is free — the caller is about to import it anyway.
+
+    The whole check-clear-register sequence runs under ``_PLUGIN_REG_LOCK``
+    so two threads reaching their first ``YoutubeDL()`` build at the same
+    time cannot both see the pending dir and both reset yt-dlp's plugin
+    cache.
     """
     global _PENDING_PLUGIN_DIR
-    pending = _PENDING_PLUGIN_DIR
-    if pending is None:
-        return
-    _PENDING_PLUGIN_DIR = None
-    _register_plugin_dir(pending)
+    with _PLUGIN_REG_LOCK:
+        pending = _PENDING_PLUGIN_DIR
+        if pending is None:
+            return
+        _PENDING_PLUGIN_DIR = None
+        _register_plugin_dir(pending)
+
+
+def warm_up_plugins() -> None:
+    """Force yt-dlp's one-time plugin load on the *calling* thread.
+
+    Call this once, synchronously, before creating any thread pool whose
+    workers build ``yt_dlp.YoutubeDL`` instances.  yt-dlp lazily loads its
+    plugins inside ``YoutubeDL.__init__`` (``if not all_plugins_loaded:
+    load_all_plugins()``) and only flips the flag True at the *end* of that
+    load.  When several worker threads construct their first ``YoutubeDL``
+    at once they all observe the flag still False and each re-runs the
+    loader, which re-execs the bundled bgutil PO-token plugins and raises
+    ``AssertionError: PoTokenProvider … already registered`` in a storm.
+
+    Running the load once here — while no pool thread exists yet — leaves
+    the flag True, so every later construction skips the loader entirely.
+    Idempotent and never raises; the lock makes the flag check-and-load a
+    single critical section.
+    """
+    ensure_plugin_dir_registered()
+    try:
+        from yt_dlp import plugins as ytdlp_plugins
+
+        with _PLUGIN_REG_LOCK:
+            if not ytdlp_plugins.all_plugins_loaded.value:
+                ytdlp_plugins.load_all_plugins()
+    except Exception:
+        pass
 
 
 def _configure_provider_script_environment(info: BundledComponents) -> None:

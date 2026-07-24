@@ -47,13 +47,24 @@ def _parallel_resolve_urls(
     if not items:
         return
     from concurrent.futures import ThreadPoolExecutor
+    from core.runtime_components import warm_up_plugins
+
+    # Force yt-dlp's one-time plugin load on THIS thread before any worker
+    # starts.  Workers build fresh YoutubeDL() instances concurrently; if the
+    # first loads race inside yt-dlp's own load_all_plugins() they re-exec the
+    # bundled PO-token plugins and raise "PoTokenProvider ... already
+    # registered" in a storm.  Warming up single-threaded here leaves the flag
+    # set so every worker's construction skips the loader entirely.
+    warm_up_plugins()
 
     def _resolve_one(td: Dict) -> str:
-        return _resolve_to_ytm_url(
-            td["title"], td.get("artist", ""), td.get("duration_sec") or 0,
-            cookies_file=cookies_file,
-        )
+        return resolve_track_to_youtube(td, cookies_file=cookies_file)
 
+    # NOTE: results are consumed in submission order (not as_completed) on
+    # purpose — cards are *created* by this callback, and the display index is
+    # assigned by arrival order downstream, so firing out of order would
+    # reorder the visible list.  Pipelined, completion-order resolution lands
+    # in the two-stage flow, where rows pre-exist and are updated by index.
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_resolve_one, td) for td in items]
         for td, fut in zip(items, futures):
@@ -177,6 +188,67 @@ def _resolve_to_ytm_url(
     # last-resort search; nothing here is actionable by the user.
     logger.debug("[Scraper] No confident match found for '%s'. Using last resort ytsearch1.", query)
     return f"ytsearch1:{query} audio"
+
+
+def _spotify_id_from_url(url: str) -> str:
+    """Extract the bare Spotify track id from a track URL, or "" if absent."""
+    m = re.search(r"/track/([A-Za-z0-9]+)", url or "")
+    return m.group(1) if m else ""
+
+
+def _spotify_cache_key(td: Dict) -> Tuple[str, str]:
+    """Return ``(spotify_key, key_kind)`` for a track dict.
+
+    Prefers a stable Spotify track id (from ``spotify_id`` or parsed out of
+    ``spotify_url``); falls back to a composite ``artist|title|duration`` hash
+    when no id is available.  ``key_kind`` records which was used so the two
+    key spaces never collide in the cache.
+    """
+    from core.match_cache import MatchCache
+
+    sid = (td.get("spotify_id") or "").strip()
+    if not sid:
+        sid = _spotify_id_from_url(td.get("spotify_url") or "")
+    if sid:
+        return sid, "spotify_id"
+    return (
+        MatchCache.composite_key(
+            td.get("artist", ""), td.get("title", ""), td.get("duration_sec") or 0
+        ),
+        "composite",
+    )
+
+
+def resolve_track_to_youtube(td: Dict, cookies_file: Optional[str] = None) -> str:
+    """Cache-aware resolution of one track dict to a YouTube URL.
+
+    Consults the persistent match cache first (keyed by stable Spotify track
+    id when available, else a composite key).  On a miss it runs the existing
+    :func:`_resolve_to_ytm_url` search chain and stores a *real* match before
+    returning.  The last-resort ``ytsearch1:`` sentinel is never cached — it
+    is not a real match, and persisting it would pin a bad result across runs.
+    """
+    from core.match_cache import get_match_cache
+    from core.spotify_match_scorer import MATCH_ALGO_VERSION
+
+    spotify_key, key_kind = _spotify_cache_key(td)
+    cache = get_match_cache()
+
+    cached = cache.get(spotify_key, MATCH_ALGO_VERSION)
+    if cached:
+        return cached
+
+    url = _resolve_to_ytm_url(
+        td.get("title", ""),
+        td.get("artist", ""),
+        td.get("duration_sec") or 0,
+        cookies_file=cookies_file,
+    )
+
+    # Cache only confident matches — never the ytsearch* last-resort sentinel.
+    if url and not url.startswith("ytsearch"):
+        cache.put(spotify_key, url, None, MATCH_ALGO_VERSION, key_kind=key_kind)
+    return url
 
 
 def _sync_playwright_for(feature: str):
@@ -306,9 +378,18 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
             for track_row in tracks:
                 try:
                     row_idx = track_row.get_attribute("aria-rowindex") or track_row.get_attribute("data-testid")
-                    title_el = track_row.locator("a[data-testid='internal-track-link'] div").first
+                    track_link = track_row.locator("a[data-testid='internal-track-link']").first
+                    title_el = track_link.locator("div").first
                     if not title_el.count(): title_el = track_row.locator("div[dir='auto']").first
                     track_title = title_el.inner_text().strip()
+                    # Capture the stable Spotify track id from the row's own
+                    # link so it can key the match cache (falls back to "").
+                    track_href = ""
+                    try:
+                        if track_link.count():
+                            track_href = track_link.get_attribute("href") or ""
+                    except: pass
+                    track_spotify_id = _spotify_id_from_url(track_href)
                     uid = f"{row_idx}_{track_title}"
                     if uid in seen: continue
                     seen.add(uid)
@@ -353,6 +434,11 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
                         "album_index": len(seen), "thumbnail_url": final_thumb,
                         "duration_sec": duration_sec, "duration_str": duration_str or "??:??",
                         "platform": "spotify", "release_type": content_type_label.lower(),
+                        "spotify_id": track_spotify_id,
+                        "spotify_url": (
+                            f"https://open.spotify.com/track/{track_spotify_id}"
+                            if track_spotify_id else ""
+                        ),
                     }
                     items.append(track_dict)
                 except: pass
@@ -576,9 +662,18 @@ def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = 
                         for t_idx, track_row in enumerate(visible_tracks, 1):
                             last_track = track_row
                             try:
-                                title_el = track_row.locator("a[data-testid='internal-track-link'] div").first
+                                track_link = track_row.locator("a[data-testid='internal-track-link']").first
+                                title_el = track_link.locator("div").first
                                 if not title_el.count(): title_el = track_row.locator("div[dir='auto']").first
                                 track_title = title_el.inner_text().strip()
+                                # Stable Spotify track id from the row's own link,
+                                # for keying the match cache (falls back to "").
+                                track_href = ""
+                                try:
+                                    if track_link.count():
+                                        track_href = track_link.get_attribute("href") or ""
+                                except: pass
+                                track_spotify_id = _spotify_id_from_url(track_href)
 
                                 uid = f"{cat_name}_{release_title}_{track_title}"
                                 if uid in seen_track_uids: continue
@@ -612,7 +707,12 @@ def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = 
                                     "total_tracks": total_tracks_stable,
                                     "url": "",  # resolved in parallel after browser closes
                                     "platform": "spotify", "thumbnail_url": final_thumb,
-                                    "duration_sec": duration_sec, "duration_str": duration_str or "??:??"
+                                    "duration_sec": duration_sec, "duration_str": duration_str or "??:??",
+                                    "spotify_id": track_spotify_id,
+                                    "spotify_url": (
+                                        f"https://open.spotify.com/track/{track_spotify_id}"
+                                        if track_spotify_id else ""
+                                    ),
                                 }
                                 items.append(track_dict)
                             except: pass
@@ -947,6 +1047,11 @@ def _extract_spotify_data_from_json(data: Any, content_type: str) -> Optional[Tu
             "platform": "spotify",
             "release_type": content_type.lower(),
             "total_tracks": total,
+            "spotify_id": t.get("track_id") or "",
+            "spotify_url": (
+                f"https://open.spotify.com/track/{t['track_id']}"
+                if t.get("track_id") else ""
+            ),
         })
 
     return scraped_title, items

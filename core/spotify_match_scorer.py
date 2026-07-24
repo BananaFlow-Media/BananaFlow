@@ -45,6 +45,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+# Version of the Spotify→YouTube matching logic.  It is part of the match
+# cache key (see ``core.match_cache``): bump it whenever the scoring weights,
+# thresholds, or candidate-selection logic below change, so previously cached
+# matches produced by the old algorithm are transparently treated as misses
+# and recomputed instead of served stale.
+MATCH_ALGO_VERSION = 1
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Public types
 # ──────────────────────────────────────────────────────────────────────────────
