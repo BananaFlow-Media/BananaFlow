@@ -179,3 +179,58 @@ def get_ffprobe_executable() -> Optional[str]:
         if fp.exists():
             return str(fp)
     return shutil.which("ffprobe")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Batch download workspace (core.download_orchestrator / core.downloader)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
+
+
+def _set_hidden_attribute(path: Path) -> None:
+    """Best-effort: apply the Windows Hidden file attribute so the batch
+    workspace never shows up in a normal Explorer/dir listing.
+
+    Cosmetic only — a failure here must never break a download, so every
+    error is swallowed. No-op on non-Windows, where the leading-dot name
+    already hides the folder by convention (matches get_app_data_dir's
+    ``.bananaflow``).
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        FILE_ATTRIBUTE_HIDDEN = 0x02
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), FILE_ATTRIBUTE_HIDDEN)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+def make_batch_workspace(base_output_dir: str) -> Path:
+    """Create a fresh, uniquely-named batch workspace under ``base_output_dir``.
+
+    Downloads, conversion, artwork and metadata post-processing all happen
+    here instead of directly inside the user's visible output folder — the
+    finished file is only moved into ``base_output_dir`` once it is
+    completely ready (see core.downloader's atomic-publish step). Living
+    under ``base_output_dir`` guarantees the workspace is on the same
+    filesystem/volume as the final destination, which is what makes that
+    move an atomic ``os.replace`` rather than a cross-volume copy.
+
+    The workspace is given the Windows Hidden attribute (not just a
+    dot-prefixed name) so it never appears in a normal Explorer window —
+    "hidden" has to mean actually hidden, not just conventionally hidden.
+
+    Raises OSError if the directory cannot be created (e.g. the output
+    location is read-only) — the caller decides whether to fall back to
+    writing directly into base_output_dir.
+    """
+    import uuid
+
+    container = Path(base_output_dir).expanduser().resolve() / _WORKSPACE_CONTAINER_NAME
+    workspace = container / f"batch-{uuid.uuid4().hex[:12]}"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _set_hidden_attribute(container)
+    _set_hidden_attribute(workspace)
+    return workspace

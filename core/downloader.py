@@ -208,6 +208,16 @@ class DownloadRequest:
     # Category tag forwarded from TrackMeta (e.g. "stream_intercept", "stream:hls")
     category: Optional[str] = None
 
+    # Batch workspace (utils.paths.make_batch_workspace). When set, the
+    # download, conversion and all post-processing (thumbnail, MusicBrainz,
+    # lyrics, ReplayGain) write here instead of directly into output_dir —
+    # the finished file is atomically moved (os.replace) into output_dir
+    # only once it is completely ready (see DownloadEngine.
+    # _publish_to_final_location). None (default) preserves the old
+    # direct-write behavior, so existing callers (tests, CLI) work
+    # unchanged. Set by DownloadOrchestrator.run_batch for real batches.
+    workspace_dir: Optional[str] = None
+
     # Per-request cancellation (parallel downloads)
     cancel_event: Optional[threading.Event] = field(default=None, repr=False)
 
@@ -481,6 +491,12 @@ class DownloadEngine:
                 warning_msg = "Post-processing partial failure: " + "; ".join(pp_failures)
                 logger.warning(f"[Downloader] {warning_msg}")
 
+            # Atomic publish: only now — after conversion AND every
+            # post-processing step succeeded or failed — is the file moved
+            # out of the hidden batch workspace into the user's real output
+            # directory. A no-op when request.workspace_dir isn't set.
+            final_path = self._publish_to_final_location(request, final_path)
+
             # Report the real on-disk size on completion. A fast/tiny/cached
             # download can finish before yt-dlp ever fires a "downloading"
             # progress hook, in which case the batch aggregator would
@@ -539,7 +555,7 @@ class DownloadEngine:
         else:
             ext = request.video_format or DEFAULT_VIDEO_FORMAT
 
-        out_dir   = Path(request.output_dir).expanduser().resolve()
+        out_dir   = Path(request.workspace_dir or request.output_dir).expanduser().resolve()
         if request.playlist_name:
             out_dir = out_dir / request.playlist_name
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -575,6 +591,7 @@ class DownloadEngine:
             ), error=True)
             return
 
+        output_path = self._publish_to_final_location(request, output_path)
         hls_bytes = _safe_file_size(output_path)
         self._fire(request, DownloadProgress(
             status=DownloadStatus.FINISHED,
@@ -647,6 +664,7 @@ class DownloadEngine:
                 if final_path and not os.path.exists(final_path):
                     raise Exception("Download completed but output file is missing. (Search may have yielded no results)")
 
+                final_path = self._publish_to_final_location(request, final_path)
                 generic_bytes = _safe_file_size(final_path)
                 self._fire(request, DownloadProgress(
                     status=DownloadStatus.FINISHED,
@@ -688,7 +706,7 @@ class DownloadEngine:
         else:
             ext = request.video_format or DEFAULT_VIDEO_FORMAT
 
-        out_dir = Path(request.output_dir).expanduser().resolve()
+        out_dir = Path(request.workspace_dir or request.output_dir).expanduser().resolve()
         if request.playlist_name:
             out_dir = out_dir / _sanitize_folder_name(request.playlist_name)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -721,6 +739,7 @@ class DownloadEngine:
             ), error=True)
             return
 
+        output_path = self._publish_to_final_location(request, output_path)
         stream_bytes = _safe_file_size(output_path)
         self._fire(request, DownloadProgress(
             status=DownloadStatus.FINISHED,
@@ -735,7 +754,10 @@ class DownloadEngine:
     # ── yt-dlp options builder ─────────────────────────────────────────────────
 
     def _build_ydl_opts(self, req: DownloadRequest) -> dict[str, Any]:
-        out_dir = Path(req.output_dir).expanduser().resolve()
+        # Write into the batch workspace when one is set (see
+        # DownloadRequest.workspace_dir) — _publish_to_final_location moves
+        # the finished file into req.output_dir once it's fully ready.
+        out_dir = Path(req.workspace_dir or req.output_dir).expanduser().resolve()
 
         # Playlist subfolder
         if req.playlist_name:
@@ -1030,6 +1052,63 @@ class DownloadEngine:
                     req._final_output_path = output_path  # noqa: SLF001
 
         return hook
+
+    # ── Atomic publish (batch workspace -> real output directory) ────────────
+
+    def _publish_to_final_location(self, req: DownloadRequest, workspace_path: str) -> str:
+        """Atomically move a fully-ready file out of the batch workspace and
+        into the user's real output directory.
+
+        Called only after every post-processing step (conversion, thumbnail,
+        MusicBrainz, lyrics, ReplayGain) has already finished — the user must
+        never see a half-built file appear in their output folder. A no-op
+        that returns ``workspace_path`` unchanged when ``req.workspace_dir``
+        is not set, preserving the old direct-write behavior for callers
+        that don't opt into a workspace (tests, CLI).
+
+        The workspace is always created under the same base directory as
+        req.output_dir (see utils.paths.make_batch_workspace), so this is
+        always a same-volume ``os.replace`` — atomic, not a copy.
+        """
+        if not req.workspace_dir:
+            return workspace_path
+
+        try:
+            workspace_root = Path(req.workspace_dir).expanduser().resolve()
+            src = Path(workspace_path).resolve()
+            relative = src.relative_to(workspace_root)
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "[Downloader] Could not resolve workspace-relative path for "
+                "%s (workspace=%s): %s — leaving file in place",
+                workspace_path, req.workspace_dir, exc,
+            )
+            return workspace_path
+
+        dest = Path(req.output_dir).expanduser().resolve() / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                os.replace(str(src), str(dest))
+                return str(dest)
+            except OSError as exc:
+                # Windows file-lock errors, same codes/retry as the yt-dlp
+                # download retry above: winerror 5 = ACCESS_DENIED,
+                # winerror 32 = SHARING_VIOLATION (locale-safe).
+                winerror = getattr(exc, "winerror", None)
+                if winerror in (5, 32) and attempt < max_retries - 1:
+                    logger.warning(
+                        "[Downloader] Publish target locked, retrying in "
+                        "2s... (Attempt %d/%d)", attempt + 1, max_retries,
+                    )
+                    time.sleep(2)
+                    continue
+                logger.error(
+                    "[Downloader] Failed to publish %s -> %s: %s", src, dest, exc,
+                )
+                return str(src)
 
     def _run_final_pipeline(self, req: DownloadRequest, final_path: str) -> list[str]:
         """

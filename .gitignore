@@ -26,6 +26,10 @@ wheels/
 # workflow artifact instead.
 test-evidence/
 
+# Hidden per-batch download workspace (utils.paths.make_batch_workspace) —
+# only ever appears if a test/dev run pointed an output_dir inside the repo.
+.bananaflow_tmp/
+
 # ── IDE / editor scratch ───────────────────────────────────────────────────
 .idea/
 .vscode/

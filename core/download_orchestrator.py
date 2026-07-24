@@ -27,9 +27,11 @@ from __future__ import annotations
 import time
 import random
 import logging
+import shutil
 import threading
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Protocol, Tuple
 
 from core.history_db import DownloadRecord, HistoryDB
@@ -49,6 +51,7 @@ from core.youtube_reliability import (
     is_youtube_url,
 )
 from error_handler import classify_error, ErrorInfo
+from utils.paths import make_batch_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +250,29 @@ class DownloadOrchestrator:
             self._gate_last_release = None
         run_start = time.monotonic()
 
+        # Batch workspace: downloads, conversion and post-processing happen
+        # here instead of visibly inside the user's output directory — see
+        # core.downloader's atomic-publish step and
+        # utils.paths.make_batch_workspace. Skipped for any job that already
+        # carries a workspace_dir (a paused-track resume re-submitted
+        # through DownloadController.pause_track/resume_track) so a resume
+        # keeps using the SAME workspace its .part file already lives in,
+        # instead of orphaning it behind a brand-new empty one.
+        workspace_dir: Optional[Path] = None
+        jobs_needing_workspace = [req for _, req in jobs if not req.workspace_dir]
+        if jobs_needing_workspace:
+            try:
+                workspace_dir = make_batch_workspace(jobs_needing_workspace[0].output_dir)
+            except OSError as exc:
+                logger.warning(
+                    "[Orchestrator] Could not create batch workspace (%s) — "
+                    "writing directly to the output directory instead", exc,
+                )
+                workspace_dir = None
+            if workspace_dir is not None:
+                for req in jobs_needing_workspace:
+                    req.workspace_dir = str(workspace_dir)
+
         # Resolve duplicate-skips immediately — no engine work, no gate, no
         # stagger. Reported up front so the UI shows these cards as done
         # right away instead of waiting behind the real download jobs.
@@ -364,6 +390,24 @@ class DownloadOrchestrator:
             for key in self._aggregator.cancel_outstanding():
                 self._safe_cb("on_track_status", key, "cancelled")
 
+        # Workspace cleanup: only when this orchestrator created one AND the
+        # batch ran to a natural end with nothing paused/cancelled in it.
+        # A whole-batch cancel might really be a pause — the orchestrator
+        # can't tell the difference (that intent lives one layer up, in
+        # DownloadController) — so its workspace, and any .part /
+        # intermediate files in it, must survive for a possible resume.
+        # A per-track pause (DownloadController.pause_track ->
+        # cancel_track()) doesn't set the engine-level cancel event at all
+        # — only that one job's own cancel_events entry — so was_cancelled
+        # alone would miss it and delete a still-needed .part file out from
+        # under a single paused track while its siblings kept downloading.
+        # Cancellation-specific full cleanup is a separate, later concern.
+        any_track_paused_or_cancelled = any(
+            ev.is_set() for ev in self._cancel_events.values()
+        )
+        if workspace_dir is not None and not was_cancelled and not any_track_paused_or_cancelled:
+            self._cleanup_workspace(workspace_dir)
+
         # Never force the bar to 100% on cancellation — the real, weighted
         # progress at the moment we stopped is the honest value. A normal
         # completion reaches 1.0 on its own because every job completed.
@@ -443,6 +487,21 @@ class DownloadOrchestrator:
         if is_lazy:
             return i >= n_workers
         return i > 0
+
+    # ── Batch workspace ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _cleanup_workspace(workspace_dir: Path) -> None:
+        """Best-effort removal of a batch workspace this orchestrator
+        created. Never raises — a cleanup failure must not turn an
+        otherwise-successful batch into a reported error."""
+        try:
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[Orchestrator] Failed to clean up batch workspace %s: %s",
+                workspace_dir, exc,
+            )
 
     def _record_phase(self, name: str, seconds: float) -> None:
         """Accumulate a per-phase duration for the end-of-batch timing summary."""

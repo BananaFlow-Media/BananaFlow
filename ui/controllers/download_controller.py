@@ -611,6 +611,11 @@ class DownloadController(QObject):
                 proxy_url=req.proxy_url,
                 stream_type=req.stream_type,
                 youtube_reliability_mode=req.youtube_reliability_mode,
+                # Carry the SAME batch workspace forward so the resumed
+                # download finds its .part file exactly where it left off,
+                # instead of run_batch() handing it a brand-new empty
+                # workspace with nothing to continue from.
+                workspace_dir=req.workspace_dir,
             )
             self._paused_requests[key] = req_copy
 

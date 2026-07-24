@@ -17,6 +17,7 @@ and the download engine).
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 
@@ -159,7 +160,10 @@ class TestShouldStagger:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _req(url: str = "placeholder") -> DownloadRequest:
-    return DownloadRequest(url=url, output_dir=".", media_type=MediaType.AUDIO)
+    # The real OS temp dir, not "." — run_batch() now creates a real batch
+    # workspace under output_dir (see utils.paths.make_batch_workspace), and
+    # "." would have meant the repo's own working directory.
+    return DownloadRequest(url=url, output_dir=tempfile.gettempdir(), media_type=MediaType.AUDIO)
 
 
 class _NullCallbacks:
