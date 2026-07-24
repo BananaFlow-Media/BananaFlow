@@ -111,6 +111,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Download again and overwrite?"
         ),
 
+        # ── Batched duplicate confirmation (one dialog for the whole batch) ─────
+        "batch_duplicates_title": "Duplicate Files Found",
+        "batch_duplicates_subtitle_one": "1 file already exists in the destination folder.",
+        "batch_duplicates_subtitle_many": "{n} files already exist in the destination folder.",
+        "batch_duplicates_skip_all_btn": "Skip All",
+        "batch_duplicates_replace_all_btn": "Replace All",
+
         # ── File dialogs ────────────────────────────────────────────────────────
         "choose_download_folder": "Choose download folder",
 
@@ -1467,6 +1474,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "\"{title}\" כבר קיים:\n{path}\n\n"
             "להוריד שוב ולהחליף את הקובץ הקיים?"
         ),
+
+        # ── Batched duplicate confirmation (one dialog for the whole batch) ─────
+        "batch_duplicates_title": "נמצאו קבצים כפולים",
+        "batch_duplicates_subtitle_one": "קובץ אחד כבר קיים בתיקיית היעד.",
+        "batch_duplicates_subtitle_many": "{n} קבצים כבר קיימים בתיקיית היעד.",
+        "batch_duplicates_skip_all_btn": "דלג על הכל",
+        "batch_duplicates_replace_all_btn": "החלף הכל",
 
         # ── File dialogs ────────────────────────────────────────────────────────
         "choose_download_folder": "בחר תיקיית הורדה",
