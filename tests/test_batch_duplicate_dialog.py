@@ -45,6 +45,92 @@ class TestAskBatchDuplicateAction:
         assert ask_batch_duplicate_action(None, []) is True
 
 
+@pytest.fixture
+def restore_language(app):
+    """Save/restore the active i18n language so this file's language
+    switches never leak into other test files sharing the process."""
+    from ui.i18n import current_language, set_language
+
+    original = current_language()
+    yield
+    set_language(original)
+
+
+# ── Subtitle wording: singular vs plural (pinned exact strings) ─────────────
+# "1 file already exist..." is wrong English, and Hebrew changes both the
+# noun (קובץ/קבצים) and the verb (קיים/קיימים) between singular and plural —
+# a single "{n} file{plural}" template can't express either correctly, so
+# _batch_duplicates_subtitle picks between two dedicated keys. Pinned here so
+# the exact wording can't silently regress.
+
+class TestBatchDuplicatesSubtitleWording:
+    def test_singular_english(self, restore_language):
+        from ui.i18n import set_language
+        from ui.dialogs.batch_duplicate_dialog import _batch_duplicates_subtitle
+
+        set_language("en")
+        assert _batch_duplicates_subtitle(1) == (
+            "1 file already exists in the destination folder."
+        )
+
+    def test_plural_english(self, restore_language):
+        from ui.i18n import set_language
+        from ui.dialogs.batch_duplicate_dialog import _batch_duplicates_subtitle
+
+        set_language("en")
+        assert _batch_duplicates_subtitle(40) == (
+            "40 files already exist in the destination folder."
+        )
+
+    def test_singular_hebrew(self, restore_language):
+        from ui.i18n import set_language
+        from ui.dialogs.batch_duplicate_dialog import _batch_duplicates_subtitle
+
+        set_language("he")
+        assert _batch_duplicates_subtitle(1) == "קובץ אחד כבר קיים בתיקיית היעד."
+
+    def test_plural_hebrew(self, restore_language):
+        from ui.i18n import set_language
+        from ui.dialogs.batch_duplicate_dialog import _batch_duplicates_subtitle
+
+        set_language("he")
+        assert _batch_duplicates_subtitle(40) == "40 קבצים כבר קיימים בתיקיית היעד."
+
+    def test_dialog_widget_uses_singular_for_one_item(self, app, restore_language):
+        """End-to-end: the actual dialog header, not just the helper
+        function, must render the singular wording for a single duplicate."""
+        from ui.i18n import set_language
+        from ui.dialogs.batch_duplicate_dialog import _BatchDuplicateDialog
+        from PySide6.QtWidgets import QLabel
+
+        set_language("en")
+        dlg = _BatchDuplicateDialog(_ITEMS[:1])
+        try:
+            subtitles = {
+                w.text() for w in dlg.findChildren(QLabel)
+                if w.objectName() == "dialogSubtitle"
+            }
+            assert "1 file already exists in the destination folder." in subtitles
+        finally:
+            dlg.deleteLater()
+
+    def test_dialog_widget_uses_plural_for_many_items(self, app, restore_language):
+        from ui.i18n import set_language
+        from ui.dialogs.batch_duplicate_dialog import _BatchDuplicateDialog
+        from PySide6.QtWidgets import QLabel
+
+        set_language("en")
+        dlg = _BatchDuplicateDialog(_ITEMS)
+        try:
+            subtitles = {
+                w.text() for w in dlg.findChildren(QLabel)
+                if w.objectName() == "dialogSubtitle"
+            }
+            assert "3 files already exist in the destination folder." in subtitles
+        finally:
+            dlg.deleteLater()
+
+
 class TestBatchDuplicateDialogWidget:
     def test_defaults_to_skip_all_before_any_choice(self, app):
         from ui.dialogs.batch_duplicate_dialog import _BatchDuplicateDialog

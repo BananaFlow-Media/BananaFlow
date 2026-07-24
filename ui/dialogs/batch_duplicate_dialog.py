@@ -30,6 +30,17 @@ from ui.direction import force_ltr_label
 from ui.i18n import t
 
 
+def _batch_duplicates_subtitle(n: int) -> str:
+    """"1 file already exists" vs "{n} files already exist" — English and
+    Hebrew both change the noun AND the verb between singular and plural, so
+    a single template with just a trailing {plural}="s" suffix can't produce
+    either sentence correctly (e.g. "1 file already exist"). Two dedicated
+    keys instead of one parametrised template."""
+    if n == 1:
+        return t("batch_duplicates_subtitle_one")
+    return t("batch_duplicates_subtitle_many", n=n)
+
+
 def ask_batch_duplicate_action(parent, items: Sequence[tuple[str, str]]) -> bool:
     """
     Show one consolidated dialog listing every duplicate found in the batch.
@@ -66,7 +77,7 @@ class _BatchDuplicateDialog(StyledDialog):
         add_header(
             root,
             t("batch_duplicates_title"),
-            t("batch_duplicates_subtitle", n=n, plural=("" if n == 1 else "s")),
+            _batch_duplicates_subtitle(n),
         )
         root.addWidget(self._make_list(items), stretch=1)
 
