@@ -105,6 +105,15 @@ class TrackMeta:
     category:       str   = ""          # override for custom yt/scraper tabs
     total_tracks:   int   = 0           # total tracks in the release (for EP grouping)
 
+    # ── Deferred-match state (Spotify two-stage import) ───────────────────────
+    # In the two-stage flow the catalog is shown immediately with metadata
+    # only; the YouTube match is resolved later, at download time. Until then
+    # ``url`` holds a ``ytsearch*`` placeholder and ``match_status`` is
+    # "pending". Non-Spotify paths resolve up-front and stay "matched".
+    spotify_id:       str = ""            # stable Spotify track id (cache key)
+    spotify_key_kind: str = "spotify_id"  # "spotify_id" | "composite"
+    match_status:     str = "matched"     # "matched" | "pending"
+
     # ── State used by the GUI (not set by the parser) ─────────────────────────
     selected:       bool = True         # pre-tick all items in the UI
 
@@ -448,9 +457,16 @@ class PlaylistParser:
             if self._cancel.is_set(): return
             idx_counter[0] += 1
             idx = idx_counter[0]
+            item_url = track_data.get("url", "")
+            # The scraper/resolver is the authority on whether a track has been
+            # matched to YouTube yet. In the two-stage flow the Spotify scrapers
+            # emit metadata-only items tagged ``match_status="pending"`` (URL is a
+            # ``ytsearch*`` placeholder, resolved lazily at download time);
+            # everything else defaults to "matched".
+            match_status = track_data.get("match_status", "matched")
             track = TrackMeta(
                 index=idx,
-                url=track_data.get("url", ""),
+                url=item_url,
                 title=track_data.get("title", f"Item {idx}"),
                 artist=track_data.get("artist", ""),
                 album=track_data.get("album", ""),
@@ -462,6 +478,9 @@ class PlaylistParser:
                 duration_str=track_data.get("duration_str", ""),
                 duration_sec=track_data.get("duration_sec"),
                 total_tracks=track_data.get("total_tracks", 0),
+                spotify_id=track_data.get("spotify_id", ""),
+                spotify_key_kind=track_data.get("spotify_key_kind", "spotify_id"),
+                match_status=match_status,
                 platform=platform,
                 selected=True,
             )
@@ -474,18 +493,23 @@ class PlaylistParser:
             # ── SPOTIFY ──────────────────────────────────────────────────────
             if platform == SourcePlatform.SPOTIFY:
                 from core.scraper import (
-                    scrape_spotify_playlist, scrape_spotify_album, 
+                    scrape_spotify_playlist, scrape_spotify_album,
                     scrape_spotify_artist, scrape_spotify_track
                 )
                 if kind == UrlKind.SINGLE_VIDEO:
                     title, _ = scrape_spotify_track(url, on_item=_on_scraper_item, cookies_file=cookies_file)
-                elif kind == UrlKind.PLAYLIST:
-                    title, _ = scrape_spotify_playlist(url, on_item=_on_scraper_item, cookies_file=cookies_file)
-                elif kind == UrlKind.ALBUM:
-                    title, _ = scrape_spotify_album(url, on_item=_on_scraper_item, cookies_file=cookies_file)
-                elif kind == UrlKind.ARTIST:
-                    title, _ = scrape_spotify_artist(url, on_item=_on_scraper_item, cookies_file=cookies_file)
-                    title = f"{title} (Discography)"
+                elif kind in (UrlKind.PLAYLIST, UrlKind.ALBUM, UrlKind.ARTIST):
+                    # Two-stage flow: show the whole catalog immediately with
+                    # metadata only; the YouTube match is deferred to download
+                    # time (see DownloadRequest.url_resolver). Try the metadata
+                    # resolver first, fall back to the metadata-only Playwright
+                    # scrape when it is not configured / fails.
+                    title = self._scrape_spotify_catalog(
+                        url, kind, on_item=_on_scraper_item,
+                        on_progress=on_progress, cookies_file=cookies_file,
+                    )
+                    if kind == UrlKind.ARTIST:
+                        title = f"{title} (Discography)"
                 else:
                     title, _ = scrape_spotify_track(url, on_item=_on_scraper_item, cookies_file=cookies_file)
                 result.playlist_title = title
@@ -611,6 +635,54 @@ class PlaylistParser:
     def cancel(self) -> None:
         """Signal the running parse to stop after the current item."""
         self._cancel.set()
+
+    # ── Spotify two-stage catalog ──────────────────────────────────────────────
+
+    def _scrape_spotify_catalog(
+        self,
+        url:         str,
+        kind:        "UrlKind",
+        on_item:     Callable[[dict], None],
+        on_progress: Optional[Callable[[str], None]],
+        cookies_file: Optional[str],
+    ) -> str:
+        """Stage 1 of the two-stage Spotify import.
+
+        Publishes every track of an artist / album / playlist **progressively**
+        as it is scraped, with metadata only — no YouTube matching yet (that is
+        deferred to download time via ``DownloadRequest.url_resolver``). Uses the
+        metadata-only Playwright scrape, which fills the UI incrementally and is
+        promptly cancellable via ``cancel_check`` (a configured proxy would be a
+        single blocking call — neither progressive nor cancellable mid-flight —
+        so it is intentionally not used for this stage). Returns the catalog
+        title.
+        """
+        from ui.i18n import t
+        from core.scraper import (
+            scrape_spotify_playlist, scrape_spotify_album, scrape_spotify_artist,
+        )
+        cancel_cb = self._cancel.is_set
+        count = [0]
+
+        def _pending_on_item(track_data: dict) -> None:
+            # Every stage-1 item is unmatched by definition.
+            track_data.setdefault("match_status", "pending")
+            count[0] += 1
+            on_item(track_data)
+
+        self._notify(on_progress, t("collecting_catalog"))
+
+        scraper = {
+            UrlKind.PLAYLIST: scrape_spotify_playlist,
+            UrlKind.ALBUM:    scrape_spotify_album,
+            UrlKind.ARTIST:   scrape_spotify_artist,
+        }.get(kind, scrape_spotify_playlist)
+        title, _ = scraper(
+            url, on_item=_pending_on_item, cookies_file=cookies_file,
+            metadata_only=True, cancel_check=cancel_cb,
+        )
+        self._notify(on_progress, t("found_n_tracks", n=count[0]))
+        return title
 
     # ── yt-dlp options ─────────────────────────────────────────────────────────
 

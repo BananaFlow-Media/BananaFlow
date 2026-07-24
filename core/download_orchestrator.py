@@ -218,9 +218,7 @@ class DownloadOrchestrator:
         # paused-track resume) has no sibling to protect and gains nothing
         # from an artificial cooldown.
         youtube_job_count = sum(
-            1 for _, req in jobs
-            if getattr(req, "youtube_reliability_mode", "conservative") == "conservative"
-            and is_youtube_url(req.url)
+            1 for _, req in jobs if self._is_conservative_youtube_job(req)
         )
         self._youtube_serialize = youtube_job_count > 1
         # We DON'T clear engine._cancel_event here anymore to respect pre-cancellation.
@@ -233,10 +231,7 @@ class DownloadOrchestrator:
         # per-job predicate _download_one() uses to decide gate membership.
         if self._youtube_serialize:
             for key, req in jobs:
-                if (
-                    getattr(req, "youtube_reliability_mode", "conservative") == "conservative"
-                    and is_youtube_url(req.url)
-                ):
+                if self._is_conservative_youtube_job(req):
                     self._aggregator.mark_serialized(key)
 
         n_workers = min(self._max_workers, self._total)
@@ -370,6 +365,52 @@ class DownloadOrchestrator:
 
     # ── Per-job runner (pool thread) ──────────────────────────────────────────
 
+    @staticmethod
+    def _is_conservative_youtube_job(req: DownloadRequest) -> bool:
+        """Whether a job must pass through the conservative YouTube serial gate.
+
+        A Spotify two-stage job carries a ``url_resolver`` and always resolves
+        to a YouTube/YTM URL, so it counts as a conservative YouTube job even
+        though ``req.url`` is still a placeholder at gate-decision time. This
+        keeps the serialize decision, the ETA overhead, and the actual gating
+        consistent for pending Spotify downloads.
+        """
+        if getattr(req, "youtube_reliability_mode", "conservative") != "conservative":
+            return False
+        return is_youtube_url(req.url) or getattr(req, "url_resolver", None) is not None
+
+    def _resolve_lazy_url(
+        self, key: str, req: DownloadRequest, cancel_ev: threading.Event
+    ) -> bool:
+        """Run a Spotify two-stage ``url_resolver`` (if any) to fill ``req.url``.
+
+        Runs *before* the conservative YouTube gate is acquired, so matching
+        happens in parallel across workers while only the downloads themselves
+        serialize. Returns True if the job was cancelled (caller should abort).
+        The track stays visually "queued" during the match — no matching/YouTube
+        wording is surfaced. A bad/failed match never sinks the job.
+        """
+        if req.url_resolver is None:
+            return False
+        resolver = req.url_resolver
+        req.url_resolver = None  # resolve at most once
+        if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+            self._aggregator.cancel(key)
+            self._safe_cb("on_track_status", key, "cancelled")
+            return True
+        try:
+            resolved = resolver(cancel_ev)
+        except Exception as exc:  # noqa: BLE001 - a bad match must not sink the job
+            logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
+            resolved = ""
+        if resolved:
+            req.url = resolved
+        if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+            self._aggregator.cancel(key)
+            self._safe_cb("on_track_status", key, "cancelled")
+            return True
+        return False
+
     def _download_one(self, key: str, req: DownloadRequest) -> None:
         cancel_ev = self._cancel_events[key]
 
@@ -378,11 +419,18 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_status", key, "cancelled")
             return
 
+        # Decide gate membership BEFORE resolving — a Spotify two-stage job's
+        # url_resolver is still set here, and _is_conservative_youtube_job uses
+        # that to recognise it as a YouTube job despite the placeholder URL.
         conservative_youtube = (
-            self._youtube_serialize
-            and getattr(req, "youtube_reliability_mode", "conservative") == "conservative"
-            and is_youtube_url(req.url)
+            self._youtube_serialize and self._is_conservative_youtube_job(req)
         )
+
+        # Resolve the lazy URL now, BEFORE acquiring the gate, so matching runs
+        # in parallel across workers and only the downloads serialize.
+        if self._resolve_lazy_url(key, req, cancel_ev):
+            return
+
         if conservative_youtube:
             # This log line only fires when the gate is actually engaged
             # (self._youtube_serialize — batch has >1 conservative YouTube
@@ -428,7 +476,11 @@ class DownloadOrchestrator:
     def _download_one_locked(self, key: str, req: DownloadRequest, cancel_ev: threading.Event) -> None:
         """The actual per-job download logic, run either directly (non-YouTube
         or fast mode) or while holding ``self._youtube_gate`` (conservative
-        YouTube jobs — see _download_one)."""
+        YouTube jobs — see _download_one).
+
+        Any Spotify two-stage ``url_resolver`` has already run in _download_one
+        (before the gate), so ``req.url`` is final here.
+        """
         self._safe_cb("on_track_status", key, "downloading")
         logger.debug("[Orchestrator] Starting %s", key)
 

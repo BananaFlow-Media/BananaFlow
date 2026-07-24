@@ -211,6 +211,16 @@ class DownloadRequest:
     # Per-request cancellation (parallel downloads)
     cancel_event: Optional[threading.Event] = field(default=None, repr=False)
 
+    # Lazy URL resolver (Spotify two-stage import). When set, ``url`` is a
+    # placeholder and the real target URL is produced by calling this the
+    # instant before the download starts — so a large catalog's YouTube
+    # matching is pipelined with downloading instead of blocking it up front.
+    # Receives the per-request cancel Event so a cancel stops an in-flight
+    # match. Returns the resolved URL (or a ``ytsearch*`` last-resort string).
+    url_resolver: Optional[Callable[[Optional[threading.Event]], str]] = field(
+        default=None, repr=False
+    )
+
     # Callbacks
     on_progress: Optional[Callable[[DownloadProgress], None]] = field(
         default=None, repr=False

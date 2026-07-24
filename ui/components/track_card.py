@@ -156,6 +156,10 @@ class TrackCard(QFrame):
         thumbnail_url: str         = "",
         category:      str         = "",
         total_tracks:  int         = 0,
+        duration_sec:  Optional[int] = None,
+        spotify_id:    str         = "",
+        spotify_key_kind: str      = "spotify_id",
+        match_status:  str         = "matched",
         parent:       QWidget      = None,
     ) -> None:
         super().__init__(parent)
@@ -171,6 +175,12 @@ class TrackCard(QFrame):
         self.album_index   = album_index
         self.thumbnail_url = thumbnail_url
         self.duration       = duration
+        self.duration_sec   = duration_sec
+        # Deferred-match state (Spotify two-stage import). ``match_status`` is
+        # "pending" until the YouTube URL is resolved at download time.
+        self.spotify_id       = spotify_id
+        self.spotify_key_kind = spotify_key_kind
+        self.match_status     = match_status
         # Ensure platform is a string
         if hasattr(platform, "value"):
             plat_str = platform.value

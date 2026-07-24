@@ -28,6 +28,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _emit_pending_track(
+    track_dict: Dict,
+    on_item: Optional[Callable[[Dict], None]] = None,
+) -> None:
+    """Publish one scraped track *immediately* as an unmatched stage-1 item.
+
+    Called from inside the scrape loop (not after it) so a large catalog fills
+    the UI progressively instead of appearing all at once when the scrape ends.
+    The track gets a ``ytsearch*`` placeholder URL (still playable as a last
+    resort) and is tagged ``match_status="pending"`` so the download path
+    resolves it lazily. No network calls happen here.
+    """
+    if not track_dict.get("url"):
+        q = f"{track_dict.get('artist', '')} {track_dict.get('title', '')}".strip()
+        track_dict["url"] = f"ytsearch1:{q} audio"
+    track_dict["match_status"] = "pending"
+    if on_item:
+        on_item(track_dict)
+
+
 def _parallel_resolve_urls(
     items: List[Dict],
     on_item: Optional[Callable[[Dict], None]] = None,
@@ -76,6 +96,7 @@ def _parallel_resolve_urls(
 def _resolve_to_ytm_url(
     title: str, artist: str, duration_sec: int = 0,
     cookies_file: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> str:
     """
     Resolve a track to a YouTube Music URL via ytmusicapi search.
@@ -83,6 +104,10 @@ def _resolve_to_ytm_url(
     Uses duration-based and text-similarity confidence scoring to pick the best match.
     Falls back to a general YouTube search if YTM confidence is low, and finally
     to a plain ytsearch1: query as a last resort.
+
+    ``cancel_check`` (if given) is polled between the cheap YTM search and the
+    heavier yt-dlp fallback so a cancel doesn't let an already-doomed second
+    network call run to completion.
     """
     query = f"{artist} {title}" if artist else title
     best_ytm_candidate = None
@@ -153,6 +178,12 @@ def _resolve_to_ytm_url(
     except Exception as exc:
         logger.debug("[Scraper] ytmusicapi search or scoring failed: %s", exc)
 
+    # A cancel between the cheap YTM search and the heavier yt-dlp fallback
+    # returns the last-resort placeholder immediately rather than firing
+    # another network call the user has already abandoned.
+    if cancel_check and cancel_check():
+        return f"ytsearch1:{query} audio"
+
     # ── Fallback 1: General YouTube Search ──
     try:
         from core.spotify_match_scorer import find_best_youtube_match
@@ -219,7 +250,11 @@ def _spotify_cache_key(td: Dict) -> Tuple[str, str]:
     )
 
 
-def resolve_track_to_youtube(td: Dict, cookies_file: Optional[str] = None) -> str:
+def resolve_track_to_youtube(
+    td: Dict,
+    cookies_file: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
     """Cache-aware resolution of one track dict to a YouTube URL.
 
     Consults the persistent match cache first (keyed by stable Spotify track
@@ -227,6 +262,9 @@ def resolve_track_to_youtube(td: Dict, cookies_file: Optional[str] = None) -> st
     :func:`_resolve_to_ytm_url` search chain and stores a *real* match before
     returning.  The last-resort ``ytsearch1:`` sentinel is never cached — it
     is not a real match, and persisting it would pin a bad result across runs.
+
+    ``cancel_check`` is forwarded to the search chain so a download-time cancel
+    stops an in-flight match promptly.
     """
     from core.match_cache import get_match_cache
     from core.spotify_match_scorer import MATCH_ALGO_VERSION
@@ -243,6 +281,7 @@ def resolve_track_to_youtube(td: Dict, cookies_file: Optional[str] = None) -> st
         td.get("artist", ""),
         td.get("duration_sec") or 0,
         cookies_file=cookies_file,
+        cancel_check=cancel_check,
     )
 
     # Cache only confident matches — never the ytsearch* last-resort sentinel.
@@ -331,10 +370,15 @@ def _scrape_standard_ydl(url: str, platform_label: str, on_item: Optional[Callab
             if on_item: on_item(track_dict)
 
     return playlist_title, items
-def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, on_item: Optional[Callable[[Dict], None]] = None) -> Tuple[str, List[Dict]]:
+def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, on_item: Optional[Callable[[Dict], None]] = None, cancel_check: Optional[Callable[[], bool]] = None, metadata_only: bool = False) -> Tuple[str, List[Dict]]:
     """
     CORE LOGIC: Scrape a Spotify grid on a PRE-INITIALIZED page.
-    Handles virtualized lists by scrolling.
+    Handles virtualized lists by scrolling.  ``cancel_check`` (if given) is
+    polled each scroll pass so a user cancel stops the scroll promptly.
+
+    When ``metadata_only`` is set, each track is published via ``on_item`` the
+    moment it is discovered (progressive stage-1 catalog) instead of being
+    collected for a post-scrape resolve pass.
     """
     items = []
     seen = set()
@@ -346,9 +390,9 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
         parsed = _parse_spotify_json_fallback(html, content_type_label)
         if parsed:
             logger.info(f"[SpotifyScraper] Parsed {content_type_label} tracks using JSON fallback successfully.")
-            if on_item:
+            if metadata_only and on_item:
                 for item in parsed[1]:
-                    on_item(item)
+                    _emit_pending_track(item, on_item)
             return parsed
     except Exception as exc:
         logger.debug(f"[SpotifyScraper] JSON fallback failed for {url}: {exc}")
@@ -372,6 +416,7 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
         main_grid = page.locator("main div[role='grid'], main div[data-testid='track-list']").first
         stagnant_count = 0
         while stagnant_count < 6:
+            if cancel_check and cancel_check(): break
             tracks = main_grid.locator("div[data-testid='tracklist-row']").all()
             if not tracks: break
             added_in_pass = 0
@@ -441,6 +486,10 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
                         ),
                     }
                     items.append(track_dict)
+                    # Stage 1: publish this track immediately so the catalog
+                    # fills the UI as it is scraped, not after the whole scroll.
+                    if metadata_only:
+                        _emit_pending_track(track_dict, on_item)
                 except: pass
 
             if added_in_pass == 0: stagnant_count += 1
@@ -460,8 +509,18 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
         return "Unknown", []
     return scraped_title, items
 # ── Spotify Isolated Functions ────────────────────────────────────────────────
-def scrape_spotify_playlist(url: str, on_item: Optional[Callable[[Dict], None]] = None, cookies_file: Optional[str] = None) -> Tuple[str, List[Dict]]:
-    """Dedicated entry for Spotify Playlists."""
+def scrape_spotify_playlist(
+    url: str,
+    on_item: Optional[Callable[[Dict], None]] = None,
+    cookies_file: Optional[str] = None,
+    metadata_only: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[str, List[Dict]]:
+    """Dedicated entry for Spotify Playlists.
+
+    When ``metadata_only`` is set the tracks are published immediately with
+    metadata only and the YouTube match is deferred to download time.
+    """
     sync_playwright = _sync_playwright_for("Spotify playlist scraping")
     title, items = "Unknown Playlist", []
     with sync_playwright() as p:
@@ -470,13 +529,28 @@ def scrape_spotify_playlist(url: str, on_item: Optional[Callable[[Dict], None]] 
         page = context.new_page()
         page.route("**/*", _block_heavy_resources)
         try:
-            title, items = _scrape_spotify_grid_on_page(page, url, "Playlist")
+            title, items = _scrape_spotify_grid_on_page(
+                page, url, "Playlist",
+                on_item=on_item, cancel_check=cancel_check, metadata_only=metadata_only,
+            )
         finally:
             browser.close()
-    _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
+    # metadata_only already published each track progressively inside the scrape.
+    if not metadata_only:
+        _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
     return title, items
-def scrape_spotify_album(url: str, on_item: Optional[Callable[[Dict], None]] = None, cookies_file: Optional[str] = None) -> Tuple[str, List[Dict]]:
-    """Dedicated entry for Spotify Albums."""
+def scrape_spotify_album(
+    url: str,
+    on_item: Optional[Callable[[Dict], None]] = None,
+    cookies_file: Optional[str] = None,
+    metadata_only: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[str, List[Dict]]:
+    """Dedicated entry for Spotify Albums.
+
+    When ``metadata_only`` is set the tracks are published immediately with
+    metadata only and the YouTube match is deferred to download time.
+    """
     sync_playwright = _sync_playwright_for("Spotify album scraping")
     title, items = "Unknown Album", []
     with sync_playwright() as p:
@@ -485,10 +559,15 @@ def scrape_spotify_album(url: str, on_item: Optional[Callable[[Dict], None]] = N
         page = context.new_page()
         page.route("**/*", _block_heavy_resources)
         try:
-            title, items = _scrape_spotify_grid_on_page(page, url, "Album")
+            title, items = _scrape_spotify_grid_on_page(
+                page, url, "Album",
+                on_item=on_item, cancel_check=cancel_check, metadata_only=metadata_only,
+            )
         finally:
             browser.close()
-    _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
+    # metadata_only already published each track progressively inside the scrape.
+    if not metadata_only:
+        _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
     return title, items
 def scrape_spotify_track(url: str, on_item: Optional[Callable[[Dict], None]] = None, cookies_file: Optional[str] = None) -> Tuple[str, List[Dict]]:
     """Dedicated entry for single Spotify track."""
@@ -550,10 +629,21 @@ def scrape_spotify_track(url: str, on_item: Optional[Callable[[Dict], None]] = N
     if items:
         _parallel_resolve_urls(items, on_item, max_workers=1, cookies_file=cookies_file)
     return title, items
-def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = None, cookies_file: Optional[str] = None) -> Tuple[str, List[Dict]]:
+def scrape_spotify_artist(
+    url: str,
+    on_item: Optional[Callable[[Dict], None]] = None,
+    cookies_file: Optional[str] = None,
+    metadata_only: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[str, List[Dict]]:
     """
     Dedicated entry for Spotify Artist discographies.
     Iterates over /album and /single URLs for categorical accuracy.
+
+    When ``metadata_only`` is set the whole catalog is published immediately
+    with metadata only and the YouTube match is deferred to download time.
+    ``cancel_check`` is polled in the scroll/category loops so a user cancel
+    stops the (potentially long) scrape promptly.
     """
     items = []
     artist_name = ""
@@ -579,6 +669,7 @@ def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = 
         ]
 
         for target_url, cat_name in urls:
+            if cancel_check and cancel_check(): break
             try:
                 page.goto(target_url, wait_until="load", timeout=30000)
 
@@ -612,6 +703,7 @@ def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = 
                 except: pass
 
                 while stagnant_count < 10:
+                    if cancel_check and cancel_check(): break
                     grids = page.locator("main div[data-testid='track-list']").all()
                     if not grids: break
                     added_any = False
@@ -715,6 +807,11 @@ def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = 
                                     ),
                                 }
                                 items.append(track_dict)
+                                # Stage 1: publish each track the moment it is
+                                # scraped so a large discography fills the UI
+                                # progressively, not only after the full scroll.
+                                if metadata_only:
+                                    _emit_pending_track(track_dict, on_item)
                             except: pass
                     if added_any: stagnant_count = 0
                     else: stagnant_count += 1
@@ -727,7 +824,9 @@ def scrape_spotify_artist(url: str, on_item: Optional[Callable[[Dict], None]] = 
 
         browser.close()
 
-    _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
+    # metadata_only already published each track progressively inside the scrape.
+    if not metadata_only:
+        _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
     return artist_name or "Unknown Artist", items
 # ── YouTube Music Isolated Functions ──────────────────────────────────────────
 def scrape_ytm_playlist(url: str, on_item: Optional[Callable[[Dict], None]] = None) -> Tuple[str, List[Dict]]:
