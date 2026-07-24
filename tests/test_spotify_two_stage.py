@@ -229,8 +229,12 @@ class TestConservativeSerialization:
 
         # Despite max_workers=4, conservative mode serialized the downloads.
         assert engine.max_concurrent == 1
-        assert len(engine.downloaded_urls) == 3
-        assert all("youtube.com" in u for u in engine.downloaded_urls)
+        # Each job downloaded the exact URL its resolver produced (the gate saw
+        # them as YouTube jobs). Match the full prefix, not a bare "youtube.com"
+        # substring, to avoid the incomplete-URL-sanitization antipattern.
+        assert sorted(engine.downloaded_urls) == [
+            f"https://www.youtube.com/watch?v=VID{i}" for i in range(3)
+        ]
 
     def test_fast_mode_lazy_downloads_are_not_serialized(self, monkeypatch):
         monkeypatch.setattr(
