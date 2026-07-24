@@ -260,6 +260,10 @@ class QueuePanel(QWidget):
         thumbnail_url: str         = "",
         category:      str         = "",
         total_tracks:  int         = 0,
+        duration_sec:  Optional[int] = None,
+        spotify_id:    str         = "",
+        spotify_key_kind: str      = "spotify_id",
+        match_status:  str         = "matched",
     ) -> TrackCard:
         """
         Create and append a new TrackCard.  Hides the empty state on first add.
@@ -282,6 +286,10 @@ class QueuePanel(QWidget):
             thumbnail_url=thumbnail_url,
             category=category,
             total_tracks=total_tracks,
+            duration_sec=duration_sec,
+            spotify_id=spotify_id,
+            spotify_key_kind=spotify_key_kind,
+            match_status=match_status,
             parent=self._drop_area,
         )
         card.remove_requested.connect(self._on_card_remove)

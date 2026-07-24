@@ -429,6 +429,31 @@ class DownloadOrchestrator:
         """The actual per-job download logic, run either directly (non-YouTube
         or fast mode) or while holding ``self._youtube_gate`` (conservative
         YouTube jobs — see _download_one)."""
+        # Lazy URL resolution (Spotify two-stage import): produce the real
+        # target URL now, the instant before downloading, so a large catalog's
+        # YouTube matching is pipelined with downloading instead of blocking it
+        # up front. The track stays visually "queued" during the (usually
+        # cached, else 1-2 network calls) match — no matching/YouTube wording
+        # is ever surfaced. Cancellation is honoured before and after.
+        if req.url_resolver is not None:
+            resolver = req.url_resolver
+            req.url_resolver = None  # resolve at most once
+            if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+                self._aggregator.cancel(key)
+                self._safe_cb("on_track_status", key, "cancelled")
+                return
+            try:
+                resolved = resolver(cancel_ev)
+            except Exception as exc:  # noqa: BLE001 - a bad match must not sink the job
+                logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
+                resolved = ""
+            if resolved:
+                req.url = resolved
+            if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+                self._aggregator.cancel(key)
+                self._safe_cb("on_track_status", key, "cancelled")
+                return
+
         self._safe_cb("on_track_status", key, "downloading")
         logger.debug("[Orchestrator] Starting %s", key)
 

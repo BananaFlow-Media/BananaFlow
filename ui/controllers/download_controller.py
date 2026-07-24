@@ -391,6 +391,32 @@ class DownloadController(QObject):
                 youtube_reliability_mode=self._cfg.youtube_reliability_mode,
             )
 
+            # Two-stage Spotify import: a card whose YouTube match was deferred
+            # carries match_status == "pending". Attach a lazy resolver so the
+            # download pool matches it to YouTube the instant before it starts
+            # downloading — pipelining the (possibly large) catalog's matching
+            # with the downloads instead of blocking every download on it.
+            if getattr(card, "match_status", "matched") == "pending":
+                td = {
+                    "spotify_id":       getattr(card, "spotify_id", ""),
+                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
+                    "title":            card.title,
+                    "artist":           card.artist,
+                    "duration_sec":     getattr(card, "duration_sec", None),
+                }
+                cookies = self._cfg.cookies_file or None
+
+                def _resolve(ev, _td=td, _cookies=cookies):
+                    from core.scraper import resolve_track_to_youtube
+                    from utils.url_cleaner import clean_youtube_url as _clean
+                    resolved = resolve_track_to_youtube(
+                        _td, cookies_file=_cookies,
+                        cancel_check=lambda: ev is not None and ev.is_set(),
+                    )
+                    return _clean(resolved)
+
+                req.url_resolver = _resolve
+
             key = str(id(card))
             self._key_to_card[key] = card
             jobs.append((key, req))

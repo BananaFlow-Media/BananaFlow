@@ -109,6 +109,7 @@ class SpotifyResolver:
         on_item:     Optional[Callable[[dict], None]] = None,
         proxy_url:   Optional[str] = None,
         proxy_token: Optional[str] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> list[dict]:
         """
         Resolve any Spotify URL to a list of track dicts.
@@ -158,7 +159,7 @@ class SpotifyResolver:
 
         if proxy_url and proxy_url.lower().startswith(("http://", "https://")):
             try:
-                return cls._resolve_proxy(url, proxy_url, proxy_token, on_item)
+                return cls._resolve_proxy(url, proxy_url, proxy_token, on_item, cancel_check)
             except RuntimeError as err:
                 if "Rate Limit" in str(err) or "429" in str(err):
                     if entity_type == "artist":
@@ -419,12 +420,15 @@ class SpotifyResolver:
         proxy_base:   str,
         proxy_token:  str,
         on_item:      Optional[Callable[[dict], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> list[dict]:
         """
         Resolve a Spotify URL via the configured proxy server.
         Endpoint: /api/v1/resolve?url={url}
         Header: X-App-Token
         """
+        if cancel_check and cancel_check():
+            return []
         proxy_base = proxy_base.rstrip("/")
         endpoint   = f"{proxy_base}/api/v1/resolve"
         params     = {"url": url}
@@ -489,6 +493,8 @@ class SpotifyResolver:
         # Ensure all items are normalized and collected
         normalized_list: list[dict] = []
         for item in items:
+            if cancel_check and cancel_check():
+                break
             # Reconstruct the expected dict format if keys are different
             # Server returns: title, artist, yt_query, image_url, album, duration_sec
             normalized = {

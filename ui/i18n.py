@@ -139,6 +139,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "fetching_progress": "Loading track {n} of {total}…",
         "fetching_single": "Fetching: {title}",
         "fetch_done": "{n} track{plural} loaded — select and press Download.",
+        "collecting_catalog": "Collecting catalog…",
+        "found_n_tracks": "Found {n} tracks",
 
         # ── Settings panel ──────────────────────────────────────────────────────
         "settings_section_basic": "Basic",
@@ -1493,6 +1495,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "fetching_progress": "טוען רצועה {n} מתוך {total}…",
         "fetching_single": "טוען: {title}",
         "fetch_done": "נטענו {n} רצועות — בחר ולחץ הורדה.",
+        "collecting_catalog": "אוסף קטלוג…",
+        "found_n_tracks": "נמצאו {n} שירים",
 
         # ── Settings panel ──────────────────────────────────────────────────────
         "settings_section_basic": "בסיסי",

@@ -1450,6 +1450,10 @@ class AppWindow(FluentWindow):
             thumbnail_url=get("thumbnail_url", ""),
             category=get("category", ""),
             total_tracks=get("total_tracks", 0),
+            duration_sec=get("duration_sec", None),
+            spotify_id=get("spotify_id", ""),
+            spotify_key_kind=get("spotify_key_kind", "spotify_id"),
+            match_status=get("match_status", "matched"),
         )
 
         card.remove_requested.connect(self._on_card_removed)
