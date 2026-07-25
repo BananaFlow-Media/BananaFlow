@@ -87,8 +87,55 @@ class TestWindowsHiddenAttribute:
         from utils.paths import _set_hidden_attribute
 
         missing = tmp_path / "does_not_exist"
-        result = _set_hidden_attribute(missing)
+        result = _set_hidden_attribute(missing, retry_delay_s=0.0)
         assert result is False
+
+    def test_transient_failure_then_success_is_reported_as_success(self, tmp_path, monkeypatch):
+        """A directory just created can transiently fail this call (e.g. an
+        antivirus/indexer briefly holding a handle) — a retry that then
+        succeeds must report True, not give up after one attempt."""
+        import utils.paths as paths_mod
+
+        d = tmp_path / "somedir"
+        d.mkdir()
+        calls = {"n": 0}
+
+        import ctypes as real_ctypes
+        original = real_ctypes.windll.kernel32.SetFileAttributesW
+
+        def _flaky(path, attrs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return 0  # FALSE — simulated transient failure
+            return original(path, attrs)
+
+        monkeypatch.setattr(
+            real_ctypes.windll.kernel32, "SetFileAttributesW", _flaky, raising=False,
+        )
+
+        result = paths_mod._set_hidden_attribute(d, attempts=3, retry_delay_s=0.0)
+        assert result is True
+        assert calls["n"] == 3
+
+    def test_persistent_failure_gives_up_after_all_attempts(self, tmp_path, monkeypatch):
+        import ctypes as real_ctypes
+
+        calls = {"n": 0}
+
+        def _always_fail(path, attrs):
+            calls["n"] += 1
+            return 0
+
+        monkeypatch.setattr(
+            real_ctypes.windll.kernel32, "SetFileAttributesW", _always_fail, raising=False,
+        )
+
+        import utils.paths as paths_mod
+        d = tmp_path / "somedir"
+        d.mkdir()
+        result = paths_mod._set_hidden_attribute(d, attempts=3, retry_delay_s=0.0)
+        assert result is False
+        assert calls["n"] == 3  # every attempt was actually tried, not just one
 
 
 def test_set_hidden_attribute_is_true_on_non_windows_by_convention():

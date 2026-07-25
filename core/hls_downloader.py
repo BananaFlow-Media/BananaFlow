@@ -14,11 +14,12 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from utils.proc import run_hidden
+from utils.proc import log_exit, popen_hidden, run_hidden
 from utils.security import redact_text
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,15 @@ logger = logging.getLogger(__name__)
 # Supported ffmpeg output containers by extension
 _AUDIO_FORMATS = {"mp3", "m4a", "aac", "flac", "opus", "wav", "ogg"}
 _VIDEO_FORMATS = {"mp4", "mkv", "webm", "mov", "ts"}
+
+# How often the cancel-polling loop checks the process/event, in seconds.
+_POLL_INTERVAL_S = 0.25
+# Grace period after terminate() before escalating to kill().
+_TERMINATE_GRACE_S = 3.0
+
+
+class HlsCancelled(Exception):
+    """download_hls() was cancelled mid-download (cancel_event was set)."""
 
 
 def _find_ffmpeg() -> str:
@@ -60,6 +70,7 @@ def download_hls(
     headers:       Optional[dict[str, str]]                  = None,
     timeout_sec:   int                                       = 3600,
     on_progress:   Optional[Callable[[float, str, str], None]] = None,
+    cancel_event:  Optional[threading.Event]                 = None,
 ) -> str:
     """
     Download an HLS/DASH/direct stream URL using ffmpeg.
@@ -72,10 +83,19 @@ def download_hls(
     headers       : Extra HTTP headers dict (optional).
     timeout_sec   : Maximum wall-clock time before giving up.
     on_progress   : Callback(fraction, speed_str, eta_str).  fraction=-1 = unknown.
+    cancel_event  : Checked every ~0.25s while ffmpeg runs. When set, the
+                    ffmpeg child is terminated (SIGTERM, then SIGKILL after a
+                    grace period) and HlsCancelled is raised — the caller
+                    must not treat a cancelled remux as a completed
+                    download.  Without this the process only stopped when
+                    ffmpeg itself finished or the app process exited, so a
+                    user cancel during a long stream had no effect until the
+                    whole remux ran to completion.
 
     Returns
     -------
-    output_path on success.  Raises RuntimeError on failure.
+    output_path on success.  Raises RuntimeError on failure, HlsCancelled if
+    cancel_event fired before ffmpeg exited.
     """
     ffmpeg = _find_ffmpeg()
     out    = Path(output_path)
@@ -133,17 +153,69 @@ def download_hls(
     start = time.monotonic()
     # Hidden launch: FFmpeg is a console program, and a windowed build has
     # no console to inherit, so Windows would give it a visible one.
-    proc = run_hidden(cmd, purpose="hls-remux", timeout=timeout_sec)
-    if proc.timed_out:
-        raise RuntimeError(f"ffmpeg timed out after {timeout_sec}s")
-    if proc.error:
+    #
+    # Popen + a polling loop (not the blocking run_hidden) so cancel_event
+    # can actually interrupt a long-running remux instead of only being
+    # checked once ffmpeg has already exited.
+    #
+    # stderr goes to a temp FILE, not a pipe: ffmpeg's "-stats" writes a
+    # progress line every ~0.5s, and a PIPE nobody drains during the polling
+    # loop below fills its OS buffer and deadlocks the child on write() —
+    # a file has no such backpressure.
+    stderr_fh = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    try:
+        proc = popen_hidden(
+            cmd, purpose="hls-remux",
+            stdout=subprocess.DEVNULL, stderr=stderr_fh,
+        )
+    except (OSError, ValueError):
+        stderr_fh.close()
         raise RuntimeError(
             "ffmpeg not found.  Install ffmpeg and ensure it is on PATH."
         )
 
+    cancelled = False
+    timed_out = False
+    while True:
+        try:
+            proc.wait(timeout=_POLL_INTERVAL_S)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            proc.terminate()
+            try:
+                proc.wait(timeout=_TERMINATE_GRACE_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=_TERMINATE_GRACE_S)
+            break
+        if time.monotonic() - start > timeout_sec:
+            timed_out = True
+            proc.kill()
+            proc.wait(timeout=_TERMINATE_GRACE_S)
+            break
+
+    try:
+        stderr_fh.seek(0)
+        stderr_tail = stderr_fh.read()[-2000:]
+    except OSError:
+        stderr_tail = ""
+    finally:
+        stderr_fh.close()
+    log_exit(proc, purpose="hls-remux", stderr_tail=redact_text(stderr_tail))
+
+    if cancelled:
+        # The partial output is intermediate work in the caller's workspace
+        # — the caller (core.downloader) owns cleaning it up as part of the
+        # batch's normal cancel handling; this function only reports that
+        # the remux did not complete.
+        raise HlsCancelled(f"ffmpeg cancelled for {out.name}")
+    if timed_out:
+        raise RuntimeError(f"ffmpeg timed out after {timeout_sec}s")
     if proc.returncode != 0:
-        stderr = redact_text(proc.stderr.strip()[-2000:])   # last 2 KB
-        raise RuntimeError(f"ffmpeg exited {proc.returncode}:\n{stderr}")
+        raise RuntimeError(f"ffmpeg exited {proc.returncode}:\n{redact_text(stderr_tail)}")
 
     elapsed = time.monotonic() - start
     size    = out.stat().st_size if out.exists() else 0

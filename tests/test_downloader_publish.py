@@ -223,6 +223,60 @@ def test_cross_volume_publish_copies_then_atomically_renames(tmp_path, monkeypat
     assert leftovers == []
 
 
+def test_concurrent_cross_volume_publishes_to_same_destination_do_not_collide(tmp_path, monkeypatch):
+    """Two THREADS publishing to the identical destination filename at the
+    same time must never corrupt the temp-file mechanics — each gets its
+    own securely unique temp name (tempfile.mkstemp), so there is no
+    shared-name race. Uses the real _publish_to_final_location call site
+    (not the raw _atomic_place), so its existing lock-error retry absorbs
+    the genuine, expected OS-level contention of two renames landing on the
+    identical destination path at the same instant — that transient race is
+    a Windows filesystem fact of life, independent of this code."""
+    import errno
+    import threading
+    import core.downloader as dl_mod
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    dest_name = "song.mp3"
+
+    real_replace = os.replace
+
+    def _force_cross_volume(a, b):
+        # Only the temp->dest rename (temp name carries the publish-tmp
+        # marker) is allowed through; the direct src->dest attempt always
+        # looks cross-device, forcing the copy-then-rename branch.
+        if str(a).endswith(DownloadEngine.PUBLISH_TMP_SUFFIX):
+            return real_replace(a, b)
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+    monkeypatch.setattr(dl_mod.time, "sleep", lambda _s: None)  # no real 2s waits in the test
+
+    engine = DownloadEngine()
+    errors = []
+
+    def _publish(content: bytes) -> None:
+        try:
+            workspace = tmp_path / f"workspace_{content!r}"
+            workspace.mkdir()
+            src = workspace / dest_name
+            src.write_bytes(content)
+            req = _req(output_dir=str(output_dir), workspace_dir=str(workspace))
+            engine._publish_to_final_location(req, str(src))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_publish, args=(c,)) for c in (b"ONE", b"TWO")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5.0)
+
+    assert errors == [], f"concurrent publish to the same destination raised: {errors}"
+    assert (output_dir / dest_name).read_bytes() in (b"ONE", b"TWO")
+
+
 def test_hls_publish_failure_reports_error_not_finished(tmp_path, monkeypatch):
     """End-to-end at a real call site (the HLS path): if publish raises, the
     engine must fire ERROR, never FINISHED — a failed publish is never a
@@ -252,7 +306,7 @@ def test_hls_publish_failure_reports_error_not_finished(tmp_path, monkeypatch):
     # "creates" the output file the publish step would then move.
     import core.hls_downloader as hls_mod
 
-    def _fake_download_hls(url, output_path, cookies_file=None):
+    def _fake_download_hls(url, output_path, cookies_file=None, cancel_event=None):
         Path(output_path).write_bytes(b"stream-bytes")
 
     monkeypatch.setattr(hls_mod, "download_hls", _fake_download_hls)
@@ -267,6 +321,11 @@ def test_hls_publish_failure_reports_error_not_finished(tmp_path, monkeypatch):
     kinds = [k for k, _ in events]
     assert "error" in kinds
     assert "finished" not in kinds
+    # Confirms the error came from the intended publish failure, not some
+    # unrelated exception (e.g. an incompatible fake signature) that would
+    # also produce an "error" event and make this assertion vacuous.
+    error_progress = next(p for k, p in events if k == "error")
+    assert "simulated publish failure" in error_progress.error_message
 
 
 # ── outtmpl routing (the write side of the same guarantee) ──────────────────
