@@ -955,14 +955,13 @@ class AppWindow(FluentWindow):
             self._queue_panel.set_pause_resume_state(True)
             self._status_bar.show_paused()
         else:
-            to_resume = [
-                c for c in self._queue_panel.get_all_cards()
-                if c.get_status() in ("queued", "paused", "cancelled", "error")
-                and c.is_selected()
-            ]
+            # Resume All CONTINUES the same paused batch — same jobs, same
+            # workspaces, same partial downloads — via resume_all(). It must
+            # NOT go through _on_download()/start_batch(), which would rebuild
+            # requests from cards, re-run the duplicate policy and discard the
+            # partial state. resume_all() is a no-op if nothing was paused.
             self._queue_panel.set_pause_resume_state(False)
-            if to_resume:
-                self._on_download()
+            self._download_ctrl.resume_all()
 
     def _on_pause_track(self, queue_index: int) -> None:
         card = self._index_to_card.get(queue_index)

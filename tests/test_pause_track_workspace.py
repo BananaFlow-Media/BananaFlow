@@ -107,3 +107,43 @@ def test_pause_track_with_no_workspace_stays_none(tmp_path, monkeypatch, app):
     ctrl.pause_track(card)
 
     assert ctrl._paused_requests[key].workspace_dir is None
+
+
+def test_pause_track_preserves_all_request_fields(tmp_path, monkeypatch, app):
+    """Regression: the old hand-written pause copy silently dropped several
+    fields (thumbnail_url, forced_album, platform, category,
+    cookies_browser, is_solo, …), so a resumed track lost its custom
+    artwork/album/crop behaviour. The snapshot must carry every field."""
+    from core.downloader import DownloadRequest, MediaType
+    from core.playlist_parser import SourcePlatform
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    card = _FakeCard()
+    key = str(id(card))
+
+    live_req = DownloadRequest(
+        url=card.track_url, output_dir=str(tmp_path), media_type=MediaType.AUDIO,
+        thumbnail_url="http://thumb", forced_album="Album", forced_artist="Artist",
+        platform=SourcePlatform.YOUTUBE, category="stream:hls",
+        cookies_browser="chrome", is_solo=True, square_thumbnails=True,
+        expand_thumbnails=True, embed_lyrics=True, forced_duration=321,
+        workspace_dir=str(tmp_path / ".bananaflow_tmp" / "b" / "k"),
+    )
+    ctrl._dl_worker = _FakeWorker(jobs=[(key, live_req)])
+
+    ctrl.pause_track(card)
+    saved = ctrl._paused_requests[key]
+
+    assert saved.thumbnail_url == "http://thumb"
+    assert saved.forced_album == "Album"
+    assert saved.forced_artist == "Artist"
+    assert saved.platform == SourcePlatform.YOUTUBE
+    assert saved.category == "stream:hls"
+    assert saved.cookies_browser == "chrome"
+    assert saved.is_solo is True
+    assert saved.square_thumbnails is True
+    assert saved.expand_thumbnails is True
+    assert saved.embed_lyrics is True
+    assert saved.forced_duration == 321
+    assert saved.workspace_dir == str(tmp_path / ".bananaflow_tmp" / "b" / "k")
+    assert saved.resumable is True
