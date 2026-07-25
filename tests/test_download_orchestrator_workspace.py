@@ -398,3 +398,41 @@ class TestWorkspaceIsolationFailure:
 
         # The preset job ran despite the fresh-workspace failure.
         assert [r.url for r in engine.seen_requests] == ["http://a"]
+
+
+# ── Per-job subdir naming: collision-safe, never "." or ".." ────────────────
+
+class TestSafeSubdirName:
+    def test_dot_key_does_not_alias_the_container(self):
+        """A key of "." must NOT sanitise to a subdir name of "." — that
+        would make the "job subdir" BE the batch container itself, letting
+        one job's cleanup rmtree the whole container out from under its
+        siblings."""
+        from core.download_orchestrator import _safe_subdir_name
+        assert _safe_subdir_name(".") not in (".", "")
+
+    def test_dotdot_key_does_not_alias_the_parent(self):
+        from core.download_orchestrator import _safe_subdir_name
+        assert _safe_subdir_name("..") not in ("..", "")
+
+    def test_different_keys_that_sanitise_identically_do_not_collide(self):
+        """"a*b" and "a/b" both naively become "a_b" under simple
+        character replacement — the real fix must disambiguate them."""
+        from core.download_orchestrator import _safe_subdir_name
+        assert _safe_subdir_name("a*b") != _safe_subdir_name("a/b")
+
+    def test_same_key_is_deterministic(self):
+        from core.download_orchestrator import _safe_subdir_name
+        assert _safe_subdir_name("card123") == _safe_subdir_name("card123")
+
+    def test_real_workspace_creation_with_dot_key_is_isolated(self, tmp_path):
+        """End-to-end: a job whose key is literally "." must still get its
+        own real subdirectory, not collide with the batch container."""
+        engine = FakeEngine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=NullCallbacks())
+
+        orch.run_batch([_job(".", "http://a", str(tmp_path))])
+
+        ws = Path(engine.seen_requests[0].workspace_dir)
+        assert ws.name not in (".", "..")
+        assert ws.parent.name.startswith("batch-")

@@ -53,18 +53,42 @@ class _FakeCard:
         pass
 
 
+class _FakeOrchestrator:
+    """Exposes just enough of DownloadOrchestrator.live_request_snapshot()
+    for global_pause(): treats every job passed to _FakeLiveWorker as live
+    and immediately resumable. These tests are about global_pause's own
+    capture/skip decisions and field preservation, not the orchestrator's
+    race-closing locking (that's test_orchestrator.py's job)."""
+
+    def __init__(self, jobs) -> None:
+        self._jobs = dict(jobs)
+
+    def live_request_snapshot(self, key: str):
+        import dataclasses
+
+        req = self._jobs.get(key)
+        if req is None:
+            return None, None
+        return None, dataclasses.replace(req)
+
+
 class _FakeLiveWorker:
     """Stands in for a running batch DownloadWorker for global_pause."""
 
     def __init__(self, jobs) -> None:
         self._jobs = jobs
+        self._orch = _FakeOrchestrator(jobs)
         self.cancelled = False
+        self.cancelled_keys: list[str] = []
 
     def isRunning(self) -> bool:
         return True
 
     def cancel(self) -> None:
         self.cancelled = True
+
+    def cancel_track(self, key: str) -> None:
+        self.cancelled_keys.append(key)
 
 
 class _FakeSignal:
@@ -149,6 +173,27 @@ class TestGlobalPause:
         assert kl in ctrl._paused_requests
         assert kd not in ctrl._paused_requests, "a completed job must never be re-run"
         assert done.get_status() == "done"  # untouched
+
+    def test_does_not_capture_errored_or_already_cancelled_jobs(self, tmp_path, monkeypatch, app):
+        """A card that already reached a terminal error/cancel state must
+        never be captured either -- only "done" was excluded before, so an
+        errored or already-cancelled job could be snapshotted and Resume
+        All would re-run work the user never asked to continue."""
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        errored = _FakeCard("errored", status="error")
+        cancelled = _FakeCard("cancelled", status="cancelled")
+        live = _FakeCard("live", status="downloading")
+        ke, kc, kl = str(id(errored)), str(id(cancelled)), str(id(live))
+        ctrl._key_to_card = {ke: errored, kc: cancelled, kl: live}
+        ctrl._dl_worker = _FakeLiveWorker(
+            [(ke, _req("errored")), (kc, _req("cancelled")), (kl, _req("live"))]
+        )
+
+        ctrl.global_pause()
+
+        assert kl in ctrl._paused_requests
+        assert ke not in ctrl._paused_requests, "an errored job must never be re-run"
+        assert kc not in ctrl._paused_requests, "an already-cancelled job must never be re-run"
 
     def test_snapshot_preserves_every_field(self, tmp_path, monkeypatch, app):
         ctrl = _controller(tmp_path, monkeypatch, app)

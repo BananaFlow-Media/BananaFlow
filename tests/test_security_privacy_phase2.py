@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from utils.proc import ProcessResult
 from utils.security import REDACTED, RedactingFormatter, redact_data, redact_text
 
 
@@ -108,12 +107,29 @@ def test_hls_debug_log_never_contains_cookie_or_sensitive_url(
     output = tmp_path / "out.mp4"
     output.write_bytes(b"media")
     monkeypatch.setattr(hls_downloader, "_find_ffmpeg", lambda: "ffmpeg")
+
+    class _FakeProc:
+        """Stand-in for the Popen download_hls polls via popen_hidden — no
+        real ffmpeg child, so this test never depends on network access."""
+
+        def __init__(self, args) -> None:
+            self.args = args
+            self.pid = 4242
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
     monkeypatch.setattr(
         hls_downloader,
-        "run_hidden",
-        lambda *_args, purpose="", **_kwargs: ProcessResult(
-            purpose=purpose, program="ffmpeg", returncode=0,
-        ),
+        "popen_hidden",
+        lambda cmd, *, purpose="", **_kwargs: _FakeProc(cmd),
     )
 
     caplog.set_level(logging.DEBUG, logger=hls_downloader.__name__)

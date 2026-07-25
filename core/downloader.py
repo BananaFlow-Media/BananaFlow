@@ -483,6 +483,19 @@ class DownloadEngine:
                             raise
 
             # ── Finalized: Run custom pipeline before emitting FINISHED ──────────────
+            # yt-dlp's own abort_hook only fires DURING its own download loop
+            # — it cannot see a cancel that arrives after yt-dlp returns but
+            # before post-processing/publish run. Both of those still write
+            # real work (ffmpeg conversions, network lookups, a file move
+            # into the user's visible output directory), so a pause/cancel
+            # requested in this narrow window must still be honoured, or a
+            # cancelled job can be reported as a completed, published
+            # download. Checked once before the pipeline starts and once
+            # more before publish, since the pipeline itself can take a
+            # while (MusicBrainz/lyrics network calls, ReplayGain analysis).
+            if cancel_ev.is_set() or global_cancel.is_set():
+                raise yt_dlp.utils.DownloadCancelled()
+
             final_path = request._final_output_path  # noqa: SLF001
             if final_path and os.path.exists(final_path):
                 # Notify UI we are processing
@@ -492,12 +505,15 @@ class DownloadEngine:
                     title=request.forced_title or "",
                     output_path=final_path,
                 ))
-                
+
                 # Execute steps; collect non-fatal failures for the UI
                 pp_failures = self._run_final_pipeline(request, final_path)
             else:
                 # If the file wasn't created, yt-dlp failed silently (e.g., ytsearch found nothing)
                 raise Exception("Download completed but output file is missing. (Search may have yielded no results)")
+
+            if cancel_ev.is_set() or global_cancel.is_set():
+                raise yt_dlp.utils.DownloadCancelled()
 
             warning_msg = ""
             if pp_failures:
@@ -560,8 +576,9 @@ class DownloadEngine:
 
     def _download_hls_stream(self, request: DownloadRequest) -> None:
         """Download a raw HLS/DASH/direct stream URL using ffmpeg (not yt-dlp)."""
-        from core.hls_downloader import download_hls
+        from core.hls_downloader import download_hls, HlsCancelled
 
+        cancel_ev = request.cancel_event or self._cancel_event
         url       = request.url
         if request.media_type == MediaType.AUDIO:
             ext = request.audio_format or DEFAULT_AUDIO_FORMAT
@@ -594,7 +611,13 @@ class DownloadEngine:
                 url=url,
                 output_path=output_path,
                 cookies_file=request.cookies_file,
+                cancel_event=cancel_ev,
             )
+        except HlsCancelled:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=url, title=title,
+            ))
+            return
         except Exception as exc:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
@@ -602,6 +625,15 @@ class DownloadEngine:
                 title=title,
                 error_message=str(exc),
             ), error=True)
+            return
+
+        # ffmpeg ran to completion, but a cancel may have arrived in the
+        # instant right after — checked before publish for the same reason
+        # as the main yt-dlp path (see download()).
+        if cancel_ev.is_set() or self._cancel_event.is_set():
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=url, title=title,
+            ))
             return
 
         try:
@@ -684,6 +716,11 @@ class DownloadEngine:
                 if final_path and not os.path.exists(final_path):
                     raise Exception("Download completed but output file is missing. (Search may have yielded no results)")
 
+                # See download()'s matching check: a cancel can arrive after
+                # yt-dlp returns but before publish.
+                if cancel_ev.is_set() or self._cancel_event.is_set():
+                    raise yt_dlp.utils.DownloadCancelled()
+
                 final_path = self._publish_to_final_location(request, final_path)
                 generic_bytes = _safe_file_size(final_path)
                 self._fire(request, DownloadProgress(
@@ -695,6 +732,19 @@ class DownloadEngine:
                     total_bytes=generic_bytes,
                     output_path=final_path,
                 ))
+            except yt_dlp.utils.DownloadCancelled:
+                self._fire(request, DownloadProgress(
+                    status=DownloadStatus.CANCELLED,
+                    url=page_url,
+                    title=request.forced_title or "",
+                ))
+            except PublishError as exc:
+                self._fire(request, DownloadProgress(
+                    status=DownloadStatus.ERROR,
+                    url=page_url,
+                    title=request.forced_title or "",
+                    error_message=str(exc),
+                ), error=True)
             except Exception as exc:
                 err_msg = _get_friendly_error(str(exc))
                 self._fire(request, DownloadProgress(
@@ -736,6 +786,7 @@ class DownloadEngine:
             stem = f"{request.forced_index:02d} - {stem}"
 
         output_path = str(out_dir / f"{stem}.{ext}")
+        cancel_ev = request.cancel_event or self._cancel_event
 
         self._fire(request, DownloadProgress(
             status=DownloadStatus.DOWNLOADING,
@@ -744,12 +795,18 @@ class DownloadEngine:
         ))
 
         try:
-            from core.hls_downloader import download_hls
+            from core.hls_downloader import download_hls, HlsCancelled
             download_hls(
                 url=stream_url,
                 output_path=output_path,
                 cookies_file=request.cookies_file,
+                cancel_event=cancel_ev,
             )
+        except HlsCancelled:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=page_url, title=title,
+            ))
+            return
         except Exception as exc:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
@@ -757,6 +814,12 @@ class DownloadEngine:
                 title=title,
                 error_message=str(exc),
             ), error=True)
+            return
+
+        if cancel_ev.is_set() or self._cancel_event.is_set():
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=page_url, title=title,
+            ))
             return
 
         try:
@@ -1154,19 +1217,40 @@ class DownloadEngine:
         logger.error("[Downloader] Failed to publish %s -> %s: %s", src, dest, last_exc)
         raise PublishError(f"Could not publish to {dest}: {last_exc}") from last_exc
 
-    @staticmethod
-    def _atomic_place(src: Path, dest: Path) -> None:
+    # Recognisable marker so a startup sweep (utils.paths) can find and
+    # remove a stray cross-volume publish temp left behind by a crash —
+    # see PUBLISH_TMP_SUFFIX / sweep_stale_publish_temp_files.
+    PUBLISH_TMP_SUFFIX = ".bananaflow-publish-tmp"
+
+    @classmethod
+    def _atomic_place(cls, src: Path, dest: Path) -> None:
         """Put ``src`` at ``dest`` atomically at the visible destination.
 
         Fast path: same-volume ``os.replace`` (a pure rename). Cross-volume
-        (raises OSError with errno EXDEV): copy to a hidden temp file next
-        to dest, fsync-free copy2, then os.replace the temp into place — the
-        rename is same-volume and atomic, so the destination only ever flips
-        from "old/absent" to "fully-copied new", never a partial. The temp
-        is cleaned up on any failure so a cross-volume error can't strand a
-        half-copy in the output directory.
+        (raises OSError with errno EXDEV): copy to a temp file next to dest,
+        then os.replace the temp into place — that rename is same-volume and
+        atomic, so the destination only ever flips from "old/absent" to
+        "fully-copied new", never a partial. The temp is cleaned up on any
+        failure so a cross-volume error can't strand a half-copy.
+
+        The temp name is generated by ``tempfile.mkstemp`` (a securely
+        unique name, not a pid-based one) so two concurrent publishes —
+        including a retry racing an earlier attempt, or two jobs that
+        legitimately target the same destination filename — can never
+        collide on the same temp path. It is hidden only AFTER the content
+        copy succeeds, not before: on Windows, opening an already-hidden
+        file for writing was observed to fail outright (confirmed against a
+        real filesystem, not just in theory — a security product's write
+        interception is the likely cause), so hiding first would silently
+        break every cross-volume publish rather than merely leave a brief
+        visibility window. Writing first and hiding immediately after still
+        keeps that window small — a crash before the final rename can still
+        leave the (by-then hidden) temp behind, which is why its name
+        carries PUBLISH_TMP_SUFFIX — a recognisable marker a startup sweep
+        can find and remove (see utils.paths.sweep_stale_publish_temp_files).
         """
         import errno
+        import tempfile
         try:
             os.replace(str(src), str(dest))
             return
@@ -1174,7 +1258,11 @@ class DownloadEngine:
             if getattr(exc, "errno", None) != errno.EXDEV:
                 raise
 
-        tmp = dest.parent / f".{dest.name}.{os.getpid()}.publish-tmp"
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(dest.parent), prefix=f".{dest.name}.", suffix=cls.PUBLISH_TMP_SUFFIX,
+        )
+        tmp = Path(tmp_name)
+        os.close(fd)
         try:
             shutil.copy2(str(src), str(tmp))
             _set_hidden_attribute(tmp)
