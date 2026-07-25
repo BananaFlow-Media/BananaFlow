@@ -918,7 +918,11 @@ class AppWindow(FluentWindow):
                 "total_tracks":  c.total_tracks,
             }
             for c in cards
-            if c.get_status() != "done"
+            # "done" cards are finished; "paused" cards are owned by the
+            # authoritative PausedBatchStore (core.paused_batch_store) and
+            # restored from there on startup — saving them here too would
+            # restore each paused card twice.
+            if c.get_status() not in ("done", "paused")
         ]
         self._cfg.queue_state = state
         self._cfg.save()

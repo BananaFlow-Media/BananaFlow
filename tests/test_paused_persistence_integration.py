@@ -207,3 +207,59 @@ def test_startup_sweep_reclaims_abandoned_workspace(tmp_path, monkeypatch, app):
     ctrl.restore_paused_on_startup(lambda cd: None)
 
     assert not abandoned.exists(), "an abandoned workspace must be swept on startup"
+
+
+def test_queue_state_save_excludes_paused_cards(tmp_path, monkeypatch, app):
+    """Paused cards are owned by the PausedBatchStore and restored from there;
+    the general queue_state must NOT also save them, or a paused card would
+    be restored twice on the next launch."""
+    from ui.app_window import AppWindow
+
+    class _Card:
+        def __init__(self, title, status):
+            self.title = title
+            self.artist = ""
+            self.track_url = ""
+            self.duration = ""
+            self.thumbnail_url = ""
+            self.platform = "youtube"
+            self.album = ""
+            self.parent_artist = ""
+            self.release_type = ""
+            self.category = ""
+            self.album_index = 0
+            self.total_tracks = 0
+            self._status = status
+
+        def get_status(self):
+            return self._status
+
+    class _Panel:
+        def __init__(self, cards):
+            self._cards = cards
+
+        def get_all_cards(self):
+            return self._cards
+
+    class _Cfg:
+        def __init__(self):
+            self.queue_state = None
+
+        def save(self):
+            pass
+
+    shim = AppWindow.__new__(AppWindow)
+    shim._queue_panel = _Panel([
+        _Card("queued", "queued"),
+        _Card("downloading", "downloading"),
+        _Card("paused", "paused"),
+        _Card("done", "done"),
+    ])
+    shim._cfg = _Cfg()
+
+    AppWindow._save_queue_state(shim)
+
+    saved_titles = {item["title"] for item in shim._cfg.queue_state}
+    assert "paused" not in saved_titles, "paused cards are owned by the store"
+    assert "done" not in saved_titles
+    assert saved_titles == {"queued", "downloading"}
