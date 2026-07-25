@@ -237,6 +237,71 @@ def test_resume_track_removal_lambda_actually_removes_the_finished_worker(
     assert outcomes == [BatchOutcome.COMPLETED]
 
 
+def test_fatal_stop_cleans_up_abandoned_workspace_same_as_cancel(tmp_path, monkeypatch, app):
+    """Finding #12: a fatal stop (e.g. a broken cookie jar that would fail
+    every remaining job the same way) must trigger the same abandoned-
+    workspace cleanup as a deliberate user cancel -- only CANCELLED_BY_USER
+    was covered before, so a fatal stop left its workspace stranded on disk
+    forever since nothing else ever sweeps it."""
+    from core.batch_outcome import BatchOutcome
+    from core.downloader import DownloadRequest, MediaType
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+
+    workspace_container = tmp_path / ".bananaflow_tmp" / "batch-1"
+    job_dir = workspace_container / "job-a"
+    job_dir.mkdir(parents=True)
+    (job_dir / "song.part").write_bytes(b"partial")
+
+    req = DownloadRequest(
+        url="https://example.com/a", output_dir=str(tmp_path), media_type=MediaType.AUDIO,
+        workspace_dir=str(job_dir),
+    )
+    worker = _FakeWorker()
+    worker._jobs = [("k", req)]
+    worker.all_finished.connect(ctrl._on_batch_done)
+
+    ctrl._dl_worker = worker
+    ctrl._set_termination_intent(BatchOutcome.STOPPED_BY_FATAL_ERROR)
+
+    # The orchestrator's own best guess (it can't tell a fatal stop from a
+    # plain cancel) is irrelevant -- the recorded termination intent wins,
+    # and cleanup must follow IT, not this raw argument.
+    worker.all_finished.emit(BatchOutcome.CANCELLED_BY_USER)
+
+    assert not job_dir.exists(), "abandoned workspace must be swept on a fatal stop"
+    assert not workspace_container.exists()
+
+
+def test_plain_completion_never_triggers_workspace_cleanup(tmp_path, monkeypatch, app):
+    """Control case: a normal, non-cancelled/non-fatal finish must leave the
+    (already-published-and-cleaned-up-by-the-orchestrator) job list alone
+    -- _cleanup_cancelled_batch must not run for an ordinary completion."""
+    from core.batch_outcome import BatchOutcome
+    from core.downloader import DownloadRequest, MediaType
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+
+    workspace_container = tmp_path / ".bananaflow_tmp" / "batch-1"
+    job_dir = workspace_container / "job-a"
+    job_dir.mkdir(parents=True)
+    (job_dir / "song.part").write_bytes(b"partial")
+
+    req = DownloadRequest(
+        url="https://example.com/a", output_dir=str(tmp_path), media_type=MediaType.AUDIO,
+        workspace_dir=str(job_dir),
+    )
+    worker = _FakeWorker()
+    worker._jobs = [("k", req)]
+    worker.all_finished.connect(ctrl._on_batch_done)
+    ctrl._dl_worker = worker
+
+    worker.all_finished.emit(BatchOutcome.COMPLETED)
+
+    assert job_dir.exists()
+    assert (job_dir / "song.part").exists()
+
+
 def test_user_cancel_overrides_rapid_pause_but_not_fatal(tmp_path, monkeypatch, app):
     from core.batch_outcome import BatchOutcome
 

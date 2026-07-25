@@ -198,6 +198,14 @@ _WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
 _WORKSPACE_ROOT_NAMES = frozenset({_WORKSPACE_CONTAINER_NAME, "download_workspaces"})
 
 
+def _is_workspace_path_resolved(resolved: Path) -> bool:
+    """Lexical name check on an ALREADY-CANONICALISED path. Never call this
+    directly with an un-resolved path — see is_workspace_path."""
+    if resolved.name.startswith("batch-") or resolved.name in _WORKSPACE_ROOT_NAMES:
+        return True
+    return any(p.name in _WORKSPACE_ROOT_NAMES for p in resolved.parents)
+
+
 def is_workspace_path(path: Path) -> bool:
     """Whether ``path`` is inside (or is) a BananaFlow batch-workspace tree.
 
@@ -205,11 +213,20 @@ def is_workspace_path(path: Path) -> bool:
     ``download_workspaces``), a ``batch-*`` directory, or anything nested
     under such a root. This is the single authority that keeps workspace
     cleanup from ever touching the user's output directory (whose name is
-    arbitrary and never matches)."""
-    path = Path(path)
-    if path.name.startswith("batch-") or path.name in _WORKSPACE_ROOT_NAMES:
-        return True
-    return any(p.name in _WORKSPACE_ROOT_NAMES for p in path.parents)
+    arbitrary and never matches).
+
+    Resolves the path FIRST (collapsing ``..``/``.`` segments and symlinks)
+    before checking names — a purely lexical check on the path as given
+    would accept a crafted or traversal-style path (e.g.
+    ``.../.bananaflow_tmp/batch-x/../../../etc``) whose component names
+    happen to include a workspace marker even though the path it actually
+    resolves to on disk lands outside any BananaFlow workspace. A path that
+    cannot be resolved is treated as NOT a workspace path — fail closed."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return _is_workspace_path_resolved(resolved)
 
 
 def _prune_empty_workspace_parents(node: Path) -> None:
@@ -230,22 +247,31 @@ def remove_workspace_tree(path: Path) -> None:
     """Recursively remove a BananaFlow workspace directory (a batch container
     or a single job's subdir) and peel back any now-empty owned parents.
 
-    Guarded by :func:`is_workspace_path`: refuses to remove anything that is
-    not inside a BananaFlow workspace container, so a cleanup sweep can never
-    escape into — and delete — the user's output directory. Never raises: a
-    cleanup failure must not turn an otherwise-fine batch into an error."""
-    path = Path(path)
-    if not is_workspace_path(path):
+    Resolves ``path`` once and uses that SAME canonical path for both the
+    ownership check and the actual removal — see is_workspace_path for why
+    a lexical-only check (or checking one path while deleting a different,
+    un-resolved one) is not safe. Refuses to remove anything that does not
+    resolve inside a BananaFlow workspace container, so a cleanup sweep can
+    never escape into — and delete — the user's output directory. Never
+    raises: a cleanup failure must not turn an otherwise-fine batch into an
+    error."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.warning("[paths] refusing to remove %s — could not resolve: %s", path, exc)
+        return
+    if not _is_workspace_path_resolved(resolved):
         logger.warning(
-            "[paths] refusing to remove %s — not inside a BananaFlow workspace", path,
+            "[paths] refusing to remove %s (resolved: %s) — not inside a "
+            "BananaFlow workspace", path, resolved,
         )
         return
     try:
-        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(resolved, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[paths] workspace removal failed for %s: %s", path, exc)
+        logger.warning("[paths] workspace removal failed for %s: %s", resolved, exc)
         return
-    _prune_empty_workspace_parents(path.parent)
+    _prune_empty_workspace_parents(resolved.parent)
 
 
 def _set_hidden_attribute(path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15) -> bool:

@@ -310,6 +310,27 @@ class TestRemoveWorkspaceTree:
         remove_workspace_tree(tmp_path)
         assert tmp_path.exists()
 
+    def test_traversal_path_cannot_escape_into_a_sibling_directory(self, tmp_path):
+        """A path whose lexical components include workspace-marker names
+        (.bananaflow_tmp, batch-x) -- so a naive name-only check would
+        wrongly accept it -- but which resolves via '..' segments to
+        somewhere OUTSIDE any BananaFlow workspace must never be touched."""
+        from utils.paths import remove_workspace_tree
+
+        precious = tmp_path / "precious_dir"
+        precious.mkdir()
+        (precious / "important.mp3").write_bytes(b"do not delete")
+
+        container = tmp_path / ".bananaflow_tmp" / "batch-x"
+        container.mkdir(parents=True)
+        traversal = container / ".." / ".." / "precious_dir"
+        assert traversal.resolve() == precious.resolve()
+
+        remove_workspace_tree(traversal)
+
+        assert precious.exists()
+        assert (precious / "important.mp3").exists()
+
 
 class TestIsWorkspacePath:
     def test_recognises_container_root(self, tmp_path):
@@ -326,3 +347,27 @@ class TestIsWorkspacePath:
         from utils.paths import is_workspace_path
         assert not is_workspace_path(tmp_path)
         assert not is_workspace_path(tmp_path / "Music" / "song.mp3")
+
+    def test_rejects_traversal_path_that_resolves_outside_the_workspace(self, tmp_path):
+        """The exact root cause finding #3 named: lexical component names
+        alone (.bananaflow_tmp, batch-x) must not be enough -- the path has
+        to actually RESOLVE inside a workspace, not just look like one
+        before its '..' segments are collapsed."""
+        from utils.paths import is_workspace_path
+
+        (tmp_path / ".bananaflow_tmp" / "batch-x").mkdir(parents=True)
+        (tmp_path / "precious_dir").mkdir()
+
+        traversal = tmp_path / ".bananaflow_tmp" / "batch-x" / ".." / ".." / "precious_dir"
+        assert not is_workspace_path(traversal)
+
+    def test_accepts_traversal_path_that_resolves_to_a_real_workspace_dir(self, tmp_path):
+        """The flip side: a path with redundant '..' segments that still
+        genuinely resolves INSIDE the workspace must keep working -- the
+        fix must resolve-then-check, not reject every non-canonical path."""
+        from utils.paths import is_workspace_path
+
+        (tmp_path / ".bananaflow_tmp" / "batch-x" / "job-1").mkdir(parents=True)
+
+        traversal = tmp_path / ".bananaflow_tmp" / "batch-x" / "job-1" / ".." / "job-1"
+        assert is_workspace_path(traversal)
