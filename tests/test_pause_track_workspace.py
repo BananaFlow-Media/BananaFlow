@@ -38,11 +38,31 @@ class _FakeCard:
         self.status_calls.append(status)
 
 
+class _FakeOrchestrator:
+    """Exposes just enough of DownloadOrchestrator.live_request_snapshot()
+    for pause_track(): treats every job passed in as live and immediately
+    resumable. These tests are about field-preservation through the
+    snapshot, not the orchestrator's own race-closing logic (that's
+    test_orchestrator.py's job)."""
+
+    def __init__(self, jobs) -> None:
+        self._jobs = dict(jobs)
+
+    def live_request_snapshot(self, key: str):
+        import dataclasses
+
+        req = self._jobs.get(key)
+        if req is None:
+            return None, None
+        return None, dataclasses.replace(req)
+
+
 class _FakeWorker:
     """Exposes just enough of DownloadWorker for pause_track()."""
 
     def __init__(self, jobs) -> None:
         self._jobs = jobs
+        self._orch = _FakeOrchestrator(jobs)
         self.cancelled_keys: list[str] = []
 
     def cancel_track(self, key: str) -> None:

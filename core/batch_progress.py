@@ -78,6 +78,13 @@ class JobState(Enum):
 # purpose of the outstanding-work denominator.
 _TERMINAL = {JobState.COMPLETED, JobState.PREEXISTING, JobState.FAILED, JobState.CANCELLED}
 
+
+def is_terminal_state(state: Optional[JobState]) -> bool:
+    """Whether a job in ``state`` has already reached a state it never
+    leaves — the public form of ``_TERMINAL`` for callers outside this
+    module (e.g. deciding whether a job is still safe to pause)."""
+    return state in _TERMINAL
+
 # States that count as a full-size, fully-done job for progress-weighting
 # purposes (see _progress_locked). PREEXISTING is a terminal success exactly
 # like COMPLETED — the file was found already correct on disk, so no bytes
@@ -234,6 +241,22 @@ class BatchProgressAggregator:
         """Ensure a job exists in the QUEUED state."""
         with self._lock:
             self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
+
+    def job_state(self, key: str) -> Optional[JobState]:
+        """Thread-safe point-in-time read of a single job's state.
+
+        This reflects the orchestrator's own bookkeeping, updated
+        synchronously on the worker thread the instant a job transitions —
+        unlike a UI card's status label, which is only updated once a
+        Qt-queued signal is dispatched and can lag the real state by one
+        event-loop tick. Callers that need to know "has this job already
+        reached a terminal state" *before* acting on it (e.g. deciding
+        whether it is still safe to pause/resume-snapshot) must use this,
+        not the card.
+        """
+        with self._lock:
+            job = self._jobs.get(key)
+            return job.state if job is not None else None
 
     def mark_submitted(self, key: str) -> None:
         """Record that the orchestrator has submitted a job to the pool.

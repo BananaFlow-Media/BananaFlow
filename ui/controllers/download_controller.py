@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 
 _MULTI_KINDS = {UrlKind.PLAYLIST, UrlKind.ALBUM, UrlKind.ARTIST}
 
+# Card statuses a job never comes back from — captured here (rather than
+# just "done") because Global Pause must not snapshot-and-resume a job that
+# has already reached one of these; a resume of an errored/cancelled card
+# would re-run work the user never asked to continue.
+_TERMINAL_CARD_STATUSES = frozenset({"done", "error", "cancelled"})
+
 
 def _parse_stream_type(category: str) -> Optional[str]:
     """Extract stream_type from a category string like 'stream:hls'."""
@@ -589,6 +595,35 @@ class DownloadController(QObject):
             on_error=None,
         )
 
+    def _pause_and_snapshot(self, key: str) -> Optional[DownloadRequest]:
+        """Cancel job ``key`` and, if it was still safely resumable at that
+        instant, return a resume-ready snapshot of it — else None (already
+        terminal, or caught mid-resolve with no safe snapshot to take).
+
+        Cancels FIRST, then reads state + a defensive copy of the live
+        request atomically (DownloadOrchestrator.live_request_snapshot), so
+        a job that is still genuinely in-flight cannot go on to complete
+        for real after being captured as paused (see DownloadEngine's own
+        cancellation checkpoints), and so a job caught exactly between its
+        Spotify two-stage url_resolver being consumed and its resolved URL
+        being committed is never snapshotted half-committed. Reading the
+        UI card's status label instead of this would leave both windows
+        open — the card is only updated once a Qt-queued signal from the
+        worker thread is dispatched, one tick behind the orchestrator's own
+        bookkeeping.
+        """
+        if self._dl_worker is None:
+            return None
+        self._dl_worker.cancel_track(key)
+        orch = self._dl_worker._orch  # noqa: SLF001
+        _state, live_req = orch.live_request_snapshot(key)
+        if live_req is None:
+            return None
+        # Full-fidelity snapshot (every field, incl. workspace_dir) so the
+        # resumed track continues from its .part file with all its
+        # metadata/artwork behaviour intact.
+        return self._snapshot_for_pause(live_req)
+
     def global_pause(self) -> None:
         """Pause the running batch. Internally this cancels the in-flight
         downloads (leaving resumable .part files in each job's workspace),
@@ -600,17 +635,22 @@ class DownloadController(QObject):
         Resume All continues the SAME jobs (same workspace, same partial
         downloads) rather than rebuilding a brand-new batch through
         start_batch() — which would re-run the duplicate policy and discard
-        the partial state. Completed jobs (cards already "done", including
-        duplicate-skips) are deliberately NOT captured, so they are never
-        downloaded again."""
+        the partial state. Jobs whose card already reached a terminal state
+        (done/preexisting, errored, or already cancelled) are deliberately
+        NOT captured, so they are never re-run on the next Resume All. A job
+        caught with nothing safe to snapshot (see _pause_and_snapshot) is
+        cancelled outright rather than resumed from unsafe state."""
         self._set_termination_intent(BatchOutcome.PAUSED_BY_USER)
         if not (self._dl_worker and self._dl_worker.isRunning()):
             return
-        for key, req in list(self._dl_worker._jobs):  # noqa: SLF001
+        for key, _req in list(self._dl_worker._jobs):  # noqa: SLF001
             card = self._key_to_card.get(key)
-            if card is not None and card.get_status() == "done":
-                continue  # completed / preexisting — never resume it
-            self._paused_requests[key] = self._snapshot_for_pause(req)
+            if card is not None and card.get_status() in _TERMINAL_CARD_STATUSES:
+                continue  # already done/errored/cancelled — never resume it
+            snapshot = self._pause_and_snapshot(key)
+            if snapshot is None:
+                continue
+            self._paused_requests[key] = snapshot
             if card is not None:
                 card.set_status("paused")
         self._dl_worker.cancel()
@@ -628,15 +668,9 @@ class DownloadController(QObject):
         AppWindow looks up the card from _index_to_card and passes it here.
         """
         key = str(id(card))
-        req = self._active_request_for_key(key)
-        if req is not None:
-            # Full-fidelity snapshot (every field, incl. workspace_dir) so
-            # the resumed track continues from its .part file with all its
-            # metadata/artwork behaviour intact — see _snapshot_for_pause.
-            self._paused_requests[key] = self._snapshot_for_pause(req)
-
-        if self._dl_worker:
-            self._dl_worker.cancel_track(key)
+        snapshot = self._pause_and_snapshot(key)
+        if snapshot is not None:
+            self._paused_requests[key] = snapshot
         card.set_status("paused")
 
         paused = self._cfg.paused_items
@@ -687,7 +721,18 @@ class DownloadController(QObject):
         resume_worker.all_finished.connect(self._on_batch_done)
         resume_worker.track_thumbnail.connect(self._on_track_thumbnail)
         resume_worker.all_finished.connect(
-            lambda w=resume_worker: (
+            # all_finished carries the BatchOutcome as its one argument, so
+            # the lambda must accept (and ignore) it as its FIRST positional
+            # parameter -- a lambda with only a defaulted `w=resume_worker`
+            # parameter would have that default silently overridden by the
+            # emitted outcome instead, so `w` would never actually be the
+            # worker and this would never remove anything: _resume_workers
+            # would grow forever, one stale entry per resumed track, and
+            # _on_batch_done's "is this the last active worker" check (see
+            # its docstring) would see those stale entries as still active
+            # and stop reporting completion for every resume after the
+            # first one.
+            lambda _outcome=None, w=resume_worker: (
                 self._resume_workers.remove(w) if w in self._resume_workers else None
             )
         )
@@ -939,10 +984,28 @@ class DownloadController(QObject):
         a plain cancel. That intent lives here, so a recorded termination
         intent (pause / cancel / fatal) always wins over the orchestrator's
         best guess. Absent any intent, the orchestrator's outcome stands
-        (clean completion vs completion-with-failures)."""
+        (clean completion vs completion-with-failures).
+
+        Multiple per-track resume workers can be running at once (each an
+        independent single-job DownloadWorker started by resume_track), and
+        every one of them connects its all_finished signal to this same
+        slot. One of them finishing must not tell the UI "no longer
+        downloading" — and must not consume the shared termination intent —
+        while a sibling resume is still active; only the truly LAST active
+        worker (main batch or resume) does that. The finishing sender is
+        still present in _resume_workers at this point (its own removal is a
+        separately-connected slot that has not necessarily run yet), so it
+        is excluded explicitly rather than relying on that removal."""
         if not self._is_current_batch_worker_signal():
             return
-        self._dl_worker = None
+        sender = self.sender()
+        if sender is self._dl_worker:
+            self._dl_worker = None
+
+        other_active_workers = [w for w in self._resume_workers if w is not sender]
+        if self._dl_worker is not None or other_active_workers:
+            return
+
         self.cancel_visible.emit(False)
         self.downloading_changed.emit(False)
         self.metrics_update.emit("", "")

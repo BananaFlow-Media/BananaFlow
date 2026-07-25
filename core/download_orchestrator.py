@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import time
 import random
+import dataclasses
 import hashlib
 import logging
 import re
@@ -38,7 +39,7 @@ from typing import Optional, Protocol, Tuple
 
 from core.history_db import DownloadRecord, HistoryDB
 from core.batch_outcome import BatchOutcome
-from core.batch_progress import BatchProgressAggregator, BatchSnapshot
+from core.batch_progress import BatchProgressAggregator, BatchSnapshot, JobState, is_terminal_state
 from core.downloader import (
     DownloadEngine,
     DownloadProgress,
@@ -170,6 +171,21 @@ class DownloadOrchestrator:
         self._pool: Optional[ThreadPoolExecutor] = None
         self._pool_lock = threading.Lock()
 
+        # Per-job lock + live-request registry backing live_request_snapshot()
+        # / job_state(): lets an outside caller (Global Pause, on the UI
+        # thread) read a job's terminal state and take a resume-ready copy
+        # of its live DownloadRequest atomically with respect to this
+        # orchestrator's own critical sections — the lazy-URL-resolver
+        # commit and the terminal-state transition — instead of racing them
+        # via the UI card's (delayed) status label. See both methods below.
+        self._job_locks: dict[str, threading.Lock] = {}
+        self._active_requests: dict[str, DownloadRequest] = {}
+        # Keys whose Spotify two-stage url_resolver has been consumed but
+        # whose resolved URL has not yet been committed to req.url. A
+        # snapshot taken while a key is in here would have neither a
+        # resolver nor a real URL — see _resolve_lazy_url.
+        self._resolving_keys: set[str] = set()
+
         # Progress accounting. The aggregator owns byte-weighted batch
         # progress, aggregate speed, and the whole-batch ETA (see
         # core.batch_progress). The simple counters below remain for the
@@ -222,6 +238,51 @@ class DownloadOrchestrator:
         if ev:
             ev.set()
             logger.debug("[Orchestrator] Cancelled track %s", key)
+
+    def job_state(self, key: str) -> Optional[JobState]:
+        """Authoritative terminal/non-terminal state for a job — see
+        BatchProgressAggregator.job_state for why this must be used instead
+        of a UI card's status label when the answer needs to be race-free."""
+        return self._aggregator.job_state(key)
+
+    def live_request_snapshot(
+        self, key: str,
+    ) -> Tuple[Optional[JobState], Optional[DownloadRequest]]:
+        """Atomically read a job's state and a defensive copy of its live
+        DownloadRequest, serialized against this orchestrator's own
+        resolver-commit and cancellation critical sections via the job's
+        per-job lock (see __init__ and _resolve_lazy_url).
+
+        This is the only race-free way for an outside caller (Global Pause,
+        on the UI thread) to decide whether a job is still safe to
+        pause-and-snapshot for a later resume. Reading the aggregator state
+        and reconstructing the request as two separate, unlocked steps (the
+        old approach, keyed off the UI card's status label) leaves two
+        windows open:
+          * the job reaches a terminal state between the two reads, so a
+            job that already succeeded gets pause-snapshotted anyway and
+            Resume All re-downloads a file that is already correct on disk;
+          * the job's url_resolver has been consumed but the resolved URL
+            has not yet been committed, so the snapshot has neither a
+            resolver nor a usable URL.
+
+        Returns ``(None, None)`` for a key this orchestrator never
+        registered a lock for (never submitted, or a stale key from a
+        previous batch). Returns ``(state, None)`` when a snapshot isn't
+        safe right now — a terminal state, or a job whose lazy URL
+        resolution is still in flight — even though the key is known;
+        callers must treat a ``None`` request as "do not pause this job".
+        """
+        lock = self._job_locks.get(key)
+        if lock is None:
+            return None, None
+        with lock:
+            state = self._aggregator.job_state(key)
+            if is_terminal_state(state) or key in self._resolving_keys:
+                return state, None
+            req = self._active_requests.get(key)
+            snapshot = dataclasses.replace(req) if req is not None else None
+            return state, snapshot
 
     # ── Main entry point (blocking — call from background thread) ─────────────
 
@@ -284,6 +345,9 @@ class DownloadOrchestrator:
             stagger_delay_range=stagger_delay_range,
         )
         self._cancel_events.clear()
+        self._job_locks.clear()
+        self._active_requests.clear()
+        self._resolving_keys.clear()
         with self._phase_lock:
             self._phase_times.clear()
         with self._gate_lock:
@@ -430,6 +494,8 @@ class DownloadOrchestrator:
                 ev = threading.Event()
                 req.cancel_event = ev
                 self._cancel_events[key] = ev
+                self._job_locks[key] = threading.Lock()
+                self._active_requests[key] = req
                 self._aggregator.register(key)
                 self._aggregator.mark_submitted(key)
 
@@ -718,8 +784,26 @@ class DownloadOrchestrator:
         if req.url_resolver is None:
             return False
         resolver = req.url_resolver
-        req.url_resolver = None  # resolve at most once
+        lock = self._job_locks.get(key)
+        # Mark the resolver "consumed" and the key "mid-resolve" as one
+        # atomic step (under lock) so a concurrent live_request_snapshot()
+        # can never observe url_resolver already cleared but req.url still
+        # holding the stale placeholder. The resolver call itself — a
+        # network round-trip — deliberately runs OUTSIDE the lock so a
+        # snapshot request for some OTHER job is never blocked on it; a
+        # snapshot request for THIS job instead sees it flagged in
+        # _resolving_keys (added below, before the lock is released) and
+        # reports "no safe snapshot right now" rather than blocking.
+        if lock is not None:
+            with lock:
+                req.url_resolver = None
+                self._resolving_keys.add(key)
+        else:
+            req.url_resolver = None
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+            if lock is not None:
+                with lock:
+                    self._resolving_keys.discard(key)
             self._aggregator.cancel(key)
             self._safe_cb("on_track_status", key, "cancelled")
             return True
@@ -732,7 +816,12 @@ class DownloadOrchestrator:
         resolver_wait = time.monotonic() - resolve_start
         self._record_phase("resolver_wait", resolver_wait)
         logger.debug("[timing][track] %s resolver_wait=%.2fs", key, resolver_wait)
-        if resolved:
+        if lock is not None:
+            with lock:
+                if resolved:
+                    req.url = resolved
+                self._resolving_keys.discard(key)
+        elif resolved:
             req.url = resolved
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
             self._aggregator.cancel(key)
