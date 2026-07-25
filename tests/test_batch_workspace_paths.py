@@ -147,3 +147,83 @@ def test_raises_only_when_no_location_is_writable(tmp_path, monkeypatch):
 
     with pytest.raises(OSError):
         make_batch_workspace(str(tmp_path))
+
+
+# ── Filesystem-safe workspace removal (remove_workspace_tree) ────────────────
+# The single authority that keeps cancellation / stale cleanup from ever
+# escaping the BananaFlow workspace tree into the user's own files.
+
+class TestRemoveWorkspaceTree:
+    def _make_container(self, base):
+        from utils.paths import make_batch_workspace
+        ws = make_batch_workspace(str(base))       # base/.bananaflow_tmp/batch-<id>
+        (ws / "job-a").mkdir()
+        (ws / "job-a" / "song.part").write_bytes(b"partial")
+        return ws  # the batch-<id> container
+
+    def test_removes_a_batch_container(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        container = self._make_container(tmp_path)
+        assert container.exists()
+        remove_workspace_tree(container)
+        assert not container.exists()
+
+    def test_removes_a_single_job_subdir_leaving_siblings(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        container = self._make_container(tmp_path)
+        (container / "job-b").mkdir()
+        (container / "job-b" / "keep.part").write_bytes(b"x")
+
+        remove_workspace_tree(container / "job-a")
+
+        assert not (container / "job-a").exists()
+        assert (container / "job-b" / "keep.part").exists()
+
+    def test_prunes_empty_container_and_root(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        container = self._make_container(tmp_path)
+        root = container.parent  # .bananaflow_tmp
+
+        remove_workspace_tree(container)
+
+        assert not container.exists()
+        assert not root.exists(), "empty .bananaflow_tmp root should be pruned too"
+        assert tmp_path.exists(), "the user's output dir must NEVER be removed"
+
+    def test_refuses_to_remove_a_non_workspace_path(self, tmp_path, caplog):
+        """The core safety invariant: a path that is not inside a BananaFlow
+        workspace container must never be deleted, even if asked."""
+        from utils.paths import remove_workspace_tree
+
+        precious = tmp_path / "user_music"
+        precious.mkdir()
+        (precious / "important.mp3").write_bytes(b"do not delete")
+
+        remove_workspace_tree(precious)
+
+        assert precious.exists()
+        assert (precious / "important.mp3").exists()
+
+    def test_refuses_to_remove_the_output_dir_itself(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        # Even the container's grandparent (the output dir) is off-limits.
+        container = self._make_container(tmp_path)
+        remove_workspace_tree(tmp_path)
+        assert tmp_path.exists()
+
+
+class TestIsWorkspacePath:
+    def test_recognises_container_root(self, tmp_path):
+        from utils.paths import is_workspace_path
+        assert is_workspace_path(tmp_path / ".bananaflow_tmp")
+        assert is_workspace_path(tmp_path / "download_workspaces")
+
+    def test_recognises_batch_dir_and_nested(self, tmp_path):
+        from utils.paths import is_workspace_path
+        assert is_workspace_path(tmp_path / ".bananaflow_tmp" / "batch-abc")
+        assert is_workspace_path(tmp_path / ".bananaflow_tmp" / "batch-abc" / "job-1" / "x.part")
+
+    def test_rejects_arbitrary_user_path(self, tmp_path):
+        from utils.paths import is_workspace_path
+        assert not is_workspace_path(tmp_path)
+        assert not is_workspace_path(tmp_path / "Music" / "song.mp3")

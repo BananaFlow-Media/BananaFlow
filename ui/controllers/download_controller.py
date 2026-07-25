@@ -942,6 +942,13 @@ class DownloadController(QObject):
         (clean completion vs completion-with-failures)."""
         if not self._is_current_batch_worker_signal():
             return
+        # Capture the finished worker's jobs BEFORE nulling _dl_worker so a
+        # cancellation can clean up exactly that batch's abandoned work.
+        # Safe to read here: all_finished fires only after run_batch has
+        # drained its pool, so no download thread is still writing.
+        finished_worker = self.sender()
+        worker_jobs = list(getattr(finished_worker, "_jobs", []) or [])
+
         self._dl_worker = None
         self.cancel_visible.emit(False)
         self.downloading_changed.emit(False)
@@ -952,7 +959,39 @@ class DownloadController(QObject):
             outcome = orchestrator_outcome or BatchOutcome.COMPLETED
         self._termination_intent = None
 
+        # A deliberate cancel (never a pause) removes the batch's unfinished
+        # partial/intermediate work. Fully-published final files already
+        # live in the user's output directory and are never touched (cleanup
+        # only removes the hidden workspace container). Pause preserves the
+        # workspace instead, which is exactly what keeps the two operations
+        # fundamentally different.
+        if outcome == BatchOutcome.CANCELLED_BY_USER:
+            self._cleanup_cancelled_batch(worker_jobs)
+
         self.batch_finished.emit(outcome)
+
+    def _cleanup_cancelled_batch(self, jobs: list) -> None:
+        """Remove the abandoned workspace of a cancelled batch and drop any
+        paused snapshots for its jobs — a cancel abandons everything.
+
+        Only touches the BananaFlow-owned hidden workspace container (via the
+        filesystem-safe remove_workspace_tree); published final files in the
+        output directory are never affected. Jobs that never started leave
+        only empty subdirs, which go with the container. Sibling batches are
+        untouched — cleanup is scoped to this batch's own container(s)."""
+        if not jobs:
+            return
+        from utils.paths import remove_workspace_tree
+
+        containers: set[Path] = set()
+        for key, req in jobs:
+            self._paused_requests.pop(key, None)
+            if req.workspace_dir:
+                # req.workspace_dir is this job's per-job subdir
+                # (<container>/<job_key>); its parent is the batch container.
+                containers.add(Path(req.workspace_dir).parent)
+        for container in containers:
+            remove_workspace_tree(container)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

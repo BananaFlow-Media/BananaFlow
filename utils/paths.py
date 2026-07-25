@@ -189,6 +189,62 @@ def get_ffprobe_executable() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
+# Every directory name that marks the BananaFlow batch-workspace boundary.
+# The same-volume container is ``.bananaflow_tmp`` (nested in the user's
+# output dir); the app-data fallback container is ``download_workspaces``.
+# Filesystem-cleanup safety keys off these names so a removal can never
+# escape the BananaFlow-owned tree into the user's own files.
+_WORKSPACE_ROOT_NAMES = frozenset({_WORKSPACE_CONTAINER_NAME, "download_workspaces"})
+
+
+def is_workspace_path(path: Path) -> bool:
+    """Whether ``path`` is inside (or is) a BananaFlow batch-workspace tree.
+
+    True when the path is a container root (``.bananaflow_tmp`` /
+    ``download_workspaces``), a ``batch-*`` directory, or anything nested
+    under such a root. This is the single authority that keeps workspace
+    cleanup from ever touching the user's output directory (whose name is
+    arbitrary and never matches)."""
+    path = Path(path)
+    if path.name.startswith("batch-") or path.name in _WORKSPACE_ROOT_NAMES:
+        return True
+    return any(p.name in _WORKSPACE_ROOT_NAMES for p in path.parents)
+
+
+def _prune_empty_workspace_parents(node: Path) -> None:
+    """rmdir empty BananaFlow-owned parent directories, stopping at the first
+    non-empty or non-owned level. Never reaches the user's output directory,
+    whose name is not workspace-owned; rmdir also refuses any level a
+    concurrent batch still occupies."""
+    node = Path(node)
+    while node.name.startswith("batch-") or node.name in _WORKSPACE_ROOT_NAMES:
+        try:
+            node.rmdir()
+        except OSError:
+            break
+        node = node.parent
+
+
+def remove_workspace_tree(path: Path) -> None:
+    """Recursively remove a BananaFlow workspace directory (a batch container
+    or a single job's subdir) and peel back any now-empty owned parents.
+
+    Guarded by :func:`is_workspace_path`: refuses to remove anything that is
+    not inside a BananaFlow workspace container, so a cleanup sweep can never
+    escape into — and delete — the user's output directory. Never raises: a
+    cleanup failure must not turn an otherwise-fine batch into an error."""
+    path = Path(path)
+    if not is_workspace_path(path):
+        logger.warning(
+            "[paths] refusing to remove %s — not inside a BananaFlow workspace", path,
+        )
+        return
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[paths] workspace removal failed for %s: %s", path, exc)
+        return
+    _prune_empty_workspace_parents(path.parent)
 
 
 def _set_hidden_attribute(path: Path) -> bool:
