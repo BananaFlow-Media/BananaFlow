@@ -26,6 +26,7 @@ Pure stdlib file I/O — no yt-dlp, no network, no Qt.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -129,11 +130,13 @@ def test_overwrites_existing_destination_file(tmp_path):
     assert Path(result).read_bytes() == b"NEW-CONTENT"
 
 
-def test_path_outside_workspace_degrades_safely(tmp_path, caplog):
-    """If the given path isn't actually under workspace_dir (shouldn't
-    happen given how _build_ydl_opts constructs it, but must never lose
-    the file if it does), return the original path unchanged rather than
-    raising or silently discarding it."""
+def test_path_outside_workspace_is_rejected_not_accepted(tmp_path):
+    """A file that isn't actually under the declared workspace must NOT be
+    accepted as a successfully published result — publishing an arbitrary
+    path, or silently returning it as 'done', would both be wrong. It must
+    raise, and must never move or lose the out-of-workspace file."""
+    from core.downloader import PublishError
+
     engine = DownloadEngine()
     workspace = tmp_path / "workspace"
     other = tmp_path / "elsewhere"
@@ -144,10 +147,126 @@ def test_path_outside_workspace_degrades_safely(tmp_path, caplog):
     src.write_bytes(b"x")
     req = _req(output_dir=str(tmp_path / "output"), workspace_dir=str(workspace))
 
+    with pytest.raises(PublishError):
+        engine._publish_to_final_location(req, str(src))
+
+    assert src.exists()  # the out-of-workspace file is never touched
+
+
+def test_publish_failure_raises_and_leaves_existing_destination_intact(tmp_path, monkeypatch):
+    """When the atomic move itself fails, publish must raise (so the
+    download is reported as an error, never a false success) AND leave any
+    existing destination file untouched."""
+    from core.downloader import PublishError
+
+    engine = DownloadEngine()
+    workspace = tmp_path / "workspace"
+    output_dir = tmp_path / "output"
+    workspace.mkdir()
+    output_dir.mkdir()
+
+    dest = output_dir / "song.mp3"
+    dest.write_bytes(b"EXISTING-CONTENT")
+
+    src = workspace / "song.mp3"
+    src.write_bytes(b"NEW-CONTENT")
+    req = _req(output_dir=str(output_dir), workspace_dir=str(workspace))
+
+    # Force the atomic placement to fail with a non-recoverable error.
+    def _boom(_src, _dest):
+        raise OSError("simulated publish failure")
+
+    monkeypatch.setattr(engine, "_atomic_place", _boom)
+
+    with pytest.raises(PublishError):
+        engine._publish_to_final_location(req, str(src))
+
+    assert dest.read_bytes() == b"EXISTING-CONTENT"  # untouched
+
+
+def test_cross_volume_publish_copies_then_atomically_renames(tmp_path, monkeypatch):
+    """When the workspace is on a different volume (os.replace raises EXDEV),
+    publish must copy to a temp adjacent to dest and os.replace THAT into
+    place — never leave a visible half-copy, and land the full content."""
+    import errno
+    import core.downloader as dl_mod
+
+    engine = DownloadEngine()
+    workspace = tmp_path / "workspace"
+    output_dir = tmp_path / "output"
+    workspace.mkdir()
+    output_dir.mkdir()
+
+    src = workspace / "song.mp3"
+    src.write_bytes(b"CROSS-VOLUME-CONTENT")
+    req = _req(output_dir=str(output_dir), workspace_dir=str(workspace))
+
+    real_replace = os.replace
+
+    def _fake_replace(a, b):
+        # The direct workspace->dest move looks cross-device; the temp->dest
+        # rename (temp lives next to dest) is same-volume and goes through.
+        if str(a) == str(src):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(a, b)
+
+    monkeypatch.setattr(dl_mod.os, "replace", _fake_replace)
+
     result = engine._publish_to_final_location(req, str(src))
 
-    assert result == str(src)
-    assert src.exists()  # file is never lost
+    dest = output_dir / "song.mp3"
+    assert Path(result) == dest
+    assert dest.read_bytes() == b"CROSS-VOLUME-CONTENT"
+    assert not src.exists()  # source removed after successful cross-volume publish
+    # No leftover publish temp file in the output directory.
+    leftovers = [p.name for p in output_dir.iterdir() if "publish-tmp" in p.name]
+    assert leftovers == []
+
+
+def test_hls_publish_failure_reports_error_not_finished(tmp_path, monkeypatch):
+    """End-to-end at a real call site (the HLS path): if publish raises, the
+    engine must fire ERROR, never FINISHED — a failed publish is never a
+    completed download."""
+    from core.downloader import DownloadProgress, DownloadStatus, MediaType, PublishError
+
+    engine = DownloadEngine()
+    workspace = tmp_path / "workspace"
+    output_dir = tmp_path / "output"
+    workspace.mkdir()
+    output_dir.mkdir()
+
+    events: list = []
+    req = DownloadRequest(
+        url="https://example.test/stream.m3u8",
+        output_dir=str(output_dir),
+        workspace_dir=str(workspace),
+        media_type=MediaType.AUDIO,
+        stream_type="hls",
+        forced_title="Song",
+    )
+    req.on_finished = lambda p: events.append(("finished", p))
+    req.on_error = lambda p: events.append(("error", p))
+    req.on_progress = lambda p: None
+
+    # Fake the actual stream download so no ffmpeg/network runs; it just
+    # "creates" the output file the publish step would then move.
+    import core.hls_downloader as hls_mod
+
+    def _fake_download_hls(url, output_path, cookies_file=None):
+        Path(output_path).write_bytes(b"stream-bytes")
+
+    monkeypatch.setattr(hls_mod, "download_hls", _fake_download_hls)
+
+    def _boom(_req, _path):
+        raise PublishError("simulated publish failure")
+
+    monkeypatch.setattr(engine, "_publish_to_final_location", _boom)
+
+    engine.download(req)
+
+    kinds = [k for k, _ in events]
+    assert "error" in kinds
+    assert "finished" not in kinds
 
 
 # ── outtmpl routing (the write side of the same guarantee) ──────────────────

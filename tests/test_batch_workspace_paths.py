@@ -73,14 +73,77 @@ class TestWindowsHiddenAttribute:
         attrs = ctypes.windll.kernel32.GetFileAttributesW(str(workspace.parent))
         assert attrs & FILE_ATTRIBUTE_HIDDEN
 
+    def test_set_hidden_attribute_returns_true_on_success(self, tmp_path):
+        from utils.paths import _set_hidden_attribute
 
-def test_raises_when_base_output_dir_cannot_hold_a_directory(tmp_path):
-    """If base_output_dir contains a FILE where the workspace container
-    would need to go, directory creation must fail loudly (OSError) so the
-    caller can decide to fall back to writing directly into output_dir —
-    never silently swallow the error."""
-    blocker = tmp_path / ".bananaflow_tmp"
+        d = tmp_path / "somedir"
+        d.mkdir()
+        assert _set_hidden_attribute(d) is True
+
+    def test_set_hidden_attribute_reports_failure_not_false_success(self, tmp_path, caplog):
+        """The whole point of checking SetFileAttributesW's return value: a
+        genuine failure (here: a path that doesn't exist) must return False
+        and log, never silently claim success."""
+        from utils.paths import _set_hidden_attribute
+
+        missing = tmp_path / "does_not_exist"
+        result = _set_hidden_attribute(missing)
+        assert result is False
+
+
+def test_set_hidden_attribute_is_true_on_non_windows_by_convention():
+    """On non-Windows there is no attribute to set; the dot-prefixed name is
+    the hiding mechanism, so the helper reports success (True) rather than a
+    spurious failure. Simulated by forcing os.name."""
+    import utils.paths as paths_mod
+
+    if os.name == "nt":
+        pytest.skip("covered by the real-attribute tests on Windows")
+    # On a genuinely non-Windows runner this exercises the real path.
+    from utils.paths import _set_hidden_attribute
+    from pathlib import Path
+    assert _set_hidden_attribute(Path(".")) is True
+
+
+def test_falls_back_to_app_data_when_output_dir_cannot_hold_a_workspace(tmp_path, monkeypatch):
+    """If the same-volume container can't be created (here: a FILE occupies
+    the `.bananaflow_tmp` name), make_batch_workspace must still ISOLATE the
+    download — falling back to the app-data dir — rather than either raising
+    or (worse) letting the caller write visible partials into output_dir.
+    The invariant 'downloads never appear in the output folder' wins."""
+    from utils import paths as paths_mod
+
+    # A distinct base for the app-data fallback, NOT nested under the output
+    # dir, so "landed in the fallback, not the output dir" is unambiguous.
+    app_data = tmp_path.parent / f"appdata-{tmp_path.name}"
+    app_data.mkdir()
+    monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    blocker = output_dir / ".bananaflow_tmp"
     blocker.write_bytes(b"not a directory")
+
+    workspace = make_batch_workspace(str(output_dir))
+
+    assert workspace.exists()
+    # Landed under the app-data fallback, NOT inside the output dir.
+    assert app_data.resolve() in workspace.resolve().parents
+    assert output_dir.resolve() not in workspace.resolve().parents
+
+
+def test_raises_only_when_no_location_is_writable(tmp_path, monkeypatch):
+    """Both the same-volume container and the app-data fallback failing is
+    the only case that raises — the caller then errors the jobs rather than
+    writing visible partials."""
+    from utils import paths as paths_mod
+
+    # Block the same-volume location with a file...
+    (tmp_path / ".bananaflow_tmp").write_bytes(b"x")
+    # ...and point the app-data fallback at an unusable location too.
+    app_data_blocker = tmp_path / "appdata_file"
+    app_data_blocker.write_bytes(b"x")
+    monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data_blocker)
 
     with pytest.raises(OSError):
         make_batch_workspace(str(tmp_path))

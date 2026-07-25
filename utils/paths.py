@@ -8,11 +8,14 @@ Zero GUI imports — pure stdlib only.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def get_app_data_dir() -> Path:
@@ -188,49 +191,94 @@ def get_ffprobe_executable() -> Optional[str]:
 _WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
 
 
-def _set_hidden_attribute(path: Path) -> None:
-    """Best-effort: apply the Windows Hidden file attribute so the batch
-    workspace never shows up in a normal Explorer/dir listing.
+def _set_hidden_attribute(path: Path) -> bool:
+    """Apply the Windows Hidden file attribute so the batch workspace never
+    shows up in a normal Explorer/dir listing.
 
-    Cosmetic only — a failure here must never break a download, so every
-    error is swallowed. No-op on non-Windows, where the leading-dot name
-    already hides the folder by convention (matches get_app_data_dir's
-    ``.bananaflow``).
+    Returns True if the attribute is set (or if we're on a non-Windows
+    platform, where the leading-dot name already hides the folder by
+    convention — matches get_app_data_dir's ``.bananaflow``). Returns
+    False, with a logged warning, when the Windows call genuinely failed —
+    the caller stays functional either way (hiding is cosmetic; an
+    un-hidden workspace still works and is still cleaned up), but a real
+    failure is never silently reported as success.
     """
     if os.name != "nt":
-        return
+        return True
     try:
         import ctypes
         FILE_ATTRIBUTE_HIDDEN = 0x02
-        ctypes.windll.kernel32.SetFileAttributesW(str(path), FILE_ATTRIBUTE_HIDDEN)  # type: ignore[attr-defined]
-    except Exception:
-        pass
+        # SetFileAttributesW returns 0 (FALSE) on failure. Checking the
+        # return value is the whole point: without it a failed call was
+        # indistinguishable from a successful one.
+        ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
+            str(path), FILE_ATTRIBUTE_HIDDEN
+        )
+        if not ok:
+            err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+            logger.warning(
+                "[paths] Could not set Hidden attribute on %s (winerror=%s); "
+                "workspace will be visible but still functional", path, err,
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[paths] Setting Hidden attribute on %s raised %s; "
+            "workspace will be visible but still functional", path, exc,
+        )
+        return False
+
+
+def _workspace_container(base: Path) -> Path:
+    return base / _WORKSPACE_CONTAINER_NAME
 
 
 def make_batch_workspace(base_output_dir: str) -> Path:
-    """Create a fresh, uniquely-named batch workspace under ``base_output_dir``.
+    """Create a fresh, uniquely-named batch workspace and return it.
 
     Downloads, conversion, artwork and metadata post-processing all happen
     here instead of directly inside the user's visible output folder — the
-    finished file is only moved into ``base_output_dir`` once it is
-    completely ready (see core.downloader's atomic-publish step). Living
-    under ``base_output_dir`` guarantees the workspace is on the same
-    filesystem/volume as the final destination, which is what makes that
-    move an atomic ``os.replace`` rather than a cross-volume copy.
+    finished file is only moved into the real output directory once it is
+    completely ready (see core.downloader's atomic-publish step).
 
-    The workspace is given the Windows Hidden attribute (not just a
-    dot-prefixed name) so it never appears in a normal Explorer window —
-    "hidden" has to mean actually hidden, not just conventionally hidden.
+    Preferred location is ``base_output_dir/.bananaflow_tmp/batch-<id>`` so
+    the workspace is on the same filesystem/volume as the final
+    destination, making the later publish a pure atomic ``os.replace``.
+    If that cannot be created (e.g. a read-only or attribute-restricted
+    output dir), it falls back to the app-data directory — the download
+    still stays fully isolated (never writes visible partials into the
+    user's output folder); the publish step transparently handles the
+    resulting cross-volume move. Only if BOTH locations fail does this
+    raise OSError, so the caller never has to choose between "isolate" and
+    "download at all" — it always isolates.
 
-    Raises OSError if the directory cannot be created (e.g. the output
-    location is read-only) — the caller decides whether to fall back to
-    writing directly into base_output_dir.
+    The container is given the Windows Hidden attribute (not just a
+    dot-prefixed name) so it never appears in a normal Explorer window.
     """
     import uuid
 
-    container = Path(base_output_dir).expanduser().resolve() / _WORKSPACE_CONTAINER_NAME
-    workspace = container / f"batch-{uuid.uuid4().hex[:12]}"
-    workspace.mkdir(parents=True, exist_ok=True)
-    _set_hidden_attribute(container)
-    _set_hidden_attribute(workspace)
-    return workspace
+    name = f"batch-{uuid.uuid4().hex[:12]}"
+    candidates = [
+        _workspace_container(Path(base_output_dir).expanduser().resolve()),
+        get_app_data_dir() / "download_workspaces",
+    ]
+
+    last_exc: Optional[OSError] = None
+    for container in candidates:
+        try:
+            workspace = container / name
+            workspace.mkdir(parents=True, exist_ok=True)
+            # Hide the container (the boundary that keeps the whole subtree
+            # out of a normal Explorer window) and the batch dir itself.
+            _set_hidden_attribute(container)
+            _set_hidden_attribute(workspace)
+            return workspace
+        except OSError as exc:
+            last_exc = exc
+            logger.warning(
+                "[paths] Could not create batch workspace under %s: %s", container, exc,
+            )
+    # Both the same-volume and the app-data fallback failed — surface it so
+    # the orchestrator errors the jobs rather than writing visible partials.
+    raise last_exc if last_exc is not None else OSError("no workspace location available")

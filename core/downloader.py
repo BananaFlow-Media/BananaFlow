@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -34,7 +35,7 @@ except ImportError:
     pass
 
 from utils.cookie_validator import check_cookies_valid
-from utils.paths import get_app_cookies_path, get_bundled_ffmpeg_dir
+from utils.paths import _set_hidden_attribute, get_app_cookies_path, get_bundled_ffmpeg_dir
 from utils.yt_dlp_opts import build_base_ydl_opts as _build_base_opts, temp_cookies_copy
 from core.media_formats import DEFAULT_AUDIO_FORMAT, DEFAULT_VIDEO_FORMAT
 from core.playlist_parser import SourcePlatform
@@ -104,6 +105,18 @@ class SilentLogger:
             logger.error(f"[yt-dlp][{category}] {msg}")
         else:
             logger.error(f"[yt-dlp] {msg}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Exceptions
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PublishError(Exception):
+    """A fully-downloaded file could not be atomically published from the
+    batch workspace into the user's output directory. Raised by
+    DownloadEngine._publish_to_final_location so the download is reported as
+    a per-track error instead of a false success (the file is still in the
+    workspace, which is about to be cleaned up)."""
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Enumerations
@@ -591,7 +604,14 @@ class DownloadEngine:
             ), error=True)
             return
 
-        output_path = self._publish_to_final_location(request, output_path)
+        try:
+            output_path = self._publish_to_final_location(request, output_path)
+        except PublishError as exc:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.ERROR, url=url, title=title,
+                error_message=str(exc),
+            ), error=True)
+            return
         hls_bytes = _safe_file_size(output_path)
         self._fire(request, DownloadProgress(
             status=DownloadStatus.FINISHED,
@@ -739,7 +759,14 @@ class DownloadEngine:
             ), error=True)
             return
 
-        output_path = self._publish_to_final_location(request, output_path)
+        try:
+            output_path = self._publish_to_final_location(request, output_path)
+        except PublishError as exc:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.ERROR, url=page_url, title=title,
+                error_message=str(exc),
+            ), error=True)
+            return
         stream_bytes = _safe_file_size(output_path)
         self._fire(request, DownloadProgress(
             status=DownloadStatus.FINISHED,
@@ -1057,7 +1084,8 @@ class DownloadEngine:
 
     def _publish_to_final_location(self, req: DownloadRequest, workspace_path: str) -> str:
         """Atomically move a fully-ready file out of the batch workspace and
-        into the user's real output directory.
+        into the user's real output directory. Returns the final published
+        path on success.
 
         Called only after every post-processing step (conversion, thumbnail,
         MusicBrainz, lyrics, ReplayGain) has already finished — the user must
@@ -1066,9 +1094,21 @@ class DownloadEngine:
         is not set, preserving the old direct-write behavior for callers
         that don't opt into a workspace (tests, CLI).
 
-        The workspace is always created under the same base directory as
-        req.output_dir (see utils.paths.make_batch_workspace), so this is
-        always a same-volume ``os.replace`` — atomic, not a copy.
+        Raises ``PublishError`` when the file cannot be published. A publish
+        failure must NEVER be reported as a completed download: the file is
+        still sitting in the (about-to-be-cleaned) workspace, so silently
+        returning that path would surface a "done" card pointing at a file
+        that is about to vanish. The caller turns the raise into a normal
+        per-track error instead. On failure the existing destination file,
+        if any, is left untouched (os.replace is atomic; the fallback path
+        only os.replace's an already-complete temp copy).
+
+        Same-volume (the normal case — the workspace is nested under
+        output_dir) is a pure atomic ``os.replace``. A cross-volume
+        workspace (the app-data fallback in make_batch_workspace) is
+        published by copying to a hidden temp file adjacent to the
+        destination and then os.replace'ing that into place — still atomic
+        at the visible destination, still no half-built file ever seen.
         """
         if not req.workspace_dir:
             return workspace_path
@@ -1078,22 +1118,26 @@ class DownloadEngine:
             src = Path(workspace_path).resolve()
             relative = src.relative_to(workspace_root)
         except (ValueError, OSError) as exc:
-            logger.warning(
-                "[Downloader] Could not resolve workspace-relative path for "
-                "%s (workspace=%s): %s — leaving file in place",
-                workspace_path, req.workspace_dir, exc,
-            )
-            return workspace_path
+            # A path that isn't under the declared workspace must not be
+            # accepted as a successfully published result — publishing it
+            # would move an arbitrary file, or (returning it) claim success
+            # for a file outside the isolation boundary.
+            raise PublishError(
+                f"Refusing to publish {workspace_path!r}: not inside workspace "
+                f"{req.workspace_dir!r} ({exc})"
+            ) from exc
 
         dest = Path(req.output_dir).expanduser().resolve() / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
 
+        last_exc: Optional[BaseException] = None
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                os.replace(str(src), str(dest))
+                self._atomic_place(src, dest)
                 return str(dest)
             except OSError as exc:
+                last_exc = exc
                 # Windows file-lock errors, same codes/retry as the yt-dlp
                 # download retry above: winerror 5 = ACCESS_DENIED,
                 # winerror 32 = SHARING_VIOLATION (locale-safe).
@@ -1105,10 +1149,49 @@ class DownloadEngine:
                     )
                     time.sleep(2)
                     continue
-                logger.error(
-                    "[Downloader] Failed to publish %s -> %s: %s", src, dest, exc,
-                )
-                return str(src)
+                break
+
+        logger.error("[Downloader] Failed to publish %s -> %s: %s", src, dest, last_exc)
+        raise PublishError(f"Could not publish to {dest}: {last_exc}") from last_exc
+
+    @staticmethod
+    def _atomic_place(src: Path, dest: Path) -> None:
+        """Put ``src`` at ``dest`` atomically at the visible destination.
+
+        Fast path: same-volume ``os.replace`` (a pure rename). Cross-volume
+        (raises OSError with errno EXDEV): copy to a hidden temp file next
+        to dest, fsync-free copy2, then os.replace the temp into place — the
+        rename is same-volume and atomic, so the destination only ever flips
+        from "old/absent" to "fully-copied new", never a partial. The temp
+        is cleaned up on any failure so a cross-volume error can't strand a
+        half-copy in the output directory.
+        """
+        import errno
+        try:
+            os.replace(str(src), str(dest))
+            return
+        except OSError as exc:
+            if getattr(exc, "errno", None) != errno.EXDEV:
+                raise
+
+        tmp = dest.parent / f".{dest.name}.{os.getpid()}.publish-tmp"
+        try:
+            shutil.copy2(str(src), str(tmp))
+            _set_hidden_attribute(tmp)
+            os.replace(str(tmp), str(dest))
+        except OSError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise
+        else:
+            # Copy+rename succeeded — remove the now-published workspace source.
+            try:
+                src.unlink()
+            except OSError:
+                pass
 
     def _run_final_pipeline(self, req: DownloadRequest, final_path: str) -> list[str]:
         """
