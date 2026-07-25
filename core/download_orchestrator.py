@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import time
 import random
+import hashlib
 import logging
 import re
 import shutil
@@ -67,10 +68,24 @@ _WORKSPACE_CONTAINER_NAMES = frozenset({".bananaflow_tmp", "download_workspaces"
 
 
 def _safe_subdir_name(key: str) -> str:
-    """Filesystem-safe per-job workspace subdirectory name derived from a job
-    key. Job keys are normally ``str(id(card))`` (digits), but sanitising
-    guards any caller/test that uses a freer-form key."""
-    return _SUBDIR_UNSAFE.sub("_", key) or "job"
+    """Filesystem-safe, collision-safe per-job workspace subdirectory name
+    derived from a job key.
+
+    Job keys are normally ``str(id(card))`` (digits), but this sanitises any
+    caller/test that uses a freer-form key. Two requirements a naive
+    "replace unsafe chars" pass does NOT meet on its own:
+      * it must never produce ``.`` or ``..`` (which would make the "job
+        subdir" alias the batch container or its parent, defeating per-job
+        isolation and making cleanup delete the wrong thing), and
+      * two different keys must never sanitise to the SAME name (e.g. "a*b"
+        and "a/b" both naively become "a_b").
+    A short hash of the ORIGINAL key is always appended, so the result is
+    both structurally distinct from "." / ".." and collision-safe on the
+    full key content, not just its mangled label.
+    """
+    label = _SUBDIR_UNSAFE.sub("_", key) or "job"
+    digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"{label}-{digest}"
 
 
 def _is_workspace_owned(path: Path) -> bool:

@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -191,43 +192,46 @@ def get_ffprobe_executable() -> Optional[str]:
 _WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
 
 
-def _set_hidden_attribute(path: Path) -> bool:
+def _set_hidden_attribute(path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15) -> bool:
     """Apply the Windows Hidden file attribute so the batch workspace never
     shows up in a normal Explorer/dir listing.
 
-    Returns True if the attribute is set (or if we're on a non-Windows
+    Retries a few times: a directory that was just created can transiently
+    fail this call (e.g. an antivirus/indexer briefly holding a handle right
+    after creation) — a bare single attempt would report "exposed" for a
+    purely transient condition that a millisecond-scale retry resolves.
+
+    Returns True if the attribute ends up set (or if we're on a non-Windows
     platform, where the leading-dot name already hides the folder by
     convention — matches get_app_data_dir's ``.bananaflow``). Returns
-    False, with a logged warning, when the Windows call genuinely failed —
+    False, with a logged warning, only when every attempt genuinely failed —
     the caller stays functional either way (hiding is cosmetic; an
-    un-hidden workspace still works and is still cleaned up), but a real
-    failure is never silently reported as success.
+    un-hidden workspace still works and is still cleaned up), but a real,
+    persistent failure is never silently reported as success.
     """
     if os.name != "nt":
         return True
-    try:
-        import ctypes
-        FILE_ATTRIBUTE_HIDDEN = 0x02
-        # SetFileAttributesW returns 0 (FALSE) on failure. Checking the
-        # return value is the whole point: without it a failed call was
-        # indistinguishable from a successful one.
-        ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
-            str(path), FILE_ATTRIBUTE_HIDDEN
-        )
-        if not ok:
-            err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
-            logger.warning(
-                "[paths] Could not set Hidden attribute on %s (winerror=%s); "
-                "workspace will be visible but still functional", path, err,
+    import ctypes
+    FILE_ATTRIBUTE_HIDDEN = 0x02
+    last_err = None
+    for attempt in range(attempts):
+        try:
+            ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
+                str(path), FILE_ATTRIBUTE_HIDDEN
             )
-            return False
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[paths] Setting Hidden attribute on %s raised %s; "
-            "workspace will be visible but still functional", path, exc,
-        )
-        return False
+            if ok:
+                return True
+            last_err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+        if attempt < attempts - 1:
+            time.sleep(retry_delay_s)
+    logger.warning(
+        "[paths] Could not set Hidden attribute on %s after %d attempt(s) "
+        "(%s); workspace will be visible but still functional",
+        path, attempts, last_err,
+    )
+    return False
 
 
 def _workspace_container(base: Path) -> Path:
@@ -282,3 +286,39 @@ def make_batch_workspace(base_output_dir: str) -> Path:
     # Both the same-volume and the app-data fallback failed — surface it so
     # the orchestrator errors the jobs rather than writing visible partials.
     raise last_exc if last_exc is not None else OSError("no workspace location available")
+
+
+# Matches core.downloader.DownloadEngine.PUBLISH_TMP_SUFFIX. Duplicated as a
+# literal (not imported) so this stdlib-only module never has to import
+# core.downloader, which pulls in yt-dlp.
+_PUBLISH_TMP_SUFFIX = ".bananaflow-publish-tmp"
+
+
+def sweep_stale_publish_temp_files(base_dirs) -> list[Path]:
+    """Remove leftover cross-volume publish temp files directly in the given
+    output directories — the residue of a crash between the copy and the
+    final rename in DownloadEngine._atomic_place (same-volume publishes
+    never create one; they're a pure rename). ``base_dirs`` is any iterable
+    of output-dir paths. Never raises; returns the paths removed."""
+    removed: list[Path] = []
+    seen: set[Path] = set()
+    for base in base_dirs or ():
+        try:
+            resolved = Path(base).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        try:
+            entries = list(resolved.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.endswith(_PUBLISH_TMP_SUFFIX) and entry.is_file():
+                try:
+                    entry.unlink()
+                    removed.append(entry)
+                except OSError as exc:
+                    logger.warning("[paths] Could not remove stale publish temp %s: %s", entry, exc)
+    return removed
