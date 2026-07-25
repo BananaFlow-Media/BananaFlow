@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -197,6 +198,14 @@ _WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
 _WORKSPACE_ROOT_NAMES = frozenset({_WORKSPACE_CONTAINER_NAME, "download_workspaces"})
 
 
+def _is_workspace_path_resolved(resolved: Path) -> bool:
+    """Lexical name check on an ALREADY-CANONICALISED path. Never call this
+    directly with an un-resolved path — see is_workspace_path."""
+    if resolved.name.startswith("batch-") or resolved.name in _WORKSPACE_ROOT_NAMES:
+        return True
+    return any(p.name in _WORKSPACE_ROOT_NAMES for p in resolved.parents)
+
+
 def is_workspace_path(path: Path) -> bool:
     """Whether ``path`` is inside (or is) a BananaFlow batch-workspace tree.
 
@@ -204,11 +213,20 @@ def is_workspace_path(path: Path) -> bool:
     ``download_workspaces``), a ``batch-*`` directory, or anything nested
     under such a root. This is the single authority that keeps workspace
     cleanup from ever touching the user's output directory (whose name is
-    arbitrary and never matches)."""
-    path = Path(path)
-    if path.name.startswith("batch-") or path.name in _WORKSPACE_ROOT_NAMES:
-        return True
-    return any(p.name in _WORKSPACE_ROOT_NAMES for p in path.parents)
+    arbitrary and never matches).
+
+    Resolves the path FIRST (collapsing ``..``/``.`` segments and symlinks)
+    before checking names — a purely lexical check on the path as given
+    would accept a crafted or traversal-style path (e.g.
+    ``.../.bananaflow_tmp/batch-x/../../../etc``) whose component names
+    happen to include a workspace marker even though the path it actually
+    resolves to on disk lands outside any BananaFlow workspace. A path that
+    cannot be resolved is treated as NOT a workspace path — fail closed."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return _is_workspace_path_resolved(resolved)
 
 
 def _prune_empty_workspace_parents(node: Path) -> None:
@@ -229,22 +247,31 @@ def remove_workspace_tree(path: Path) -> None:
     """Recursively remove a BananaFlow workspace directory (a batch container
     or a single job's subdir) and peel back any now-empty owned parents.
 
-    Guarded by :func:`is_workspace_path`: refuses to remove anything that is
-    not inside a BananaFlow workspace container, so a cleanup sweep can never
-    escape into — and delete — the user's output directory. Never raises: a
-    cleanup failure must not turn an otherwise-fine batch into an error."""
-    path = Path(path)
-    if not is_workspace_path(path):
+    Resolves ``path`` once and uses that SAME canonical path for both the
+    ownership check and the actual removal — see is_workspace_path for why
+    a lexical-only check (or checking one path while deleting a different,
+    un-resolved one) is not safe. Refuses to remove anything that does not
+    resolve inside a BananaFlow workspace container, so a cleanup sweep can
+    never escape into — and delete — the user's output directory. Never
+    raises: a cleanup failure must not turn an otherwise-fine batch into an
+    error."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.warning("[paths] refusing to remove %s — could not resolve: %s", path, exc)
+        return
+    if not _is_workspace_path_resolved(resolved):
         logger.warning(
-            "[paths] refusing to remove %s — not inside a BananaFlow workspace", path,
+            "[paths] refusing to remove %s (resolved: %s) — not inside a "
+            "BananaFlow workspace", path, resolved,
         )
         return
     try:
-        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(resolved, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[paths] workspace removal failed for %s: %s", path, exc)
+        logger.warning("[paths] workspace removal failed for %s: %s", resolved, exc)
         return
-    _prune_empty_workspace_parents(path.parent)
+    _prune_empty_workspace_parents(resolved.parent)
 
 
 def iter_batch_workspaces(base_dirs) -> list[Path]:
@@ -315,43 +342,46 @@ def sweep_stale_workspaces(base_dirs, keep_workspace_dirs) -> list[Path]:
     return removed
 
 
-def _set_hidden_attribute(path: Path) -> bool:
+def _set_hidden_attribute(path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15) -> bool:
     """Apply the Windows Hidden file attribute so the batch workspace never
     shows up in a normal Explorer/dir listing.
 
-    Returns True if the attribute is set (or if we're on a non-Windows
+    Retries a few times: a directory that was just created can transiently
+    fail this call (e.g. an antivirus/indexer briefly holding a handle right
+    after creation) — a bare single attempt would report "exposed" for a
+    purely transient condition that a millisecond-scale retry resolves.
+
+    Returns True if the attribute ends up set (or if we're on a non-Windows
     platform, where the leading-dot name already hides the folder by
     convention — matches get_app_data_dir's ``.bananaflow``). Returns
-    False, with a logged warning, when the Windows call genuinely failed —
+    False, with a logged warning, only when every attempt genuinely failed —
     the caller stays functional either way (hiding is cosmetic; an
-    un-hidden workspace still works and is still cleaned up), but a real
-    failure is never silently reported as success.
+    un-hidden workspace still works and is still cleaned up), but a real,
+    persistent failure is never silently reported as success.
     """
     if os.name != "nt":
         return True
-    try:
-        import ctypes
-        FILE_ATTRIBUTE_HIDDEN = 0x02
-        # SetFileAttributesW returns 0 (FALSE) on failure. Checking the
-        # return value is the whole point: without it a failed call was
-        # indistinguishable from a successful one.
-        ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
-            str(path), FILE_ATTRIBUTE_HIDDEN
-        )
-        if not ok:
-            err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
-            logger.warning(
-                "[paths] Could not set Hidden attribute on %s (winerror=%s); "
-                "workspace will be visible but still functional", path, err,
+    import ctypes
+    FILE_ATTRIBUTE_HIDDEN = 0x02
+    last_err = None
+    for attempt in range(attempts):
+        try:
+            ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
+                str(path), FILE_ATTRIBUTE_HIDDEN
             )
-            return False
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[paths] Setting Hidden attribute on %s raised %s; "
-            "workspace will be visible but still functional", path, exc,
-        )
-        return False
+            if ok:
+                return True
+            last_err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+        if attempt < attempts - 1:
+            time.sleep(retry_delay_s)
+    logger.warning(
+        "[paths] Could not set Hidden attribute on %s after %d attempt(s) "
+        "(%s); workspace will be visible but still functional",
+        path, attempts, last_err,
+    )
+    return False
 
 
 def _workspace_container(base: Path) -> Path:
@@ -393,16 +423,64 @@ def make_batch_workspace(base_output_dir: str) -> Path:
         try:
             workspace = container / name
             workspace.mkdir(parents=True, exist_ok=True)
-            # Hide the container (the boundary that keeps the whole subtree
-            # out of a normal Explorer window) and the batch dir itself.
-            _set_hidden_attribute(container)
-            _set_hidden_attribute(workspace)
-            return workspace
         except OSError as exc:
             last_exc = exc
             logger.warning(
                 "[paths] Could not create batch workspace under %s: %s", container, exc,
             )
-    # Both the same-volume and the app-data fallback failed — surface it so
-    # the orchestrator errors the jobs rather than writing visible partials.
+            continue
+        # Hide the container (the boundary that keeps the whole subtree out
+        # of a normal Explorer window) and the batch dir itself. Genuinely
+        # hidden is a product requirement, not a cosmetic nicety — a
+        # location that can't satisfy it is treated the same as one that
+        # can't even create the directory: try the next candidate instead
+        # of silently exposing the workspace.
+        container_hidden = _set_hidden_attribute(container)
+        workspace_hidden = _set_hidden_attribute(workspace)
+        if container_hidden and workspace_hidden:
+            return workspace
+        shutil.rmtree(workspace, ignore_errors=True)
+        last_exc = OSError(f"Could not apply the Hidden attribute under {container}")
+        logger.warning(
+            "[paths] Rejecting workspace location %s: could not be made hidden", container,
+        )
+    # Every candidate location either couldn't be created or couldn't be
+    # hidden — surface it so the orchestrator errors the jobs rather than
+    # writing partials into a workspace the user was promised is invisible.
     raise last_exc if last_exc is not None else OSError("no workspace location available")
+
+
+# Matches core.downloader.DownloadEngine.PUBLISH_TMP_SUFFIX. Duplicated as a
+# literal (not imported) so this stdlib-only module never has to import
+# core.downloader, which pulls in yt-dlp.
+_PUBLISH_TMP_SUFFIX = ".bananaflow-publish-tmp"
+
+
+def sweep_stale_publish_temp_files(base_dirs) -> list[Path]:
+    """Remove leftover cross-volume publish temp files directly in the given
+    output directories — the residue of a crash between the copy and the
+    final rename in DownloadEngine._atomic_place (same-volume publishes
+    never create one; they're a pure rename). ``base_dirs`` is any iterable
+    of output-dir paths. Never raises; returns the paths removed."""
+    removed: list[Path] = []
+    seen: set[Path] = set()
+    for base in base_dirs or ():
+        try:
+            resolved = Path(base).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        try:
+            entries = list(resolved.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.endswith(_PUBLISH_TMP_SUFFIX) and entry.is_file():
+                try:
+                    entry.unlink()
+                    removed.append(entry)
+                except OSError as exc:
+                    logger.warning("[paths] Could not remove stale publish temp %s: %s", entry, exc)
+    return removed

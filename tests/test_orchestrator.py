@@ -190,6 +190,124 @@ class TestDownloadOrchestrator:
         assert cb.batch_done is True
 
 
+class _BlockingEngine:
+    """Engine whose download() blocks until released, so a test can inspect
+    orchestrator state exactly while a job is genuinely mid-flight -- the
+    FakeEngine above fires on_finished synchronously, which never leaves a
+    window to observe an ACTIVE (non-terminal) job at all."""
+
+    def __init__(self) -> None:
+        self._cancel_event = threading.Event()
+        self.release = threading.Event()
+        self.started = threading.Event()
+
+    def cancel_all(self) -> None:
+        self._cancel_event.set()
+        self.release.set()
+
+    def download(self, req: DownloadRequest) -> None:
+        self.started.set()
+        self.release.wait(timeout=5)
+        if self._cancel_event.is_set():
+            return
+        if req.on_finished:
+            req.on_finished(DownloadProgress(
+                status=DownloadStatus.FINISHED,
+                url=req.url,
+                output_path="/tmp/out.mp3",
+                fraction=1.0,
+            ))
+
+
+class TestLiveRequestSnapshot:
+    """core.download_orchestrator.DownloadOrchestrator.live_request_snapshot
+    / job_state — the race-free reads Global Pause needs (see the second
+    combined-PR review's finding #6): a job's terminal state and a
+    resume-ready copy of its live DownloadRequest, read atomically so an
+    outside caller can never see the request half-committed."""
+
+    def test_unknown_key_returns_none_none(self):
+        from core.download_orchestrator import DownloadOrchestrator
+
+        orch = DownloadOrchestrator(engine=FakeEngine(), callbacks=FakeCallbacks())
+        state, snapshot = orch.live_request_snapshot("nonexistent")
+        assert state is None
+        assert snapshot is None
+
+    def test_snapshot_is_available_while_active_and_gone_once_terminal(self):
+        from core.download_orchestrator import DownloadOrchestrator
+        from core.batch_progress import JobState, is_terminal_state
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+
+            state, snapshot = orch.live_request_snapshot(key)
+            assert not is_terminal_state(state)
+            assert snapshot is not None
+            assert snapshot.url == "http://a"
+            # A defensive copy, not the live object -- mutating it must
+            # never reach back into the orchestrator's own bookkeeping.
+            assert snapshot is not req
+
+            assert orch.job_state(key) == state
+        finally:
+            engine.release.set()
+            thread.join(timeout=5)
+
+        state, snapshot = orch.live_request_snapshot(key)
+        assert state == JobState.COMPLETED
+        assert snapshot is None, "a completed job must never be pause-snapshotted"
+
+    def test_snapshot_is_unsafe_while_lazy_url_resolve_is_in_flight(self):
+        """The exact race finding #6 described: url_resolver is consumed
+        (cleared) the instant resolution starts, and the resolved URL is
+        only committed once the resolver returns. A snapshot taken in that
+        window must not be handed out at all -- it would have neither a
+        resolver nor a real URL."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = FakeEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+
+        resolver_started = threading.Event()
+        release_resolver = threading.Event()
+
+        def slow_resolver(_cancel_ev):
+            resolver_started.set()
+            release_resolver.wait(timeout=5)
+            return "http://resolved"
+
+        key, req = _make_job("a", "placeholder")
+        req.url_resolver = slow_resolver
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert resolver_started.wait(timeout=5)
+
+            # Mid-resolve: url_resolver has already been cleared but the
+            # resolved URL has not been committed -- must report "no safe
+            # snapshot", not a request with a stale placeholder URL.
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is None
+        finally:
+            release_resolver.set()
+            thread.join(timeout=5)
+
+        # The resolved URL genuinely reached the engine once resolve
+        # completed -- proves the commit happened, not just that the
+        # snapshot correctly hid it while in flight.
+        assert engine._downloaded == ["http://resolved"]
+
+
 class TestPreexistingJobs:
     """Duplicate-skip jobs: no engine.download() call, terminal success,
     correctly folded into the batch total. Root-cause coverage for the

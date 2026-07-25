@@ -87,8 +87,55 @@ class TestWindowsHiddenAttribute:
         from utils.paths import _set_hidden_attribute
 
         missing = tmp_path / "does_not_exist"
-        result = _set_hidden_attribute(missing)
+        result = _set_hidden_attribute(missing, retry_delay_s=0.0)
         assert result is False
+
+    def test_transient_failure_then_success_is_reported_as_success(self, tmp_path, monkeypatch):
+        """A directory just created can transiently fail this call (e.g. an
+        antivirus/indexer briefly holding a handle) — a retry that then
+        succeeds must report True, not give up after one attempt."""
+        import utils.paths as paths_mod
+
+        d = tmp_path / "somedir"
+        d.mkdir()
+        calls = {"n": 0}
+
+        import ctypes as real_ctypes
+        original = real_ctypes.windll.kernel32.SetFileAttributesW
+
+        def _flaky(path, attrs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return 0  # FALSE — simulated transient failure
+            return original(path, attrs)
+
+        monkeypatch.setattr(
+            real_ctypes.windll.kernel32, "SetFileAttributesW", _flaky, raising=False,
+        )
+
+        result = paths_mod._set_hidden_attribute(d, attempts=3, retry_delay_s=0.0)
+        assert result is True
+        assert calls["n"] == 3
+
+    def test_persistent_failure_gives_up_after_all_attempts(self, tmp_path, monkeypatch):
+        import ctypes as real_ctypes
+
+        calls = {"n": 0}
+
+        def _always_fail(path, attrs):
+            calls["n"] += 1
+            return 0
+
+        monkeypatch.setattr(
+            real_ctypes.windll.kernel32, "SetFileAttributesW", _always_fail, raising=False,
+        )
+
+        import utils.paths as paths_mod
+        d = tmp_path / "somedir"
+        d.mkdir()
+        result = paths_mod._set_hidden_attribute(d, attempts=3, retry_delay_s=0.0)
+        assert result is False
+        assert calls["n"] == 3  # every attempt was actually tried, not just one
 
 
 def test_set_hidden_attribute_is_true_on_non_windows_by_convention():
@@ -147,6 +194,58 @@ def test_raises_only_when_no_location_is_writable(tmp_path, monkeypatch):
 
     with pytest.raises(OSError):
         make_batch_workspace(str(tmp_path))
+
+
+def test_falls_back_to_app_data_when_primary_location_cannot_be_hidden(tmp_path, monkeypatch):
+    """Genuinely hidden is a hard product requirement, not a cosmetic
+    nicety: a location that CAN hold a workspace but can't be made hidden
+    must be rejected in favour of the app-data fallback, exactly like a
+    location that can't even create the directory — never silently expose
+    the workspace just because the primary location happened to work."""
+    from utils import paths as paths_mod
+
+    app_data = tmp_path.parent / f"appdata-hide-{tmp_path.name}"
+    app_data.mkdir()
+    monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    primary_container = output_dir / ".bananaflow_tmp"
+
+    real_set_hidden = paths_mod._set_hidden_attribute
+
+    def _fail_only_under_primary(path, **kwargs):
+        if str(path).startswith(str(primary_container)):
+            return False
+        return real_set_hidden(path, **kwargs)
+
+    monkeypatch.setattr(paths_mod, "_set_hidden_attribute", _fail_only_under_primary)
+
+    workspace = make_batch_workspace(str(output_dir))
+
+    assert workspace.exists()
+    assert app_data.resolve() in workspace.resolve().parents
+    assert output_dir.resolve() not in workspace.resolve().parents
+    # The rejected primary attempt must not leave a visible partial behind.
+    assert not primary_container.exists() or not any(primary_container.iterdir())
+
+
+def test_raises_when_no_location_can_be_hidden(tmp_path, monkeypatch):
+    """If every candidate location creates fine but none can be hidden, this
+    must raise (so the caller fails the jobs) rather than falling through to
+    a visible workspace."""
+    from utils import paths as paths_mod
+
+    app_data = tmp_path.parent / f"appdata-hide2-{tmp_path.name}"
+    app_data.mkdir()
+    monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+    monkeypatch.setattr(paths_mod, "_set_hidden_attribute", lambda path, **kwargs: False)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    with pytest.raises(OSError):
+        make_batch_workspace(str(output_dir))
 
 
 # ── Filesystem-safe workspace removal (remove_workspace_tree) ────────────────
@@ -211,6 +310,27 @@ class TestRemoveWorkspaceTree:
         remove_workspace_tree(tmp_path)
         assert tmp_path.exists()
 
+    def test_traversal_path_cannot_escape_into_a_sibling_directory(self, tmp_path):
+        """A path whose lexical components include workspace-marker names
+        (.bananaflow_tmp, batch-x) -- so a naive name-only check would
+        wrongly accept it -- but which resolves via '..' segments to
+        somewhere OUTSIDE any BananaFlow workspace must never be touched."""
+        from utils.paths import remove_workspace_tree
+
+        precious = tmp_path / "precious_dir"
+        precious.mkdir()
+        (precious / "important.mp3").write_bytes(b"do not delete")
+
+        container = tmp_path / ".bananaflow_tmp" / "batch-x"
+        container.mkdir(parents=True)
+        traversal = container / ".." / ".." / "precious_dir"
+        assert traversal.resolve() == precious.resolve()
+
+        remove_workspace_tree(traversal)
+
+        assert precious.exists()
+        assert (precious / "important.mp3").exists()
+
 
 class TestIsWorkspacePath:
     def test_recognises_container_root(self, tmp_path):
@@ -227,6 +347,30 @@ class TestIsWorkspacePath:
         from utils.paths import is_workspace_path
         assert not is_workspace_path(tmp_path)
         assert not is_workspace_path(tmp_path / "Music" / "song.mp3")
+
+    def test_rejects_traversal_path_that_resolves_outside_the_workspace(self, tmp_path):
+        """The exact root cause finding #3 named: lexical component names
+        alone (.bananaflow_tmp, batch-x) must not be enough -- the path has
+        to actually RESOLVE inside a workspace, not just look like one
+        before its '..' segments are collapsed."""
+        from utils.paths import is_workspace_path
+
+        (tmp_path / ".bananaflow_tmp" / "batch-x").mkdir(parents=True)
+        (tmp_path / "precious_dir").mkdir()
+
+        traversal = tmp_path / ".bananaflow_tmp" / "batch-x" / ".." / ".." / "precious_dir"
+        assert not is_workspace_path(traversal)
+
+    def test_accepts_traversal_path_that_resolves_to_a_real_workspace_dir(self, tmp_path):
+        """The flip side: a path with redundant '..' segments that still
+        genuinely resolves INSIDE the workspace must keep working -- the
+        fix must resolve-then-check, not reject every non-canonical path."""
+        from utils.paths import is_workspace_path
+
+        (tmp_path / ".bananaflow_tmp" / "batch-x" / "job-1").mkdir(parents=True)
+
+        traversal = tmp_path / ".bananaflow_tmp" / "batch-x" / "job-1" / ".." / "job-1"
+        assert is_workspace_path(traversal)
 
 
 # ── Stale-workspace sweep (startup recovery) ─────────────────────────────────
