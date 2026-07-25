@@ -194,3 +194,55 @@ def test_raises_only_when_no_location_is_writable(tmp_path, monkeypatch):
 
     with pytest.raises(OSError):
         make_batch_workspace(str(tmp_path))
+
+
+def test_falls_back_to_app_data_when_primary_location_cannot_be_hidden(tmp_path, monkeypatch):
+    """Genuinely hidden is a hard product requirement, not a cosmetic
+    nicety: a location that CAN hold a workspace but can't be made hidden
+    must be rejected in favour of the app-data fallback, exactly like a
+    location that can't even create the directory — never silently expose
+    the workspace just because the primary location happened to work."""
+    from utils import paths as paths_mod
+
+    app_data = tmp_path.parent / f"appdata-hide-{tmp_path.name}"
+    app_data.mkdir()
+    monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    primary_container = output_dir / ".bananaflow_tmp"
+
+    real_set_hidden = paths_mod._set_hidden_attribute
+
+    def _fail_only_under_primary(path, **kwargs):
+        if str(path).startswith(str(primary_container)):
+            return False
+        return real_set_hidden(path, **kwargs)
+
+    monkeypatch.setattr(paths_mod, "_set_hidden_attribute", _fail_only_under_primary)
+
+    workspace = make_batch_workspace(str(output_dir))
+
+    assert workspace.exists()
+    assert app_data.resolve() in workspace.resolve().parents
+    assert output_dir.resolve() not in workspace.resolve().parents
+    # The rejected primary attempt must not leave a visible partial behind.
+    assert not primary_container.exists() or not any(primary_container.iterdir())
+
+
+def test_raises_when_no_location_can_be_hidden(tmp_path, monkeypatch):
+    """If every candidate location creates fine but none can be hidden, this
+    must raise (so the caller fails the jobs) rather than falling through to
+    a visible workspace."""
+    from utils import paths as paths_mod
+
+    app_data = tmp_path.parent / f"appdata-hide2-{tmp_path.name}"
+    app_data.mkdir()
+    monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+    monkeypatch.setattr(paths_mod, "_set_hidden_attribute", lambda path, **kwargs: False)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    with pytest.raises(OSError):
+        make_batch_workspace(str(output_dir))

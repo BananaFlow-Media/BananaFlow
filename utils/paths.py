@@ -273,18 +273,30 @@ def make_batch_workspace(base_output_dir: str) -> Path:
         try:
             workspace = container / name
             workspace.mkdir(parents=True, exist_ok=True)
-            # Hide the container (the boundary that keeps the whole subtree
-            # out of a normal Explorer window) and the batch dir itself.
-            _set_hidden_attribute(container)
-            _set_hidden_attribute(workspace)
-            return workspace
         except OSError as exc:
             last_exc = exc
             logger.warning(
                 "[paths] Could not create batch workspace under %s: %s", container, exc,
             )
-    # Both the same-volume and the app-data fallback failed — surface it so
-    # the orchestrator errors the jobs rather than writing visible partials.
+            continue
+        # Hide the container (the boundary that keeps the whole subtree out
+        # of a normal Explorer window) and the batch dir itself. Genuinely
+        # hidden is a product requirement, not a cosmetic nicety — a
+        # location that can't satisfy it is treated the same as one that
+        # can't even create the directory: try the next candidate instead
+        # of silently exposing the workspace.
+        container_hidden = _set_hidden_attribute(container)
+        workspace_hidden = _set_hidden_attribute(workspace)
+        if container_hidden and workspace_hidden:
+            return workspace
+        shutil.rmtree(workspace, ignore_errors=True)
+        last_exc = OSError(f"Could not apply the Hidden attribute under {container}")
+        logger.warning(
+            "[paths] Rejecting workspace location %s: could not be made hidden", container,
+        )
+    # Every candidate location either couldn't be created or couldn't be
+    # hidden — surface it so the orchestrator errors the jobs rather than
+    # writing partials into a workspace the user was promised is invisible.
     raise last_exc if last_exc is not None else OSError("no workspace location available")
 
 
