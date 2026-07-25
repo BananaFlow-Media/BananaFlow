@@ -227,3 +227,71 @@ class TestIsWorkspacePath:
         from utils.paths import is_workspace_path
         assert not is_workspace_path(tmp_path)
         assert not is_workspace_path(tmp_path / "Music" / "song.mp3")
+
+
+# ── Stale-workspace sweep (startup recovery) ─────────────────────────────────
+
+class TestSweepStaleWorkspaces:
+    def _mk(self, out, jobname="jobA"):
+        from utils.paths import make_batch_workspace
+        w = make_batch_workspace(str(out))
+        (w / jobname).mkdir()
+        (w / jobname / "x.part").write_bytes(b"p")
+        return w
+
+    def test_removes_abandoned_keeps_valid(self, tmp_path):
+        from utils.paths import sweep_stale_workspaces
+        out = tmp_path / "out"
+        out.mkdir()
+        valid = self._mk(out)
+        abandoned1 = self._mk(out)
+        abandoned2 = self._mk(out)
+
+        removed = sweep_stale_workspaces([str(out)], [str(valid / "jobA")])
+
+        assert valid.exists() and (valid / "jobA" / "x.part").exists()
+        assert not abandoned1.exists()
+        assert not abandoned2.exists()
+        assert set(removed) == {abandoned1, abandoned2}
+
+    def test_empty_keep_removes_everything(self, tmp_path):
+        from utils.paths import sweep_stale_workspaces
+        out = tmp_path / "out"
+        out.mkdir()
+        a = self._mk(out)
+        b = self._mk(out)
+        sweep_stale_workspaces([str(out)], [])
+        assert not a.exists() and not b.exists()
+
+    def test_keeps_all_containers_that_hold_a_valid_job(self, tmp_path):
+        """Keeping any subdir of a container keeps the whole container."""
+        from utils.paths import sweep_stale_workspaces
+        out = tmp_path / "out"
+        out.mkdir()
+        w = self._mk(out, "jobA")
+        (w / "jobB").mkdir()
+        (w / "jobB" / "y.part").write_bytes(b"p")
+
+        sweep_stale_workspaces([str(out)], [str(w / "jobA")])
+
+        assert w.exists()
+        assert (w / "jobB" / "y.part").exists(), "sibling in a kept container survives"
+
+    def test_never_touches_the_output_dir_or_user_files(self, tmp_path):
+        from utils.paths import sweep_stale_workspaces
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "user_song.mp3").write_bytes(b"keep me")
+        self._mk(out)
+
+        sweep_stale_workspaces([str(out)], [])
+
+        assert out.exists()
+        assert (out / "user_song.mp3").read_bytes() == b"keep me"
+
+    def test_no_workspaces_is_a_noop(self, tmp_path):
+        from utils.paths import sweep_stale_workspaces
+        out = tmp_path / "out"
+        out.mkdir()
+        removed = sweep_stale_workspaces([str(out)], [])
+        assert removed == []

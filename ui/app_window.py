@@ -311,6 +311,10 @@ class AppWindow(FluentWindow):
         self._setup_drag_drop()
 
         QTimer.singleShot(300,  self._start_background_workers)
+        # Reclaim abandoned download workspaces and restore paused jobs first,
+        # so a paused batch is back in the queue before the queue-state resume
+        # prompt and before the user can start anything new.
+        QTimer.singleShot(900,  self._restore_paused_batches)
         QTimer.singleShot(1200, self._check_auto_resume)
         # Offer review-first recovery if a previous run crashed mid-Apply.
         QTimer.singleShot(1500, self._check_tag_apply_recovery)
@@ -1554,6 +1558,30 @@ class AppWindow(FluentWindow):
                 lambda idx, data, c=card: self._set_card_thumb(c, data)
             )
             tw.start()
+
+        return card
+
+    def _restore_paused_batches(self) -> None:
+        """On startup, reclaim abandoned download workspaces and restore any
+        valid paused jobs so the user can Resume All where they left off.
+
+        Fully guarded — a persistence/filesystem hiccup here must never block
+        the app from starting. The sweep runs even when nothing is paused, so
+        stale workspaces from crashed or completed batches are reclaimed."""
+        try:
+            def _factory(card_dict):
+                card = self._add_track_to_queue(card_dict)
+                if card is not None:
+                    card.set_status("paused")
+                return card
+
+            restored = self._download_ctrl.restore_paused_on_startup(_factory)
+            if restored:
+                # Paused work is present — surface Resume All.
+                self._queue_panel.set_pause_resume_state(True)
+                self._status_bar.show_paused()
+        except Exception:
+            logger.exception("[AppWindow] Restoring paused batches failed")
 
     def _set_card_thumb(self, card: TrackCard, data: bytes) -> None:
         from PySide6.QtGui import QPixmap

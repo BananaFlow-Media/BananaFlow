@@ -119,6 +119,11 @@ class DownloadController(QObject):
         self._card_progress: dict = {}
         # key → DownloadRequest snapshot saved at pause time
         self._paused_requests: dict[str, DownloadRequest] = {}
+        # The single authoritative on-disk store of paused download state
+        # (replaces the old write-only config.paused_items). Persisted after
+        # every pause change; loaded on startup to survive a restart.
+        from core.paused_batch_store import PausedBatchStore
+        self._paused_store = PausedBatchStore()
                 
         self._fatal_error_triggered = False  # Track if a fatal dialog was already shown
         self._fatal_lock = threading.Lock()  # Synchronize fatal error reporting
@@ -613,6 +618,7 @@ class DownloadController(QObject):
             self._paused_requests[key] = self._snapshot_for_pause(req)
             if card is not None:
                 card.set_status("paused")
+        self._persist_paused_state()
         self._dl_worker.cancel()
 
     def cancel_all(self) -> None:
@@ -638,16 +644,99 @@ class DownloadController(QObject):
         if self._dl_worker:
             self._dl_worker.cancel_track(key)
         card.set_status("paused")
+        self._persist_paused_state()
 
-        paused = self._cfg.paused_items
-        paused.append({
-            "card_key": key,
-            "title":    card.title,
-            "artist":   card.artist,
-            "url":      card.track_url,
-        })
-        self._cfg.paused_items = paused
-        self._cfg.save()
+    # ── Paused-state persistence (single authoritative store) ─────────────────
+
+    @staticmethod
+    def _card_to_dict(card) -> dict:
+        """Display metadata needed to rebuild a paused card after restart —
+        the same shape AppWindow persists for the general queue."""
+        return {
+            "title":         getattr(card, "title", ""),
+            "artist":        getattr(card, "artist", ""),
+            "url":           getattr(card, "track_url", ""),
+            "duration_str":  getattr(card, "duration", ""),
+            "thumbnail_url": getattr(card, "thumbnail_url", ""),
+            "platform":      getattr(card, "platform", "youtube"),
+            "album":         getattr(card, "album", ""),
+            "parent_artist": getattr(card, "parent_artist", ""),
+            "release_type":  getattr(card, "release_type", ""),
+            "category":      getattr(card, "category", ""),
+            "album_index":   getattr(card, "album_index", 0),
+            "total_tracks":  getattr(card, "total_tracks", 0),
+        }
+
+    def _persist_paused_state(self) -> None:
+        """Write the current in-memory paused set to the authoritative store,
+        or clear the store when nothing is paused. Best-effort — a persistence
+        failure must never break pausing itself (the store swallows errors)."""
+        from core.download_request_codec import request_to_dict
+        from core.paused_batch_store import PausedJob
+
+        jobs = []
+        for key, req in self._paused_requests.items():
+            card = self._key_to_card.get(key)
+            jobs.append(PausedJob(
+                key=key,
+                request=request_to_dict(req),
+                card=self._card_to_dict(card) if card is not None else {},
+                workspace_dir=req.workspace_dir or "",
+            ))
+        if jobs:
+            self._paused_store.save(jobs)
+        else:
+            self._paused_store.clear()
+
+    def restore_paused_on_startup(self, card_factory) -> list:
+        """Startup entry point: sweep abandoned workspaces and restore the
+        valid persisted paused jobs.
+
+        The sweep removes every batch workspace under the output directory
+        that no valid paused job still needs — crashed runs and completed
+        batches whose cleanup didn't finish — while keeping the workspaces of
+        the jobs about to be restored. Runs even when there is nothing to
+        restore, so stale workspaces are always reclaimed. Returns the
+        restored cards (empty if none)."""
+        store_jobs = self._paused_store.load()
+        try:
+            from utils.paths import sweep_stale_workspaces
+            base = getattr(self._cfg, "output_dir", None)
+            base_dirs = [base] if base else []
+            removed = sweep_stale_workspaces(base_dirs, self._paused_store.workspace_dirs())
+            if removed:
+                logger.info("[DownloadController] Swept %d stale workspace(s)", len(removed))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DownloadController] Stale-workspace sweep failed: %s", exc)
+
+        if not store_jobs:
+            return []
+        return self.restore_paused_jobs(store_jobs, card_factory)
+
+    def restore_paused_jobs(self, store_jobs, card_factory) -> list:
+        """Rebuild the in-memory paused set from persisted records after a
+        restart. ``card_factory(card_dict) -> card`` creates and registers a
+        (paused) queue card; returns None to skip. A record whose workspace
+        no longer exists (swept as stale, or the user deleted it) is skipped
+        — there is nothing left to resume from. Returns the list of restored
+        cards so the caller can wire their pause/resume signals."""
+        from core.download_request_codec import request_from_dict
+
+        restored: list = []
+        for pj in store_jobs:
+            if pj.workspace_dir and not Path(pj.workspace_dir).exists():
+                continue
+            card = card_factory(pj.card)
+            if card is None:
+                continue
+            key = str(id(card))
+            self._paused_requests[key] = request_from_dict(pj.request)
+            self._key_to_card[key] = card
+            restored.append(card)
+        # Re-persist so the store reflects exactly what was restorable
+        # (drops records whose workspace had vanished).
+        self._persist_paused_state()
+        return restored
 
     def resume_track(self, card) -> None:
         """
@@ -662,9 +751,7 @@ class DownloadController(QObject):
             logger.warning("[DownloadController] No paused request for card %s", key)
             return
 
-        paused = [p for p in self._cfg.paused_items if p.get("card_key") != key]
-        self._cfg.paused_items = paused
-        self._cfg.save()
+        self._persist_paused_state()  # this key is no longer paused
 
         card.set_status("queued")
         card.set_progress(0.0)
@@ -718,18 +805,9 @@ class DownloadController(QObject):
                 card.set_progress(0.0)
             jobs.append((key, req))
 
-        # Drop any per-track paused_items persistence for the resumed keys
-        # (PR6 replaces this store; for now keep it consistent).
-        resumed_keys = set(self._paused_requests.keys())
-        remaining = [
-            p for p in self._cfg.paused_items if p.get("card_key") not in resumed_keys
-        ]
-        if len(remaining) != len(self._cfg.paused_items):
-            self._cfg.paused_items = remaining
-            self._cfg.save()
-
         self._paused_requests.clear()
         self._card_progress.clear()
+        self._persist_paused_state()  # everything resumed — store now empty
 
         # A resume is a fresh run for termination-intent purposes — clear any
         # lingering pause intent so a clean resume finishes as COMPLETED.
@@ -984,14 +1062,18 @@ class DownloadController(QObject):
         from utils.paths import remove_workspace_tree
 
         containers: set[Path] = set()
+        dropped = False
         for key, req in jobs:
-            self._paused_requests.pop(key, None)
+            if self._paused_requests.pop(key, None) is not None:
+                dropped = True
             if req.workspace_dir:
                 # req.workspace_dir is this job's per-job subdir
                 # (<container>/<job_key>); its parent is the batch container.
                 containers.add(Path(req.workspace_dir).parent)
         for container in containers:
             remove_workspace_tree(container)
+        if dropped:
+            self._persist_paused_state()  # cancelled work is no longer paused
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
