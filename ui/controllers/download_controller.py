@@ -311,18 +311,7 @@ class DownloadController(QObject):
                     "artist":           card.artist,
                     "duration_sec":     getattr(card, "duration_sec", None),
                 }
-                cookies = self._cfg.cookies_file or None
-
-                def _resolve(ev, _td=td, _cookies=cookies):
-                    from core.scraper import resolve_track_to_youtube
-                    from utils.url_cleaner import clean_youtube_url as _clean
-                    resolved = resolve_track_to_youtube(
-                        _td, cookies_file=_cookies,
-                        cancel_check=lambda: ev is not None and ev.is_set(),
-                    )
-                    return _clean(resolved)
-
-                req.url_resolver = _resolve
+                req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
 
             return req
 
@@ -579,6 +568,30 @@ class DownloadController(QObject):
                 self._termination_intent = intent
 
     @staticmethod
+    def _build_spotify_resolver(td: dict, cookies: Optional[str]):
+        """Build a lazy url_resolver closure for a Spotify two-stage match
+        from the minimal identity dict it needs (spotify_id,
+        spotify_key_kind, title, artist, duration_sec).
+
+        Shared by start_batch (building a fresh request from a live queue
+        card) and restore_paused_jobs (rebuilding an EQUIVALENT resolver
+        for a paused job that was never resolved before the app
+        restarted). The resolver itself is a live closure and cannot be
+        persisted, but everything it needs to rebuild an equivalent one
+        can be -- see core.download_request_codec's had_pending_resolver
+        flag and _card_to_dict's spotify_id/spotify_key_kind/duration_sec
+        fields."""
+        def _resolve(ev, _td=td, _cookies=cookies):
+            from core.scraper import resolve_track_to_youtube
+            from utils.url_cleaner import clean_youtube_url as _clean
+            resolved = resolve_track_to_youtube(
+                _td, cookies_file=_cookies,
+                cancel_check=lambda: ev is not None and ev.is_set(),
+            )
+            return _clean(resolved)
+        return _resolve
+
+    @staticmethod
     def _snapshot_for_pause(req: DownloadRequest) -> DownloadRequest:
         """A complete, standalone copy of a live request, prepared to resume.
 
@@ -684,21 +697,38 @@ class DownloadController(QObject):
 
     @staticmethod
     def _card_to_dict(card) -> dict:
-        """Display metadata needed to rebuild a paused card after restart —
-        the same shape AppWindow persists for the general queue."""
+        """Display metadata needed to rebuild a paused card after restart.
+
+        NOT the same key spelling as AppWindow._save_queue_state's general-
+        queue dict (which uses "url"/"duration_str" and is read back through
+        an intermediate object wrapper). This dict is instead passed
+        STRAIGHT to AppWindow._add_track_to_queue as `data`, which hits its
+        isinstance(data, dict) branch and reads "track_url"/"duration"
+        directly -- using the general-queue spelling here silently restored
+        every paused card with an empty URL and duration.
+
+        Also carries the Spotify two-stage identity fields
+        (spotify_id/spotify_key_kind/duration_sec/match_status) a pending
+        (unresolved) card needs -- restore_paused_jobs uses these to rebuild
+        an equivalent url_resolver, since the live resolver closure itself
+        cannot be persisted (see _build_spotify_resolver)."""
         return {
-            "title":         getattr(card, "title", ""),
-            "artist":        getattr(card, "artist", ""),
-            "url":           getattr(card, "track_url", ""),
-            "duration_str":  getattr(card, "duration", ""),
-            "thumbnail_url": getattr(card, "thumbnail_url", ""),
-            "platform":      getattr(card, "platform", "youtube"),
-            "album":         getattr(card, "album", ""),
-            "parent_artist": getattr(card, "parent_artist", ""),
-            "release_type":  getattr(card, "release_type", ""),
-            "category":      getattr(card, "category", ""),
-            "album_index":   getattr(card, "album_index", 0),
-            "total_tracks":  getattr(card, "total_tracks", 0),
+            "title":            getattr(card, "title", ""),
+            "artist":           getattr(card, "artist", ""),
+            "track_url":        getattr(card, "track_url", ""),
+            "duration":         getattr(card, "duration", ""),
+            "thumbnail_url":    getattr(card, "thumbnail_url", ""),
+            "platform":         getattr(card, "platform", "youtube"),
+            "album":            getattr(card, "album", ""),
+            "parent_artist":    getattr(card, "parent_artist", ""),
+            "release_type":     getattr(card, "release_type", ""),
+            "category":         getattr(card, "category", ""),
+            "album_index":      getattr(card, "album_index", 0),
+            "total_tracks":     getattr(card, "total_tracks", 0),
+            "duration_sec":     getattr(card, "duration_sec", None),
+            "spotify_id":       getattr(card, "spotify_id", ""),
+            "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
+            "match_status":     getattr(card, "match_status", "matched"),
         }
 
     def _persist_paused_state(self) -> None:
@@ -715,7 +745,6 @@ class DownloadController(QObject):
                 key=key,
                 request=request_to_dict(req),
                 card=self._card_to_dict(card) if card is not None else {},
-                workspace_dir=req.workspace_dir or "",
             ))
         if jobs:
             self._paused_store.save(jobs)
@@ -735,11 +764,39 @@ class DownloadController(QObject):
         store_jobs = self._paused_store.load()
         try:
             from utils.paths import sweep_stale_workspaces
-            base = getattr(self._cfg, "output_dir", None)
-            base_dirs = [base] if base else []
-            removed = sweep_stale_workspaces(base_dirs, self._paused_store.workspace_dirs())
-            if removed:
-                logger.info("[DownloadController] Swept %d stale workspace(s)", len(removed))
+            keep = self._paused_store.workspace_dirs_or_none()
+            if keep is None:
+                # The persisted file exists but failed to parse -- its
+                # keep-set is unknowable, NOT empty. Sweeping against an
+                # empty set here would delete every still-resumable
+                # workspace just because we couldn't read the record that
+                # was protecting it (see finding #4).
+                logger.warning(
+                    "[DownloadController] Paused-state file is corrupt — "
+                    "skipping the stale-workspace sweep this run rather "
+                    "than risk deleting resumable work"
+                )
+            else:
+                # Every output dir a currently-loaded paused job actually
+                # points at, PLUS the current config's output dir. Sweeping
+                # only the current config's output dir would miss stale
+                # workspaces left behind under a PREVIOUS output directory
+                # once the user changes the configured destination -- both
+                # a still-valid paused job's own workspace there (which the
+                # keep-set already protects) and any sibling abandoned
+                # workspace from a crashed/incomplete batch in that same
+                # old directory (which nothing else will ever sweep).
+                base_dirs: list[str] = []
+                current = getattr(self._cfg, "output_dir", None)
+                if current:
+                    base_dirs.append(current)
+                for pj in store_jobs:
+                    job_output_dir = pj.request.get("output_dir")
+                    if job_output_dir and job_output_dir not in base_dirs:
+                        base_dirs.append(job_output_dir)
+                removed = sweep_stale_workspaces(base_dirs, keep)
+                if removed:
+                    logger.info("[DownloadController] Swept %d stale workspace(s)", len(removed))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DownloadController] Stale-workspace sweep failed: %s", exc)
 
@@ -764,7 +821,23 @@ class DownloadController(QObject):
             if card is None:
                 continue
             key = str(id(card))
-            self._paused_requests[key] = request_from_dict(pj.request)
+            req = request_from_dict(pj.request)
+            # A job paused before its Spotify two-stage match ever ran has
+            # no resolved URL AND (per request_to_dict) no persisted
+            # resolver -- a live closure can't be serialised. Rebuild an
+            # EQUIVALENT one from the identity fields _card_to_dict saved,
+            # so it re-matches to YouTube instead of trying to download a
+            # placeholder URL.
+            if pj.request.get("had_pending_resolver") and pj.card.get("spotify_id"):
+                td = {
+                    "spotify_id":       pj.card.get("spotify_id", ""),
+                    "spotify_key_kind": pj.card.get("spotify_key_kind", "spotify_id"),
+                    "title":            pj.card.get("title", ""),
+                    "artist":           pj.card.get("artist", ""),
+                    "duration_sec":     pj.card.get("duration_sec"),
+                }
+                req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
+            self._paused_requests[key] = req
             self._key_to_card[key] = card
             restored.append(card)
         # Re-persist so the store reflects exactly what was restorable
@@ -784,8 +857,6 @@ class DownloadController(QObject):
         if req is None:
             logger.warning("[DownloadController] No paused request for card %s", key)
             return
-
-        self._persist_paused_state()  # this key is no longer paused
 
         card.set_status("queued")
         card.set_progress(0.0)
@@ -824,6 +895,13 @@ class DownloadController(QObject):
             )
         )
         resume_worker.start()
+        # Only clear this key's on-disk record once the worker has actually
+        # started -- clearing it BEFORE start() would leave a crash window
+        # where a kill between "persisted state says this key is no longer
+        # paused" and "the resume actually began running" strands the
+        # abandoned workspace with a keep-set that no longer protects it at
+        # the next startup's stale-workspace sweep.
+        self._persist_paused_state()
 
     def resume_all(self) -> None:
         """Continue a globally-paused batch: re-submit every snapshotted
@@ -852,7 +930,6 @@ class DownloadController(QObject):
 
         self._paused_requests.clear()
         self._card_progress.clear()
-        self._persist_paused_state()  # everything resumed — store now empty
 
         # A resume is a fresh run for termination-intent purposes — clear any
         # lingering pause intent so a clean resume finishes as COMPLETED.
@@ -870,6 +947,11 @@ class DownloadController(QObject):
 
         self._dl_worker = self._build_batch_worker(jobs, preexisting_jobs=[])
         self._dl_worker.start()
+        # Only clear the on-disk record once the worker has actually started
+        # -- see the equivalent comment in resume_track for why clearing it
+        # any earlier would leave a crash window where resumable work
+        # becomes unprotected stale data.
+        self._persist_paused_state()
 
         self.batch_started.emit()
 

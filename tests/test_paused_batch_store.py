@@ -76,6 +76,19 @@ class TestRequestCodec:
         assert r.media_type == MediaType.AUDIO
         assert r.platform is None
 
+    def test_records_had_pending_resolver_flag(self):
+        """Finding #5: a job paused before its Spotify two-stage match ever
+        ran carries a live url_resolver closure, which cannot be persisted
+        -- but the caller still needs to know it was there, so it knows to
+        rebuild an equivalent one on restore instead of trying to download
+        req.url literally (still just a placeholder in this state)."""
+        pending = DownloadRequest(url="placeholder", output_dir="/out", media_type=MediaType.AUDIO)
+        pending.url_resolver = lambda ev: "https://resolved"
+        assert request_to_dict(pending)["had_pending_resolver"] is True
+
+        resolved = DownloadRequest(url="https://resolved", output_dir="/out", media_type=MediaType.AUDIO)
+        assert request_to_dict(resolved)["had_pending_resolver"] is False
+
 
 # ── Store ────────────────────────────────────────────────────────────────────
 
@@ -84,7 +97,6 @@ def _job(key="a", ws="/ws/batch-1/keyA"):
         key=key,
         request={"url": f"http://{key}", "output_dir": "/out", "workspace_dir": ws},
         card={"title": key.upper()},
-        workspace_dir=ws,
     )
 
 
@@ -148,3 +160,66 @@ class TestPausedBatchStore:
         ]), encoding="utf-8")
         jobs = PausedBatchStore(p).load()
         assert len(jobs) == 1
+
+    def test_workspace_dirs_or_none_is_empty_list_for_missing_file(self, tmp_path):
+        """Genuinely nothing paused -- safe for the sweep to treat as an
+        empty keep-set."""
+        store = PausedBatchStore(tmp_path / "nope" / "paused.json")
+        assert store.workspace_dirs_or_none() == []
+
+    def test_workspace_dirs_or_none_is_empty_list_for_valid_empty_batch(self, tmp_path):
+        store = PausedBatchStore(tmp_path / "paused.json")
+        store.save([])
+        assert store.workspace_dirs_or_none() == []
+
+    def test_workspace_dirs_or_none_returns_the_keep_set_normally(self, tmp_path):
+        store = PausedBatchStore(tmp_path / "paused.json")
+        store.save([_job("a"), _job("b", "/ws/batch-1/keyB")])
+        assert set(store.workspace_dirs_or_none()) == {"/ws/batch-1/keyA", "/ws/batch-1/keyB"}
+
+    def test_workspace_dirs_or_none_is_none_for_corrupt_file(self, tmp_path):
+        """Finding #4: a corrupt file means the keep-set is UNKNOWABLE, not
+        empty -- the startup sweep must be able to tell the two apart, or
+        it will delete every still-resumable workspace on disk just
+        because the one record protecting them failed to parse."""
+        p = tmp_path / "paused.json"
+        p.write_text("{ not valid json ", encoding="utf-8")
+        assert PausedBatchStore(p).workspace_dirs_or_none() is None
+        # load() itself keeps its simpler "corrupt == empty" contract for
+        # ordinary (non-destructive) callers.
+        assert PausedBatchStore(p).load() == []
+
+    def test_workspace_dirs_or_none_is_none_for_wrong_shaped_payload(self, tmp_path):
+        p = tmp_path / "paused.json"
+        p.write_text(json.dumps({"jobs": "not-a-list"}), encoding="utf-8")
+        assert PausedBatchStore(p).workspace_dirs_or_none() is None
+
+
+class TestPausedJobWorkspaceDir:
+    def test_derived_from_the_nested_request_field(self):
+        """Finding #8: workspace_dir must come from exactly one place."""
+        job = PausedJob(
+            key="a",
+            request={"url": "u", "output_dir": "o", "workspace_dir": "/ws/batch-1/a"},
+            card={},
+        )
+        assert job.workspace_dir == "/ws/batch-1/a"
+
+    def test_ignores_a_stale_top_level_copy_from_an_older_file_format(self):
+        """An older persisted file may still have a top-level "workspace_dir"
+        key (the format this fix retires) alongside the nested one -- if
+        the two ever disagree, the nested one (the one the request is
+        actually rebuilt from) must always win, never the leftover
+        top-level copy nothing reconstructs the request from."""
+        job = PausedJob.from_dict({
+            "key": "a",
+            "request": {"url": "u", "workspace_dir": "/ws/batch-1/real"},
+            "card": {},
+            "workspace_dir": "/ws/batch-1/stale-and-wrong",
+        })
+        assert job is not None
+        assert job.workspace_dir == "/ws/batch-1/real"
+
+    def test_missing_workspace_dir_is_empty_string(self):
+        job = PausedJob(key="a", request={"url": "u"}, card={})
+        assert job.workspace_dir == ""

@@ -50,14 +50,29 @@ class PausedJob:
     key: str
     request: dict[str, Any]
     card: dict[str, Any] = field(default_factory=dict)
-    workspace_dir: str = ""
+
+    @property
+    def workspace_dir(self) -> str:
+        """The job's private workspace subdir — always read from
+        ``request``, the single source of truth.
+
+        An earlier version stored this as a SECOND, independent copy
+        alongside the one nested in ``request`` (both set from the same
+        ``req.workspace_dir`` at save time, but nothing enforced that they
+        stayed in sync). Restore validated the top-level copy but
+        reconstructed the actual DownloadRequest from the nested one — a
+        hand-edited or version-skewed file where the two diverged could
+        pass validation against a workspace the resumed job would then
+        never actually use, or the reverse. Deriving it, always, from the
+        one place the request itself will be rebuilt from removes the
+        possibility of divergence entirely."""
+        return str(self.request.get("workspace_dir", "") or "")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "request": self.request,
             "card": self.card,
-            "workspace_dir": self.workspace_dir,
         }
 
     @classmethod
@@ -73,7 +88,6 @@ class PausedJob:
             key=str(d.get("key", "")),
             request=request,
             card=d.get("card") if isinstance(d.get("card"), dict) else {},
-            workspace_dir=str(d.get("workspace_dir", "") or request.get("workspace_dir", "") or ""),
         )
 
 
@@ -92,29 +106,47 @@ class PausedBatchStore:
 
     def load(self) -> list[PausedJob]:
         """Return the persisted paused jobs, or [] for a missing / empty /
-        malformed / partially-written file. Never raises."""
+        malformed / partially-written file. Never raises.
+
+        Callers that need to tell "genuinely nothing paused" apart from
+        "couldn't read this" — the startup stale-workspace sweep, notably —
+        must use :meth:`workspace_dirs_or_none` instead; this method
+        deliberately collapses both cases to keep its own contract simple
+        for ordinary pause/resume callers, who only ever want "what's
+        currently resumable" and treat a corrupt file the same as none."""
+        jobs, _corrupt = self._load_with_status()
+        return jobs
+
+    def _load_with_status(self) -> tuple[list[PausedJob], bool]:
+        """Like :meth:`load`, but also reports whether the file existed
+        with content and failed to parse — as opposed to being missing or
+        genuinely empty, both of which mean "nothing was ever paused"."""
         try:
             raw = self._path.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError):
-            return []
+            return [], False
         if not raw.strip():
-            return []
+            return [], False
         try:
             payload = json.loads(raw)
         except (ValueError, TypeError) as exc:
             logger.warning("[PausedBatchStore] Ignoring corrupt resume file %s: %s", self._path, exc)
-            return []
+            return [], True
 
         records = payload.get("jobs") if isinstance(payload, dict) else payload
         if not isinstance(records, list):
-            return []
+            logger.warning(
+                "[PausedBatchStore] Resume file %s has an unexpected shape "
+                "(no jobs list)", self._path,
+            )
+            return [], True
 
         jobs: list[PausedJob] = []
         for rec in records:
             job = PausedJob.from_dict(rec)
             if job is not None:
                 jobs.append(job)
-        return jobs
+        return jobs, False
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -153,5 +185,27 @@ class PausedBatchStore:
 
     def workspace_dirs(self) -> list[str]:
         """The workspace paths of every currently-persisted paused job — the
-        'keep' set for the startup stale-workspace sweep."""
+        'keep' set for the startup stale-workspace sweep.
+
+        Collapses a corrupt file to the same empty list as "nothing
+        paused" — safe for callers that only display/act on the paused
+        set itself, but NOT safe for a destructive sweep. Use
+        :meth:`workspace_dirs_or_none` there instead."""
         return [j.workspace_dir for j in self.load() if j.workspace_dir]
+
+    def workspace_dirs_or_none(self) -> Optional[list[str]]:
+        """The stale-workspace sweep's 'keep' set, or None when the
+        persisted state could not be read at all (a corrupt/malformed
+        file).
+
+        A corrupt file means the true keep-set is UNKNOWN, not empty — a
+        sweep that treated "couldn't read this" the same as "nothing is
+        paused" would delete every existing, potentially still-resumable
+        workspace on disk just because the one record protecting them
+        failed to parse. Callers doing anything destructive with the
+        result (a filesystem sweep) must check for None and skip entirely
+        rather than pass an empty list forward."""
+        jobs, corrupt = self._load_with_status()
+        if corrupt:
+            return None
+        return [j.workspace_dir for j in jobs if j.workspace_dir]

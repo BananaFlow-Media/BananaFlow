@@ -50,14 +50,35 @@ class _FakeCard:
         pass
 
 
+class _FakeOrchestrator:
+    """Exposes just enough of DownloadOrchestrator.live_request_snapshot()
+    for global_pause(): treats every job passed to _FakeLiveWorker as live
+    and immediately resumable."""
+
+    def __init__(self, jobs) -> None:
+        self._jobs = dict(jobs)
+
+    def live_request_snapshot(self, key: str):
+        import dataclasses
+
+        req = self._jobs.get(key)
+        if req is None:
+            return None, None
+        return None, dataclasses.replace(req)
+
+
 class _FakeLiveWorker:
     def __init__(self, jobs):
         self._jobs = jobs
+        self._orch = _FakeOrchestrator(jobs)
 
     def isRunning(self):
         return True
 
     def cancel(self):
+        pass
+
+    def cancel_track(self, key: str) -> None:
         pass
 
 
@@ -183,7 +204,6 @@ def test_restart_skips_jobs_whose_workspace_vanished(tmp_path, monkeypatch, app)
     ctrl._paused_store.save([PausedJob(
         key="gone", card={"title": "Gone"},
         request={"url": "u", "output_dir": str(out), "workspace_dir": str(out / ".bananaflow_tmp" / "batch-missing" / "k")},
-        workspace_dir=str(out / ".bananaflow_tmp" / "batch-missing" / "k"),
     )])
 
     restored = ctrl.restore_paused_on_startup(lambda cd: _FakeCard(cd.get("title", "?")))
@@ -207,6 +227,179 @@ def test_startup_sweep_reclaims_abandoned_workspace(tmp_path, monkeypatch, app):
     ctrl.restore_paused_on_startup(lambda cd: None)
 
     assert not abandoned.exists(), "an abandoned workspace must be swept on startup"
+
+
+def test_corrupt_paused_file_skips_the_sweep_entirely(tmp_path, monkeypatch, app):
+    """Finding #4: a corrupt paused-state file must not be treated as an
+    empty (nothing-paused) one -- that would sweep with an empty keep-set
+    and delete every existing, potentially still-resumable workspace."""
+    from utils.paths import make_batch_workspace
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    out = tmp_path / "out"
+    out.mkdir()
+    ctrl._cfg.output_dir = str(out)
+
+    survivor = make_batch_workspace(str(out))
+    (survivor / "keyA").mkdir()
+    (survivor / "keyA" / "song.part").write_bytes(b"partial")
+
+    ctrl._paused_store.path.parent.mkdir(parents=True, exist_ok=True)
+    ctrl._paused_store.path.write_text("{ not valid json ", encoding="utf-8")
+
+    restored = ctrl.restore_paused_on_startup(lambda cd: _FakeCard(cd.get("title", "?")))
+
+    assert restored == []
+    assert survivor.exists(), "sweep must be skipped entirely, not run with an empty keep-set"
+    assert (survivor / "keyA" / "song.part").exists()
+
+
+def test_sweep_covers_previous_output_dir_from_paused_job(tmp_path, monkeypatch, app):
+    """Finding #16: the sweep must also cover output dirs referenced by
+    currently-loaded paused jobs, not just the current config -- otherwise
+    changing the destination folder strands stale workspaces under the OLD
+    one forever."""
+    from utils.paths import make_batch_workspace
+    from core.paused_batch_store import PausedJob
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    old_out = tmp_path / "old_out"
+    new_out = tmp_path / "new_out"
+    old_out.mkdir()
+    new_out.mkdir()
+    ctrl._cfg.output_dir = str(new_out)  # destination changed since the pause
+
+    kept = make_batch_workspace(str(old_out))
+    (kept / "keyA").mkdir()
+    (kept / "keyA" / "song.part").write_bytes(b"partial")
+
+    abandoned = make_batch_workspace(str(old_out))  # crashed sibling batch, same old dir
+    (abandoned / "junk").mkdir()
+
+    ctrl._paused_store.save([PausedJob(
+        key="a", card={"title": "A"},
+        request={"url": "u", "output_dir": str(old_out), "workspace_dir": str(kept / "keyA")},
+    )])
+
+    ctrl.restore_paused_on_startup(lambda cd: _FakeCard(cd.get("title", "?")))
+
+    assert (kept / "keyA" / "song.part").exists(), "the still-paused job's own workspace survives"
+    assert not abandoned.exists(), "an abandoned sibling under the OLD output dir must still be swept"
+
+
+def test_card_dict_uses_track_url_and_duration_keys_and_carries_spotify_metadata(
+    tmp_path, monkeypatch, app,
+):
+    """Finding #13: AppWindow._add_track_to_queue reads "track_url"/
+    "duration" (not "url"/"duration_str") when handed a plain dict, which
+    is exactly what restore_paused_on_startup passes it -- the mismatched
+    spelling silently restored every paused card with an empty URL and
+    duration. Also must carry the Spotify two-stage identity fields a
+    pending card needs to rebuild its resolver."""
+    ctrl = _controller(tmp_path, monkeypatch, app)
+
+    class _SpotifyCard(_FakeCard):
+        def __init__(self):
+            super().__init__("Track")
+            self.spotify_id = "abc123"
+            self.spotify_key_kind = "spotify_id"
+            self.duration_sec = 200
+            self.match_status = "pending"
+
+    card_dict = ctrl._card_to_dict(_SpotifyCard())
+
+    assert card_dict["track_url"] == "https://youtu.be/Track"
+    assert card_dict["duration"] == "3:00"
+    assert "url" not in card_dict
+    assert "duration_str" not in card_dict
+    assert card_dict["spotify_id"] == "abc123"
+    assert card_dict["spotify_key_kind"] == "spotify_id"
+    assert card_dict["duration_sec"] == 200
+    assert card_dict["match_status"] == "pending"
+
+
+def test_restore_rebuilds_spotify_resolver_for_pending_job(tmp_path, monkeypatch, app):
+    """Finding #5: a job paused before its Spotify two-stage match ever ran
+    has no resolved URL and (per had_pending_resolver) no persisted
+    resolver -- the live closure can't survive a restart. Restore must
+    rebuild an EQUIVALENT one from the persisted identity fields, not leave
+    the job with neither a resolver nor a usable URL."""
+    from core.paused_batch_store import PausedJob
+    import core.scraper as scraper_mod
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    out = tmp_path / "out"
+    out.mkdir()
+    ctrl._cfg.output_dir = str(out)
+
+    ctrl._paused_store.save([PausedJob(
+        key="a",
+        card={
+            "title": "Track", "spotify_id": "abc123",
+            "spotify_key_kind": "spotify_id", "duration_sec": 200,
+            "match_status": "pending",
+        },
+        request={
+            "url": "pending-spotify-match", "output_dir": str(out),
+            "had_pending_resolver": True,
+        },
+    )])
+
+    restored = ctrl.restore_paused_on_startup(lambda cd: _FakeCard(cd.get("title", "?")))
+
+    assert len(restored) == 1
+    key = str(id(restored[0]))
+    req = ctrl._paused_requests[key]
+    assert req.url_resolver is not None
+
+    monkeypatch.setattr(
+        scraper_mod, "resolve_track_to_youtube",
+        lambda td, cookies_file=None, cancel_check=None: "https://youtube.com/watch?v=matched",
+    )
+    resolved = req.url_resolver(None)
+    assert "matched" in resolved
+
+
+def test_resume_track_persists_only_after_the_worker_starts(tmp_path, monkeypatch, app):
+    """Finding #14: clearing the on-disk record BEFORE the worker actually
+    starts leaves a crash window where a kill between the two makes
+    resumable work look like nothing was ever paused -- the next startup's
+    sweep would then have no keep-set entry protecting its workspace."""
+    import ui.workers.download_worker as dw_mod
+
+    call_order = []
+
+    class _OrderedFakeWorker:
+        all_finished = type("S", (), {"connect": lambda *a, **k: None})()
+
+        def __init__(self, *a, **k):
+            for n in ("track_progress", "track_speed", "track_status",
+                      "track_finished", "job_error", "all_finished", "track_thumbnail"):
+                setattr(self, n, type("S", (), {"connect": lambda *a, **k: None})())
+
+        def start(self):
+            call_order.append("start")
+
+    monkeypatch.setattr(dw_mod, "DownloadWorker", _OrderedFakeWorker)
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    card = _FakeCard("A", status="paused")
+    k = str(id(card))
+    ctrl._key_to_card = {k: card}
+    ctrl._paused_requests = {k: _req("A", "/ws/batch-1/keyA")}
+
+    real_persist = ctrl._persist_paused_state
+    def _tracked_persist():
+        call_order.append("persist")
+        real_persist()
+    monkeypatch.setattr(ctrl, "_persist_paused_state", _tracked_persist)
+
+    ctrl.resume_track(card)
+
+    assert call_order == ["start", "persist"], (
+        "the on-disk record must only be cleared AFTER the worker has "
+        "actually started, never before"
+    )
 
 
 def test_queue_state_save_excludes_paused_cards(tmp_path, monkeypatch, app):

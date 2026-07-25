@@ -48,12 +48,24 @@ def request_to_dict(req: DownloadRequest) -> dict[str, Any]:
     """Serialise the resumable subset of a DownloadRequest to a JSON-safe
     dict. Live/transient fields (cancel_event, callbacks, url_resolver, the
     output-path trackers) are deliberately excluded — a restored request
-    resumes from its .part file and re-acquires them fresh."""
+    resumes from its .part file and re-acquires them fresh.
+
+    ``had_pending_resolver`` records whether ``req.url_resolver`` was still
+    set (a Spotify two-stage match that never ran before this request was
+    paused/persisted) — the resolver itself is a live closure and cannot be
+    serialised, but the caller needs to know whether ``url`` here is a real,
+    downloadable URL or still just a placeholder waiting on that match, so
+    it knows to rebuild an equivalent resolver on restore (see
+    ui.controllers.download_controller._build_spotify_resolver). A job can
+    only ever reach this function fully resolved OR never-started — never
+    mid-resolve — since DownloadOrchestrator.live_request_snapshot refuses
+    to hand out a snapshot while a resolve is actually in flight."""
     data: dict[str, Any] = {name: getattr(req, name) for name in _PLAIN_FIELDS}
     data["media_type"] = req.media_type.value
     data["audio_quality"] = req.audio_quality.value
     data["video_quality"] = req.video_quality.value
     data["platform"] = req.platform.value if isinstance(req.platform, SourcePlatform) else None
+    data["had_pending_resolver"] = req.url_resolver is not None
     # A restored job always continues from its partial download.
     data["resumable"] = True
     return data
