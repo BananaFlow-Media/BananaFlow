@@ -190,38 +190,141 @@ def get_ffprobe_executable() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
-# Every directory name that marks the BananaFlow batch-workspace boundary.
-# The same-volume container is ``.bananaflow_tmp`` (nested in the user's
-# output dir); the app-data fallback container is ``download_workspaces``.
-# Filesystem-cleanup safety keys off these names so a removal can never
-# escape the BananaFlow-owned tree into the user's own files.
-_WORKSPACE_ROOT_NAMES = frozenset({_WORKSPACE_CONTAINER_NAME, "download_workspaces"})
+# The app-data fallback container, used when the same-volume container under
+# the user's output directory cannot be created or hidden.
+_APPDATA_CONTAINER_NAME = "download_workspaces"
+
+# Persisted list of output directories BananaFlow has actually created a batch
+# workspace under. This is what later makes workspace ownership *provable*:
+# a directory is BananaFlow-owned because it is contained in a container we
+# created under a root we recorded — not because its name happens to look
+# like one of ours. It is also the only way to rediscover a workspace left
+# under an output directory the user has since changed away from.
+#
+# Bounded, oldest-first: a user who keeps changing their output directory
+# cannot grow the file without limit.
+_OUTPUT_ROOTS_FILENAME = "known_output_roots.json"
+_MAX_KNOWN_OUTPUT_ROOTS = 64
+
+
+def _known_output_roots_path() -> Path:
+    return get_app_data_dir() / _OUTPUT_ROOTS_FILENAME
+
+
+def known_output_roots() -> list[Path]:
+    """Every output directory BananaFlow has recorded a batch workspace
+    under, oldest first. Never raises — a missing or corrupt file yields an
+    empty list, which is the safe answer for both of its consumers (own
+    nothing / discover nothing) rather than a startup failure."""
+    import json
+
+    try:
+        raw = _known_output_roots_path().read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "[paths] Ignoring corrupt known-output-roots file %s",
+            _known_output_roots_path(),
+        )
+        return []
+    if not isinstance(data, list):
+        return []
+    return [Path(item) for item in data if isinstance(item, str) and item.strip()]
+
+
+def register_output_root(path) -> None:
+    """Record ``path`` as an output directory BananaFlow owns a workspace
+    container under.
+
+    Idempotent and best-effort: a write failure is logged, never raised —
+    losing the record costs a later cleanup sweep, never the correctness of
+    the download itself. Written atomically so a crash mid-write cannot
+    leave a half file that would read back as corrupt."""
+    import json
+    import tempfile
+
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return
+    entries = [str(p) for p in known_output_roots()]
+    if str(resolved) in entries:
+        return
+    entries.append(str(resolved))
+    if len(entries) > _MAX_KNOWN_OUTPUT_ROOTS:
+        entries = entries[-_MAX_KNOWN_OUTPUT_ROOTS:]
+
+    target = _known_output_roots_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(entries, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(target))
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    except OSError as exc:
+        logger.warning("[paths] Could not record output root %s: %s", resolved, exc)
+
+
+# ── Workspace ownership (the authority behind every workspace deletion) ──────
+
+def _owned_workspace_containers() -> list[Path]:
+    """Every workspace container BananaFlow actually owns right now: the
+    fixed app-data fallback container, plus ``<root>/.bananaflow_tmp`` for
+    each recorded output root (see register_output_root). Canonicalised, so
+    the containment checks below compare real filesystem locations."""
+    candidates = [get_app_data_dir() / _APPDATA_CONTAINER_NAME]
+    for root in known_output_roots():
+        candidates.append(root / _WORKSPACE_CONTAINER_NAME)
+    containers: list[Path] = []
+    for candidate in candidates:
+        try:
+            containers.append(candidate.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return containers
 
 
 def _is_workspace_path_resolved(resolved: Path) -> bool:
-    """Lexical name check on an ALREADY-CANONICALISED path. Never call this
+    """Containment check on an ALREADY-CANONICALISED path. Never call this
     directly with an un-resolved path — see is_workspace_path."""
-    if resolved.name.startswith("batch-") or resolved.name in _WORKSPACE_ROOT_NAMES:
-        return True
-    return any(p.name in _WORKSPACE_ROOT_NAMES for p in resolved.parents)
+    for container in _owned_workspace_containers():
+        if resolved == container or container in resolved.parents:
+            return True
+    return False
 
 
 def is_workspace_path(path: Path) -> bool:
     """Whether ``path`` is inside (or is) a BananaFlow batch-workspace tree.
 
-    True when the path is a container root (``.bananaflow_tmp`` /
-    ``download_workspaces``), a ``batch-*`` directory, or anything nested
-    under such a root. This is the single authority that keeps workspace
-    cleanup from ever touching the user's output directory (whose name is
-    arbitrary and never matches).
+    Ownership is proven by CONTAINMENT under a container BananaFlow
+    actually created — ``<recorded output root>/.bananaflow_tmp`` or the
+    app-data ``download_workspaces`` — not by directory name. The earlier
+    rule accepted any path whose own name started with ``batch-``, or any
+    path with a component named ``.bananaflow_tmp`` /
+    ``download_workspaces`` anywhere above it. Those are ordinary names a
+    user's own library can contain: a folder called ``batch-2019``, or
+    anything nested under a folder someone happened to call
+    ``download_workspaces``, would have been handed straight to a recursive
+    delete by the cancellation and stale-sweep cleanups. Being contained in
+    a container we recorded creating is a fact about this installation, not
+    a guess from a string.
 
     Resolves the path FIRST (collapsing ``..``/``.`` segments and symlinks)
-    before checking names — a purely lexical check on the path as given
-    would accept a crafted or traversal-style path (e.g.
-    ``.../.bananaflow_tmp/batch-x/../../../etc``) whose component names
-    happen to include a workspace marker even though the path it actually
-    resolves to on disk lands outside any BananaFlow workspace. A path that
-    cannot be resolved is treated as NOT a workspace path — fail closed."""
+    before checking containment — a lexical check on the path as given
+    would accept a traversal-style path (e.g.
+    ``.../.bananaflow_tmp/batch-x/../../../etc``) that actually lands
+    outside any BananaFlow workspace. A path that cannot be resolved is
+    treated as NOT a workspace path — fail closed."""
     try:
         resolved = Path(path).resolve()
     except (OSError, RuntimeError):
@@ -231,11 +334,15 @@ def is_workspace_path(path: Path) -> bool:
 
 def _prune_empty_workspace_parents(node: Path) -> None:
     """rmdir empty BananaFlow-owned parent directories, stopping at the first
-    non-empty or non-owned level. Never reaches the user's output directory,
-    whose name is not workspace-owned; rmdir also refuses any level a
-    concurrent batch still occupies."""
-    node = Path(node)
-    while node.name.startswith("batch-") or node.name in _WORKSPACE_ROOT_NAMES:
+    non-empty or non-owned level. Stops at the workspace container, so it can
+    never reach the user's output directory (which is not contained in any
+    container); rmdir also refuses any level a concurrent batch still
+    occupies."""
+    try:
+        node = Path(node).resolve()
+    except (OSError, RuntimeError):
+        return
+    while _is_workspace_path_resolved(node):
         try:
             node.rmdir()
         except OSError:
@@ -249,10 +356,10 @@ def remove_workspace_tree(path: Path) -> None:
 
     Resolves ``path`` once and uses that SAME canonical path for both the
     ownership check and the actual removal — see is_workspace_path for why
-    a lexical-only check (or checking one path while deleting a different,
+    a name-based check (or checking one path while deleting a different,
     un-resolved one) is not safe. Refuses to remove anything that does not
-    resolve inside a BananaFlow workspace container, so a cleanup sweep can
-    never escape into — and delete — the user's output directory. Never
+    resolve inside a container BananaFlow recorded creating, so a cleanup
+    sweep can never escape into — and delete — the user's own files. Never
     raises: a cleanup failure must not turn an otherwise-fine batch into an
     error."""
     try:
@@ -263,7 +370,7 @@ def remove_workspace_tree(path: Path) -> None:
     if not _is_workspace_path_resolved(resolved):
         logger.warning(
             "[paths] refusing to remove %s (resolved: %s) — not inside a "
-            "BananaFlow workspace", path, resolved,
+            "BananaFlow-owned workspace container", path, resolved,
         )
         return
     try:
@@ -276,14 +383,22 @@ def remove_workspace_tree(path: Path) -> None:
 
 def iter_batch_workspaces(base_dirs) -> list[Path]:
     """Enumerate every ``batch-*`` workspace directory that currently exists
-    under the workspace containers of the given base directories, plus the
-    app-data fallback container. ``base_dirs`` is any iterable of output-dir
-    paths. Missing containers are simply skipped; never raises."""
+    under a BananaFlow workspace container. ``base_dirs`` is any iterable of
+    output-dir paths; EVERY recorded output root is searched as well, plus
+    the app-data fallback container. Missing containers are simply skipped;
+    never raises.
+
+    Including the recorded roots is what makes an abandoned workspace under
+    an output directory the user has since changed away from findable at
+    all. Searching only the caller's list meant such a directory could only
+    be reached while some currently-persisted paused job still pointed at
+    it — once that job was resumed or dropped, the workspace became
+    permanently invisible to cleanup and stayed on disk forever."""
     roots: list[Path] = []
     seen: set[Path] = set()
-    for base in list(base_dirs) + [None]:
+    for base in list(base_dirs) + list(known_output_roots()) + [None]:
         if base is None:
-            container = get_app_data_dir() / "download_workspaces"
+            container = get_app_data_dir() / _APPDATA_CONTAINER_NAME
         else:
             try:
                 container = _workspace_container(Path(base).expanduser().resolve())
@@ -342,7 +457,9 @@ def sweep_stale_workspaces(base_dirs, keep_workspace_dirs) -> list[Path]:
     return removed
 
 
-def _set_hidden_attribute(path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15) -> bool:
+def _set_hidden_attribute(
+    path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15, hidden: bool = True,
+) -> bool:
     """Apply the Windows Hidden file attribute so the batch workspace never
     shows up in a normal Explorer/dir listing.
 
@@ -358,16 +475,25 @@ def _set_hidden_attribute(path: Path, *, attempts: int = 3, retry_delay_s: float
     the caller stays functional either way (hiding is cosmetic; an
     un-hidden workspace still works and is still cleaned up), but a real,
     persistent failure is never silently reported as success.
+
+    ``hidden=False`` clears the attribute instead. The cross-volume publish
+    needs that: its staging temp is hidden from the moment it is created
+    (so a partial copy is never visible), and the attribute has to come off
+    again just before the temp is renamed into place — os.replace carries
+    the source's attributes with it, so a still-hidden temp would publish
+    the user's finished file as a hidden file.
     """
     if os.name != "nt":
         return True
     import ctypes
     FILE_ATTRIBUTE_HIDDEN = 0x02
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    target_attrs = FILE_ATTRIBUTE_HIDDEN if hidden else FILE_ATTRIBUTE_NORMAL
     last_err = None
     for attempt in range(attempts):
         try:
             ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
-                str(path), FILE_ATTRIBUTE_HIDDEN
+                str(path), target_attrs
             )
             if ok:
                 return True
@@ -377,9 +503,9 @@ def _set_hidden_attribute(path: Path, *, attempts: int = 3, retry_delay_s: float
         if attempt < attempts - 1:
             time.sleep(retry_delay_s)
     logger.warning(
-        "[paths] Could not set Hidden attribute on %s after %d attempt(s) "
+        "[paths] Could not %s Hidden attribute on %s after %d attempt(s) "
         "(%s); workspace will be visible but still functional",
-        path, attempts, last_err,
+        "set" if hidden else "clear", path, attempts, last_err,
     )
     return False
 
@@ -413,13 +539,19 @@ def make_batch_workspace(base_output_dir: str) -> Path:
     import uuid
 
     name = f"batch-{uuid.uuid4().hex[:12]}"
+    try:
+        same_volume_root: Optional[Path] = Path(base_output_dir).expanduser().resolve()
+    except (OSError, RuntimeError):
+        same_volume_root = None
     candidates = [
-        _workspace_container(Path(base_output_dir).expanduser().resolve()),
-        get_app_data_dir() / "download_workspaces",
+        _workspace_container(same_volume_root) if same_volume_root is not None else None,
+        get_app_data_dir() / _APPDATA_CONTAINER_NAME,
     ]
 
     last_exc: Optional[OSError] = None
     for container in candidates:
+        if container is None:
+            continue
         try:
             workspace = container / name
             workspace.mkdir(parents=True, exist_ok=True)
@@ -438,6 +570,13 @@ def make_batch_workspace(base_output_dir: str) -> Path:
         container_hidden = _set_hidden_attribute(container)
         workspace_hidden = _set_hidden_attribute(workspace)
         if container_hidden and workspace_hidden:
+            # Record the root we actually placed a container under, so later
+            # cleanup can PROVE this tree is ours (containment under a
+            # recorded container) and can still find it after the user
+            # changes their configured output directory. The app-data
+            # fallback container needs no record — its location is fixed.
+            if same_volume_root is not None and container.parent == same_volume_root:
+                register_output_root(same_volume_root)
             return workspace
         shutil.rmtree(workspace, ignore_errors=True)
         last_exc = OSError(f"Could not apply the Hidden attribute under {container}")
@@ -461,10 +600,12 @@ def sweep_stale_publish_temp_files(base_dirs) -> list[Path]:
     output directories — the residue of a crash between the copy and the
     final rename in DownloadEngine._atomic_place (same-volume publishes
     never create one; they're a pure rename). ``base_dirs`` is any iterable
-    of output-dir paths. Never raises; returns the paths removed."""
+    of output-dir paths; every recorded output root is swept as well, so a
+    temp stranded under a directory the user has since changed away from is
+    still reclaimed. Never raises; returns the paths removed."""
     removed: list[Path] = []
     seen: set[Path] = set()
-    for base in base_dirs or ():
+    for base in list(base_dirs or ()) + known_output_roots():
         try:
             resolved = Path(base).expanduser().resolve()
         except (OSError, RuntimeError):

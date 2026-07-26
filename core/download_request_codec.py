@@ -41,6 +41,15 @@ _PLAIN_FIELDS = (
     "square_thumbnails", "expand_thumbnails",
     "clean_filename", "is_solo",
     "youtube_reliability_mode", "stream_type", "category",
+    # Post-download resume checkpoint (core.downloader.DownloadRequest).
+    # A job paused during post-processing or publishing has already
+    # finished downloading; without these the restored request re-runs
+    # yt-dlp against an already-complete file, no postprocessor hook fires,
+    # and the resume dies with "output file is missing". The referenced
+    # file lives in the persisted workspace_dir, so it survives the restart
+    # alongside it -- and DownloadEngine re-validates that it still exists
+    # before honouring the checkpoint.
+    "resume_phase", "resume_final_path",
 )
 
 

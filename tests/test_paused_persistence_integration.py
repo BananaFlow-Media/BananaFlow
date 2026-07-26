@@ -287,6 +287,203 @@ def test_sweep_covers_previous_output_dir_from_paused_job(tmp_path, monkeypatch,
     assert not abandoned.exists(), "an abandoned sibling under the OLD output dir must still be swept"
 
 
+def test_one_malformed_record_skips_the_sweep_entirely(tmp_path, monkeypatch, app):
+    """A syntactically valid file with ONE unreadable record is not a
+    readable file. The bad record used to be dropped silently, so the
+    keep-set was missing its workspace and the sweep deleted work that was
+    very likely still resumable -- the exact outcome the corrupt-file check
+    exists to prevent, reached by the one path that bypassed it."""
+    import json
+
+    from utils.paths import make_batch_workspace
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    out = tmp_path / "out"
+    out.mkdir()
+    ctrl._cfg.output_dir = str(out)
+
+    survivor = make_batch_workspace(str(out))
+    (survivor / "jobA").mkdir()
+    (survivor / "jobA" / "song.part").write_bytes(b"partial")
+
+    ctrl._paused_store.path.parent.mkdir(parents=True, exist_ok=True)
+    ctrl._paused_store.path.write_text(json.dumps({"jobs": [
+        {"request": {"url": "u", "output_dir": str(out),
+                     "workspace_dir": str(survivor / "jobA")}},
+        {"request": "not-a-dict"},   # the record that used to vanish silently
+    ]}), encoding="utf-8")
+
+    ctrl.restore_paused_on_startup(lambda cd: None)
+
+    assert (survivor / "jobA" / "song.part").exists(), (
+        "an incomplete keep-set must disable the sweep, not sweep against it"
+    )
+
+
+def test_sweep_finds_a_workspace_under_a_forgotten_output_dir(tmp_path, monkeypatch, app):
+    """The gap the recorded output roots close: an abandoned workspace under
+    an output directory the user has changed away from, with NO persisted
+    paused job left pointing at it. Nothing in the paused state names that
+    directory any more, so it used to be undiscoverable and stayed on disk
+    forever."""
+    from utils.paths import make_batch_workspace
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    old_out = tmp_path / "old_out"
+    new_out = tmp_path / "new_out"
+    old_out.mkdir()
+    new_out.mkdir()
+
+    stranded = make_batch_workspace(str(old_out))   # records old_out as a root
+    (stranded / "junk").mkdir()
+
+    ctrl._cfg.output_dir = str(new_out)             # the user moved on
+    assert ctrl._paused_store.load() == []          # nothing references old_out
+
+    ctrl.restore_paused_on_startup(lambda cd: None)
+
+    assert not stranded.exists(), (
+        "a workspace under a previously-used output dir must still be swept"
+    )
+
+
+def test_startup_sweep_removes_stale_cross_volume_publish_temps(tmp_path, monkeypatch, app):
+    """A crash between the cross-volume staging copy and the final rename
+    leaves a hidden temp next to the destination. Nothing else ever removes
+    it, so the startup sweep must."""
+    from core.downloader import DownloadEngine
+    from utils.paths import make_batch_workspace
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    out = tmp_path / "out"
+    out.mkdir()
+    ctrl._cfg.output_dir = str(out)
+    make_batch_workspace(str(out))   # record `out` as a known root
+
+    stale = out / f".song.mp3.abc{DownloadEngine.PUBLISH_TMP_SUFFIX}"
+    stale.write_bytes(b"half a copy")
+    keeper = out / "song.mp3"
+    keeper.write_bytes(b"a real published file")
+
+    ctrl.restore_paused_on_startup(lambda cd: None)
+
+    assert not stale.exists()
+    assert keeper.read_bytes() == b"a real published file"
+
+
+def test_resume_waits_for_the_worker_to_take_ownership_before_clearing_state(
+    tmp_path, monkeypatch, app,
+):
+    """QThread.start() only guarantees the thread was SCHEDULED. Dropping
+    the "these jobs are paused" record on the strength of start() alone
+    leaves a window where a crash loses the jobs outright: the record that
+    protected their workspaces is gone and the worker never took over."""
+    import ui.workers.download_worker as dw_mod
+
+    calls: list[str] = []
+
+    class _SlowStartWorker:
+        def __init__(self, *a, **k):
+            for n in ("track_progress", "track_speed", "track_status",
+                      "track_finished", "track_preexisting", "overall_progress",
+                      "metrics", "batch_snapshot", "job_count_changed", "job_error",
+                      "all_finished", "track_thumbnail"):
+                setattr(self, n, type("S", (), {"connect": lambda *a, **k: None})())
+            self._jobs = list(a[0]) if a else list(k.get("jobs", []))
+
+        def start(self):
+            calls.append("start")
+
+        def wait_until_running(self, timeout_ms=5000):
+            calls.append("wait")
+            return True
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(dw_mod, "DownloadWorker", _SlowStartWorker)
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    card = _FakeCard("A", status="paused")
+    k = str(id(card))
+    ctrl._key_to_card = {k: card}
+    ctrl._paused_requests = {k: _req("A", "/ws/batch-1/jobA")}
+    ctrl._persist_paused_state()
+
+    ctrl._dl_worker = None
+    ctrl.resume_all()
+
+    assert calls == ["start", "wait"], (
+        "the persisted record must only be released after the worker reports "
+        "it has entered its run lifecycle"
+    )
+    assert ctrl._paused_store.load() == []
+
+
+def test_persisted_record_is_kept_when_the_worker_never_starts(tmp_path, monkeypatch, app):
+    """The conservative half: a worker that does not report started keeps
+    its record. A stale paused entry is harmless (it is rewritten from live
+    state on the next pause, and its workspace stays protected meanwhile);
+    dropping it prematurely is not."""
+    import ui.workers.download_worker as dw_mod
+
+    class _NeverStartsWorker:
+        def __init__(self, *a, **k):
+            for n in ("track_progress", "track_speed", "track_status",
+                      "track_finished", "track_preexisting", "overall_progress",
+                      "metrics", "batch_snapshot", "job_count_changed", "job_error",
+                      "all_finished", "track_thumbnail"):
+                setattr(self, n, type("S", (), {"connect": lambda *a, **k: None})())
+            self._jobs = list(a[0]) if a else list(k.get("jobs", []))
+
+        def start(self):
+            pass
+
+        def wait_until_running(self, timeout_ms=5000):
+            return False
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(dw_mod, "DownloadWorker", _NeverStartsWorker)
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    card = _FakeCard("A", status="paused")
+    k = str(id(card))
+    ctrl._key_to_card = {k: card}
+    ctrl._paused_requests = {k: _req("A", "/ws/batch-1/jobA")}
+    ctrl._persist_paused_state()
+
+    ctrl._dl_worker = None
+    ctrl.resume_all()
+
+    persisted = ctrl._paused_store.load()
+    assert len(persisted) == 1, (
+        "the paused record must survive a worker that never took ownership"
+    )
+    assert persisted[0].workspace_dir == "/ws/batch-1/jobA"
+
+
+def test_real_worker_reports_when_it_has_entered_run(tmp_path, monkeypatch, app):
+    """The mechanism itself, against the real DownloadWorker: the flag is
+    unset before start() and set once run() has genuinely begun."""
+    from config import AppConfig
+    from core.downloader import DownloadEngine
+    from ui.workers.download_worker import DownloadWorker
+
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    worker = DownloadWorker(
+        jobs=[], engine=DownloadEngine(), config=AppConfig(), max_workers=1,
+    )
+    assert worker.wait_until_running(timeout_ms=1) is False
+
+    worker.start()
+    try:
+        assert worker.wait_until_running(timeout_ms=5000) is True
+    finally:
+        worker.wait(5000)
+
+
 def test_card_dict_uses_track_url_and_duration_keys_and_carries_spotify_metadata(
     tmp_path, monkeypatch, app,
 ):

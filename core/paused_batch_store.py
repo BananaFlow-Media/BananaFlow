@@ -118,9 +118,18 @@ class PausedBatchStore:
         return jobs
 
     def _load_with_status(self) -> tuple[list[PausedJob], bool]:
-        """Like :meth:`load`, but also reports whether the file existed
-        with content and failed to parse — as opposed to being missing or
-        genuinely empty, both of which mean "nothing was ever paused"."""
+        """Like :meth:`load`, but also reports whether the persisted state
+        could not be read IN FULL — as opposed to being missing or genuinely
+        empty, both of which mean "nothing was ever paused".
+
+        "In full" is the operative word, and it is why an unreadable
+        individual RECORD counts as corrupt just as much as unparseable
+        JSON. A syntactically valid file with one malformed record used to
+        be reported as perfectly readable: the bad record was silently
+        dropped, the caller got a keep-set missing that job's workspace, and
+        the startup sweep deleted a workspace that was very likely still
+        resumable — the single worst outcome the corrupt-file check exists
+        to prevent, reached through the one path that bypassed it."""
         try:
             raw = self._path.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError):
@@ -142,11 +151,21 @@ class PausedBatchStore:
             return [], True
 
         jobs: list[PausedJob] = []
+        unreadable = 0
         for rec in records:
             job = PausedJob.from_dict(rec)
-            if job is not None:
-                jobs.append(job)
-        return jobs, False
+            if job is None:
+                unreadable += 1
+                continue
+            jobs.append(job)
+        if unreadable:
+            logger.warning(
+                "[PausedBatchStore] %d unreadable record(s) in %s — treating "
+                "the paused state as corrupt so nothing destructive runs "
+                "against a keep-set that is missing entries",
+                unreadable, self._path,
+            )
+        return jobs, bool(unreadable)
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -195,16 +214,18 @@ class PausedBatchStore:
 
     def workspace_dirs_or_none(self) -> Optional[list[str]]:
         """The stale-workspace sweep's 'keep' set, or None when the
-        persisted state could not be read at all (a corrupt/malformed
-        file).
+        persisted state could not be read IN FULL — unparseable JSON, an
+        unexpected shape, or even a single unreadable record inside an
+        otherwise valid file.
 
-        A corrupt file means the true keep-set is UNKNOWN, not empty — a
-        sweep that treated "couldn't read this" the same as "nothing is
-        paused" would delete every existing, potentially still-resumable
-        workspace on disk just because the one record protecting them
-        failed to parse. Callers doing anything destructive with the
-        result (a filesystem sweep) must check for None and skip entirely
-        rather than pass an empty list forward."""
+        Any of those means the true keep-set is UNKNOWN, not empty — and a
+        PARTIAL keep-set is just as dangerous as an empty one, because the
+        entries it is missing are exactly the workspaces that then get
+        swept. A sweep that treated "couldn't read all of this" the same as
+        "nothing is paused" would delete still-resumable work because the
+        record protecting it failed to parse. Callers doing anything
+        destructive with the result must check for None and skip entirely
+        rather than pass an incomplete list forward."""
         jobs, corrupt = self._load_with_status()
         if corrupt:
             return None

@@ -602,7 +602,13 @@ class DownloadController(QObject):
         crop behaviour. ``resumable=True`` makes yt-dlp pick up the .part
         file; the per-run transients (cancel_event, callbacks) are cleared
         so the next orchestrator owns them cleanly, and the init=False
-        output-path trackers reset to their defaults automatically."""
+        output-path trackers reset to their defaults automatically.
+
+        ``resume_phase`` / ``resume_final_path`` are ordinary fields and
+        deliberately DO survive: they are how a track paused during
+        post-processing or publishing resumes at that phase instead of
+        re-running yt-dlp against an already-complete file (which finds
+        nothing to do, fires no postprocessor hook, and fails)."""
         import dataclasses
         return dataclasses.replace(
             req,
@@ -611,32 +617,56 @@ class DownloadController(QObject):
             on_progress=None,
             on_finished=None,
             on_error=None,
+            publish_gate=None,
         )
 
-    def _pause_and_snapshot(self, key: str) -> Optional[DownloadRequest]:
-        """Cancel job ``key`` and, if it was still safely resumable at that
-        instant, return a resume-ready snapshot of it — else None (already
-        terminal, or caught mid-resolve with no safe snapshot to take).
+    def _worker_for_key(self, key: str):
+        """The running worker that currently owns job ``key`` — the main
+        batch worker, or the single-job worker a per-track resume started.
 
-        Cancels FIRST, then reads state + a defensive copy of the live
-        request atomically (DownloadOrchestrator.live_request_snapshot), so
-        a job that is still genuinely in-flight cannot go on to complete
-        for real after being captured as paused (see DownloadEngine's own
-        cancellation checkpoints), and so a job caught exactly between its
-        Spotify two-stage url_resolver being consumed and its resolved URL
-        being committed is never snapshotted half-committed. Reading the
-        UI card's status label instead of this would leave both windows
-        open — the card is only updated once a Qt-queued signal from the
-        worker thread is dispatched, one tick behind the orchestrator's own
-        bookkeeping.
+        Pause used to address only the batch worker, so a track that had
+        already been resumed once (and is therefore running in its own
+        resume worker) could not be paused again: the lookup found nothing,
+        no snapshot was taken and no cancel was delivered, so the card was
+        labelled "paused" while the download carried on to completion.
         """
-        if self._dl_worker is None:
+        for worker in [self._dl_worker, *self._resume_workers]:
+            if worker is None:
+                continue
+            for job_key, _req in getattr(worker, "_jobs", []) or []:
+                if job_key == key:
+                    return worker
+        return None
+
+    def _pause_and_snapshot(self, key: str) -> Optional[DownloadRequest]:
+        """Claim job ``key`` for a pause and, if it was still safely
+        resumable at that instant, return a resume-ready snapshot of it —
+        else None (already terminal, or its own thread claimed it first).
+
+        CLAIMS first, cancels second (DownloadOrchestrator.
+        live_request_snapshot takes the job's own lock, reads its state and
+        hands back a defensive copy as one atomic step). The claim — not the
+        cancel — is what makes this safe: from that instant the job's pool
+        thread cannot take it terminal, and the engine's publish gate will
+        refuse to make its file visible, so a job captured as paused can
+        never also complete for real. Cancelling first (the earlier order)
+        left the opposite race open: the cancel could be observed and the
+        job marked CANCELLED before the snapshot was taken, and the track
+        was then dropped from the paused set entirely.
+
+        Reading the UI card's status label instead of this would leave both
+        windows open — the card is only updated once a Qt-queued signal from
+        the worker thread is dispatched, one tick behind the orchestrator's
+        own bookkeeping.
+        """
+        worker = self._worker_for_key(key)
+        if worker is None:
             return None
-        self._dl_worker.cancel_track(key)
-        orch = self._dl_worker._orch  # noqa: SLF001
+        orch = worker._orch  # noqa: SLF001
         _state, live_req = orch.live_request_snapshot(key)
         if live_req is None:
             return None
+        worker.cancel_track(key)
         # Full-fidelity snapshot (every field, incl. workspace_dir) so the
         # resumed track continues from its .part file with all its
         # metadata/artwork behaviour intact.
@@ -657,22 +687,33 @@ class DownloadController(QObject):
         (done/preexisting, errored, or already cancelled) are deliberately
         NOT captured, so they are never re-run on the next Resume All. A job
         caught with nothing safe to snapshot (see _pause_and_snapshot) is
-        cancelled outright rather than resumed from unsafe state."""
+        cancelled outright rather than resumed from unsafe state.
+
+        Covers every running worker, not just the main batch one: a track
+        the user already resumed individually is running in its own
+        single-job worker, and Global Pause must stop and capture that one
+        too rather than leave it downloading."""
         self._set_termination_intent(BatchOutcome.PAUSED_BY_USER)
-        if not (self._dl_worker and self._dl_worker.isRunning()):
+        workers = [
+            w for w in [self._dl_worker, *self._resume_workers]
+            if w is not None and w.isRunning()
+        ]
+        if not workers:
             return
-        for key, _req in list(self._dl_worker._jobs):  # noqa: SLF001
-            card = self._key_to_card.get(key)
-            if card is not None and card.get_status() in _TERMINAL_CARD_STATUSES:
-                continue  # already done/errored/cancelled — never resume it
-            snapshot = self._pause_and_snapshot(key)
-            if snapshot is None:
-                continue
-            self._paused_requests[key] = snapshot
-            if card is not None:
-                card.set_status("paused")
+        for worker in workers:
+            for key, _req in list(getattr(worker, "_jobs", []) or []):
+                card = self._key_to_card.get(key)
+                if card is not None and card.get_status() in _TERMINAL_CARD_STATUSES:
+                    continue  # already done/errored/cancelled — never resume it
+                snapshot = self._pause_and_snapshot(key)
+                if snapshot is None:
+                    continue
+                self._paused_requests[key] = snapshot
+                if card is not None:
+                    card.set_status("paused")
         self._persist_paused_state()
-        self._dl_worker.cancel()
+        for worker in workers:
+            worker.cancel()
 
     def cancel_all(self) -> None:
         """Cancel the engine (all in-flight yt-dlp downloads) and the worker."""
@@ -766,26 +807,25 @@ class DownloadController(QObject):
             from utils.paths import sweep_stale_workspaces
             keep = self._paused_store.workspace_dirs_or_none()
             if keep is None:
-                # The persisted file exists but failed to parse -- its
-                # keep-set is unknowable, NOT empty. Sweeping against an
-                # empty set here would delete every still-resumable
-                # workspace just because we couldn't read the record that
-                # was protecting it (see finding #4).
+                # The persisted state could not be read in full -- bad JSON,
+                # an unexpected shape, or even one unreadable record. Its
+                # keep-set is unknowable, NOT empty, and a PARTIAL keep-set
+                # is just as dangerous as an empty one: the entries missing
+                # from it are precisely the workspaces that would be swept.
+                # Skip the sweep rather than delete resumable work.
                 logger.warning(
-                    "[DownloadController] Paused-state file is corrupt — "
-                    "skipping the stale-workspace sweep this run rather "
-                    "than risk deleting resumable work"
+                    "[DownloadController] Paused-state file could not be read "
+                    "in full — skipping the stale-workspace sweep this run "
+                    "rather than risk deleting resumable work"
                 )
             else:
                 # Every output dir a currently-loaded paused job actually
-                # points at, PLUS the current config's output dir. Sweeping
-                # only the current config's output dir would miss stale
-                # workspaces left behind under a PREVIOUS output directory
-                # once the user changes the configured destination -- both
-                # a still-valid paused job's own workspace there (which the
-                # keep-set already protects) and any sibling abandoned
-                # workspace from a crashed/incomplete batch in that same
-                # old directory (which nothing else will ever sweep).
+                # points at, PLUS the current config's output dir.
+                # sweep_stale_workspaces additionally searches every RECORDED
+                # output root (utils.paths.known_output_roots), which is what
+                # finds an abandoned workspace under a directory the user has
+                # since changed away from — nothing here still references
+                # such a path once its paused job is gone.
                 base_dirs: list[str] = []
                 current = getattr(self._cfg, "output_dir", None)
                 if current:
@@ -797,6 +837,16 @@ class DownloadController(QObject):
                 removed = sweep_stale_workspaces(base_dirs, keep)
                 if removed:
                     logger.info("[DownloadController] Swept %d stale workspace(s)", len(removed))
+                # Cross-volume publish temps stranded by a crash between the
+                # staging copy and the final rename. Same discovery rule, and
+                # nothing else ever removes them.
+                from utils.paths import sweep_stale_publish_temp_files
+                temps = sweep_stale_publish_temp_files(base_dirs)
+                if temps:
+                    logger.info(
+                        "[DownloadController] Removed %d stale publish temp file(s)",
+                        len(temps),
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DownloadController] Stale-workspace sweep failed: %s", exc)
 
@@ -895,13 +945,7 @@ class DownloadController(QObject):
             )
         )
         resume_worker.start()
-        # Only clear this key's on-disk record once the worker has actually
-        # started -- clearing it BEFORE start() would leave a crash window
-        # where a kill between "persisted state says this key is no longer
-        # paused" and "the resume actually began running" strands the
-        # abandoned workspace with a keep-set that no longer protects it at
-        # the next startup's stale-workspace sweep.
-        self._persist_paused_state()
+        self._release_paused_record(resume_worker)
 
     def resume_all(self) -> None:
         """Continue a globally-paused batch: re-submit every snapshotted
@@ -947,13 +991,41 @@ class DownloadController(QObject):
 
         self._dl_worker = self._build_batch_worker(jobs, preexisting_jobs=[])
         self._dl_worker.start()
-        # Only clear the on-disk record once the worker has actually started
-        # -- see the equivalent comment in resume_track for why clearing it
-        # any earlier would leave a crash window where resumable work
-        # becomes unprotected stale data.
-        self._persist_paused_state()
+        self._release_paused_record(self._dl_worker)
 
         self.batch_started.emit()
+
+    def _release_paused_record(self, worker) -> None:
+        """Drop the on-disk paused record for the jobs ``worker`` has just
+        taken over — but only once it has genuinely entered its run
+        lifecycle.
+
+        QThread.start() only guarantees the thread was SCHEDULED; run() may
+        not have executed a line yet. Rewriting the persisted state on the
+        strength of start() alone leaves a real window in which a crash or a
+        kill loses the jobs outright: the record that said "these are
+        paused, keep their workspaces" is already gone, and the worker that
+        was supposed to assume ownership never did — so the next startup
+        sweeps those workspaces as abandoned. Waiting for the worker to
+        actually enter run() means the record only disappears once something
+        is running that can re-create it.
+
+        A worker that does not report started within the timeout keeps its
+        record: an extra, stale paused entry is harmless (it is re-persisted
+        from live state on the next pause, and its workspace is protected
+        meanwhile), whereas dropping it prematurely is not."""
+        try:
+            started = worker.wait_until_running(timeout_ms=3000)
+        except Exception:  # noqa: BLE001 — a fake/stub worker in tests
+            started = True
+        if not started:
+            logger.warning(
+                "[DownloadController] Resume worker did not report started — "
+                "keeping the persisted paused record so its workspace stays "
+                "protected"
+            )
+            return
+        self._persist_paused_state()
 
     # ── Private slots (wired to DownloadWorker signals) ───────────────────────
 
@@ -1238,10 +1310,12 @@ class DownloadController(QObject):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _active_request_for_key(self, key: str) -> Optional[DownloadRequest]:
-        """Retrieve the live DownloadRequest for a card key from the active worker."""
-        if self._dl_worker is None:
+        """Retrieve the live DownloadRequest for a card key from whichever
+        worker owns it — the batch worker or a per-track resume worker."""
+        worker = self._worker_for_key(key)
+        if worker is None:
             return None
-        for card_key, req in self._dl_worker._jobs:  # noqa: SLF001
+        for card_key, req in getattr(worker, "_jobs", []) or []:
             if card_key == key:
                 return req
         return None

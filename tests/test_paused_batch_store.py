@@ -89,6 +89,30 @@ class TestRequestCodec:
         resolved = DownloadRequest(url="https://resolved", output_dir="/out", media_type=MediaType.AUDIO)
         assert request_to_dict(resolved)["had_pending_resolver"] is False
 
+    def test_post_download_resume_checkpoint_survives_a_restart(self):
+        """A job paused during post-processing has already downloaded every
+        byte. Without the phase and the workspace file identity, the restored
+        request re-runs yt-dlp against an already-complete file, no
+        postprocessor hook fires, and the resume dies with "output file is
+        missing"."""
+        req = DownloadRequest(
+            url="https://x", output_dir="/out", media_type=MediaType.AUDIO,
+            workspace_dir="/ws/batch-1/jobA",
+        )
+        req.resume_phase = "postprocess"
+        req.resume_final_path = "/ws/batch-1/jobA/Song.mp3"
+
+        rebuilt = request_from_dict(request_to_dict(req))
+
+        assert rebuilt.resume_phase == "postprocess"
+        assert rebuilt.resume_final_path == "/ws/batch-1/jobA/Song.mp3"
+
+    def test_a_request_with_no_checkpoint_round_trips_as_none(self):
+        req = DownloadRequest(url="https://x", output_dir="/out", media_type=MediaType.AUDIO)
+        rebuilt = request_from_dict(request_to_dict(req))
+        assert rebuilt.resume_phase is None
+        assert rebuilt.resume_final_path is None
+
 
 # ── Store ────────────────────────────────────────────────────────────────────
 
@@ -124,6 +148,11 @@ class TestPausedBatchStore:
         assert PausedBatchStore(p).load() == []
 
     def test_partial_records_are_skipped_not_fatal(self, tmp_path):
+        """load() stays lenient for ordinary pause/resume callers: whatever
+        is still readable is returned rather than nothing at all. (The
+        destructive sweep uses workspace_dirs_or_none instead, which does
+        NOT tolerate this -- see
+        test_workspace_dirs_or_none_is_none_when_a_single_record_is_malformed.)"""
         p = tmp_path / "paused.json"
         p.write_text(json.dumps({"jobs": [
             {"request": {"url": "u", "workspace_dir": "/ws/batch-1/ok"}},  # valid
@@ -178,12 +207,43 @@ class TestPausedBatchStore:
         assert set(store.workspace_dirs_or_none()) == {"/ws/batch-1/keyA", "/ws/batch-1/keyB"}
 
     def test_workspace_dirs_or_none_is_none_for_corrupt_file(self, tmp_path):
-        """Finding #4: a corrupt file means the keep-set is UNKNOWABLE, not
-        empty -- the startup sweep must be able to tell the two apart, or
-        it will delete every still-resumable workspace on disk just
-        because the one record protecting them failed to parse."""
+        """A corrupt file means the keep-set is UNKNOWABLE, not empty -- the
+        startup sweep must be able to tell the two apart, or it will delete
+        every still-resumable workspace on disk just because the one record
+        protecting them failed to parse."""
         p = tmp_path / "paused.json"
         p.write_text("{ not valid json ", encoding="utf-8")
+        assert PausedBatchStore(p).workspace_dirs_or_none() is None
+
+    def test_workspace_dirs_or_none_is_none_when_a_single_record_is_malformed(
+        self, tmp_path,
+    ):
+        """A PARTIAL keep-set is as dangerous as an empty one: the entries
+        missing from it are exactly the workspaces the sweep then deletes.
+        A syntactically valid file with one unreadable record used to be
+        reported as perfectly readable, so that record's still-resumable
+        workspace was quietly left out of the keep-set and swept."""
+        p = tmp_path / "paused.json"
+        p.write_text(json.dumps({"jobs": [
+            {"request": {"url": "u", "workspace_dir": "/ws/batch-1/ok"}},
+            {"request": "not-a-dict"},   # one bad record among good ones
+        ]}), encoding="utf-8")
+        assert PausedBatchStore(p).workspace_dirs_or_none() is None
+
+    def test_workspace_dirs_or_none_tolerates_a_record_with_no_workspace(self, tmp_path):
+        """A well-formed record that simply has no workspace yet (a job
+        paused before one was assigned) is readable -- it must NOT be
+        mistaken for corruption and disable the sweep entirely."""
+        p = tmp_path / "paused.json"
+        p.write_text(json.dumps({"jobs": [
+            {"request": {"url": "u", "output_dir": "/out"}},
+            {"request": {"url": "v", "workspace_dir": "/ws/batch-1/ok"}},
+        ]}), encoding="utf-8")
+        assert PausedBatchStore(p).workspace_dirs_or_none() == ["/ws/batch-1/ok"]
+
+    def test_unexpected_shape_is_reported_as_unreadable(self, tmp_path):
+        p = tmp_path / "paused.json"
+        p.write_text(json.dumps({"jobs": "not-a-list"}), encoding="utf-8")
         assert PausedBatchStore(p).workspace_dirs_or_none() is None
         # load() itself keeps its simpler "corrupt == empty" contract for
         # ordinary (non-destructive) callers.
