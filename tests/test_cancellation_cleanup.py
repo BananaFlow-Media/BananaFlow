@@ -38,6 +38,73 @@ from core.batch_outcome import BatchOutcome
 from core.downloader import DownloadProgress, DownloadRequest, DownloadStatus, MediaType
 
 
+# ── Cancel All must reach every running worker ───────────────────────────────
+
+class _FakeRunningWorker:
+    """Stands in for a running DownloadWorker, recording whether its own
+    cancel() was called. The engine-wide event is deliberately NOT enough:
+    only this reaches DownloadOrchestrator.cancel(), which sets the per-job
+    cancel events an ffmpeg remux actually polls."""
+
+    def __init__(self, jobs=None) -> None:
+        self._jobs = jobs or []
+        self.cancelled = False
+
+    def isRunning(self) -> bool:
+        return True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class TestCancelAllReachesEveryWorker:
+    def test_cancel_all_cancels_a_per_track_resume_worker(self, tmp_path, monkeypatch, app):
+        """A track the user resumed individually runs in its own single-job
+        worker. Cancel All addressed only the batch worker, so that job kept
+        running — and an HLS/stream job polls only its per-request event
+        while ffmpeg runs, so the engine-wide flag never interrupted it."""
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        batch = _FakeRunningWorker()
+        resume_a = _FakeRunningWorker()
+        resume_b = _FakeRunningWorker()
+        ctrl._dl_worker = batch
+        ctrl._resume_workers = [resume_a, resume_b]
+
+        ctrl.cancel_all()
+
+        assert batch.cancelled is True
+        assert resume_a.cancelled is True
+        assert resume_b.cancelled is True
+        assert ctrl._engine._cancel_event.is_set()
+
+    def test_cancel_all_works_with_no_batch_worker_at_all(self, tmp_path, monkeypatch, app):
+        """Only resume workers running — the old guard returned without
+        cancelling anything but the shared engine event."""
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        resume = _FakeRunningWorker()
+        ctrl._dl_worker = None
+        ctrl._resume_workers = [resume]
+
+        ctrl.cancel_all()
+
+        assert resume.cancelled is True
+
+    def test_cancel_all_skips_workers_that_are_not_running(self, tmp_path, monkeypatch, app):
+        ctrl = _controller(tmp_path, monkeypatch, app)
+
+        class _Finished(_FakeRunningWorker):
+            def isRunning(self) -> bool:
+                return False
+
+        finished = _Finished()
+        ctrl._dl_worker = None
+        ctrl._resume_workers = [finished]
+
+        ctrl.cancel_all()
+
+        assert finished.cancelled is False
+
+
 # ── Controller-level: cancel cleans workspace, keeps published files ─────────
 
 class _FakeFinishedWorker(QObject):

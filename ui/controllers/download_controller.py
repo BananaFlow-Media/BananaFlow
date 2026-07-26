@@ -705,11 +705,30 @@ class DownloadController(QObject):
             worker.cancel()
 
     def cancel_all(self) -> None:
-        """Cancel the engine (all in-flight yt-dlp downloads) and the worker."""
+        """Cancel everything in flight: the engine, the batch worker, and
+        every per-track resume worker.
+
+        The engine-wide event is NOT sufficient on its own, which is why
+        each worker is cancelled explicitly. A job that reaches ffmpeg —
+        an HLS/DASH stream, or the generic stream-intercept path — polls
+        exactly ONE event while the child process runs, and that is the
+        job's own per-request event (core.hls_downloader.download_hls's
+        ``cancel_event`` parameter, which core.downloader passes as
+        ``request.cancel_event or self._cancel_event``). With a per-request
+        event present, as every batched job has, the engine-wide flag is
+        never looked at, so the remux ran to completion and only then
+        noticed it had been cancelled. Only the worker's own cancel()
+        reaches DownloadOrchestrator.cancel(), which sets those per-job
+        events and shuts the pool down.
+
+        Symmetric with global_pause, which already covers every running
+        worker: a track the user resumed individually lives in its own
+        single-job worker and was previously left running by Cancel All."""
         self._set_termination_intent(BatchOutcome.CANCELLED_BY_USER)
         self._engine.cancel_all()
-        if self._dl_worker and self._dl_worker.isRunning():
-            self._dl_worker.cancel()
+        for worker in [self._dl_worker, *self._resume_workers]:
+            if worker is not None and worker.isRunning():
+                worker.cancel()
 
     def pause_track(self, card) -> bool:
         """Save the in-flight request for this card and cancel only that
