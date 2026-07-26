@@ -223,21 +223,20 @@ class TestETA:
     def test_eta_from_measured_completion_rate(self):
         clock = FakeClock()
         a = _agg([f"k{i}" for i in range(10)], clock=clock)
-        # Two completions, 10s apart, anchored at batch start => 10s per track.
-        clock.advance(10.0)
-        a.complete("k0")
-        clock.advance(10.0)
-        a.complete("k1")
-        # 8 outstanding × 10s, minus 0s elapsed into the current cycle.
-        assert a.snapshot().eta_seconds == pytest.approx(80.0, abs=1e-6)
+        # Three completions 10s apart. The first ends the batch's startup, so
+        # the two intervals after it measure 10s per track.
+        for i in range(3):
+            clock.advance(10.0)
+            a.complete(f"k{i}")
+        # 7 outstanding × 10s, minus 0s elapsed into the current cycle.
+        assert a.snapshot().eta_seconds == pytest.approx(70.0, abs=1e-6)
 
     def test_eta_is_not_the_latest_per_track_eta(self):
         clock = FakeClock()
         a = _agg([f"k{i}" for i in range(40)], clock=clock)
-        clock.advance(10.0)
-        a.complete("k0")
-        clock.advance(10.0)
-        a.complete("k1")
+        for i in range(3):
+            clock.advance(10.0)
+            a.complete(f"k{i}")
         # A track reports a 1-second per-track ETA of its own. The batch still
         # has 38 tracks to get through and must say so.
         a.update("k2", downloaded_bytes=999, total_bytes=1000,
@@ -252,11 +251,10 @@ class TestETA:
 
     def test_eta_is_always_flagged_an_estimate(self):
         clock = FakeClock()
-        a = _agg(["a", "b", "c"], clock=clock)
-        clock.advance(5.0)
-        a.complete("a")
-        clock.advance(5.0)
-        a.complete("b")
+        a = _agg(["a", "b", "c", "d"], clock=clock)
+        for k in ("a", "b", "c"):
+            clock.advance(5.0)
+            a.complete(k)
         snap = a.snapshot()
         assert snap.eta_seconds is not None
         # Extrapolating a measured rate is never more than a projection, even
@@ -265,21 +263,19 @@ class TestETA:
 
     def test_eta_never_negative(self):
         clock = FakeClock()
-        a = _agg(["a", "b"], clock=clock)
-        clock.advance(10.0)
-        a.complete("a")
-        clock.advance(10.0)
-        a.complete("b")
+        a = _agg(["a", "b", "c"], clock=clock)
+        for k in ("a", "b", "c"):
+            clock.advance(10.0)
+            a.complete(k)
         eta = a.snapshot().eta_seconds
         assert eta is None or eta >= 0.0
 
     def test_eta_survives_a_cooldown_with_no_active_job(self):
         clock = FakeClock()
-        a = _agg(["a", "b", "c"], clock=clock)
-        clock.advance(10.0)
-        a.complete("a")
-        clock.advance(10.0)
-        a.complete("b")
+        a = _agg(["a", "b", "c", "d"], clock=clock)
+        for k in ("a", "b", "c"):
+            clock.advance(10.0)
+            a.complete(k)
         # Conservative-mode cooldown: nothing active, aggregate speed is zero.
         clock.advance(5.0)
         snap = a.snapshot()

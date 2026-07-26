@@ -119,11 +119,12 @@ class TestCooldownIsMeasuredNotModelled:
         start = clock.t
         true_total = 59 * SERVICE_S            # 560.5s ≈ 9.3 min
 
-        # Warm-up: no number at all until two tracks have actually completed.
+        # Warm-up: no number at all until three tracks have actually
+        # completed. One interval is too thin a sample to quote from.
         assert a.snapshot().eta_seconds is None
 
         done = 0
-        for target in (2, 15, 30, 45):
+        for target in (3, 15, 30, 45):
             _run_serial_tracks(a, clock, keys[done:target])
             done = target
             snap = a.snapshot()
@@ -169,12 +170,12 @@ class TestZeroSpeedDuringCooldown:
 class TestPauseResume:
     def test_paused_job_is_not_counted_as_outstanding_work(self):
         clock = FakeClock()
-        keys = ["a", "b", "c", "d"]
+        keys = ["a", "b", "c", "d", "e"]
         a = _agg(keys, clock=clock)
-        _run_serial_tracks(a, clock, ["a", "b"])
+        _run_serial_tracks(a, clock, ["a", "b", "c"])
         with_two_left = a.snapshot().eta_seconds
 
-        a.pause("c")
+        a.pause("d")
         with_one_left = a.snapshot().eta_seconds
         assert with_one_left < with_two_left
         assert a.snapshot().paused == 1
@@ -183,9 +184,9 @@ class TestPauseResume:
         """A resumed batch runs a fresh orchestrator and aggregator; it measures
         its own rate rather than inheriting a stale one."""
         clock = FakeClock()
-        keys = ["a", "b", "c"]
+        keys = ["a", "b", "c", "d"]
         a = _agg(keys, clock=clock)
-        _run_serial_tracks(a, clock, ["a", "b"])
+        _run_serial_tracks(a, clock, ["a", "b", "c"])
         assert a.snapshot().eta_seconds is not None
 
         a.reset(keys, conservative_delay_range=DELAY_RANGE)
@@ -197,7 +198,7 @@ class TestCancellation:
         clock = FakeClock()
         keys = [f"k{i}" for i in range(10)]
         a = _agg(keys, clock=clock)
-        _run_serial_tracks(a, clock, keys[:2])
+        _run_serial_tracks(a, clock, keys[:3])
         before = a.snapshot().eta_seconds
 
         a.cancel("k9")
@@ -208,7 +209,7 @@ class TestCancellation:
         clock = FakeClock()
         keys = ["a", "b", "c"]
         a = _agg(keys, clock=clock)
-        _run_serial_tracks(a, clock, ["a", "b"])
+        _run_serial_tracks(a, clock, ["a", "b", "c"])
         a.cancel("c")
         assert a.snapshot().eta_seconds is None
 

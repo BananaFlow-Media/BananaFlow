@@ -80,8 +80,10 @@ absorbs the YouTube cooldown, Spotify match resolution, gate starvation,
 ffmpeg conversion, tagging, retry backoff and the cross-volume copy
 automatically — none of it needs to be modelled per-phase.
 
-Until the batch has produced two counted completions the ETA is ``None``
+Until the batch has produced three counted completions the ETA is ``None``
 and the UI shows "calculating…" rather than a number it cannot justify.
+Two completions give a single interval, and a rate from one interval is a
+coin flip — see ``_MIN_COMPLETIONS_FOR_ETA``.
 The value is always labelled an estimate — see ``eta_is_estimate``.
 
 Limitations are documented on :meth:`snapshot`.
@@ -102,10 +104,29 @@ _UNSET = object()
 # out instead of anchoring the estimate for the whole batch.
 _THROUGHPUT_WINDOW = 10
 
-# Minimum counted completions before the ETA is reported at all. Two is the
-# smallest number that can express a rate, and the window is anchored at batch
-# start so two completions always yield a positive span in normal operation.
-_MIN_COMPLETIONS_FOR_ETA = 2
+# Minimum counted completions before the ETA is reported at all.
+#
+# Two is the smallest number that can express a rate, but a rate from a single
+# interval is a coin flip: measured over randomised batches, the opening number
+# missed by more than a quarter in a third of runs, which is what makes a footer
+# quote seven minutes and then walk it down to four. A third completion gives
+# two intervals and takes that to roughly one run in seven, for about fourteen
+# seconds more of "calculating..." - most of the available improvement for the
+# smallest wait. A fourth buys only another three points.
+#
+# Nothing cleverer than waiting helps here, which was checked rather than
+# assumed. With two intervals a median and a trimmed mean are arithmetically
+# identical to the mean, so robustness has nothing to work with. Shrinking the
+# estimate toward a prior does tighten the spread - but only while the prior
+# happens to match: against a batch cycling at 30s instead of 10s it dropped the
+# share of runs landing within a quarter of the truth from 76% to 30%. That is
+# the same mistake as the modelled cooldown this estimator replaced, so it is
+# not used. Clamping to the cooldown as a physical floor is safe but gains
+# about one point, which does not pay for the extra concept.
+#
+# In parallel mode this is not the binding constraint: the wave logic in
+# _throughput_cycle_locked already requires two full waves.
+_MIN_COMPLETIONS_FOR_ETA = 3
 
 # (No stall threshold. An earlier revision only degraded the rate once the
 # pipeline had been silent for 3x the measured cycle, which left the estimate
