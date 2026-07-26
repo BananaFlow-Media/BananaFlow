@@ -55,9 +55,21 @@ _PLAIN_FIELDS = (
 
 def request_to_dict(req: DownloadRequest) -> dict[str, Any]:
     """Serialise the resumable subset of a DownloadRequest to a JSON-safe
-    dict. Live/transient fields (cancel_event, callbacks, url_resolver, the
-    output-path trackers) are deliberately excluded — a restored request
-    resumes from its .part file and re-acquires them fresh.
+    dict. Live/transient fields (cancel_event, callbacks, url_resolver) are
+    deliberately excluded — a restored request re-acquires them fresh.
+
+    ``final_output_path`` is the one ``init=False`` field that IS persisted,
+    and it has to be. There is a boundary — between yt-dlp producing the
+    final workspace file and the post-download checkpoint being written —
+    where a pause snapshot carries that tracker and nothing else: no
+    ``resume_phase``, no ``resume_final_path``. Leaving it in memory only
+    meant such a job resumed correctly inside the running process but came
+    back from a restart with nothing to resume from, so it re-ran yt-dlp
+    against an already-complete file, fired no postprocessor hook and died
+    with "output file is missing". A captured paused job must stay
+    resumable across a restart, so the tracker travels with the record. It
+    is only ever a hint: the engine re-validates the file before using it,
+    and re-runs the download if it has gone.
 
     ``had_pending_resolver`` records whether ``req.url_resolver`` was still
     set (a Spotify two-stage match that never ran before this request was
@@ -75,6 +87,9 @@ def request_to_dict(req: DownloadRequest) -> dict[str, Any]:
     data["video_quality"] = req.video_quality.value
     data["platform"] = req.platform.value if isinstance(req.platform, SourcePlatform) else None
     data["had_pending_resolver"] = req.url_resolver is not None
+    # init=False, so it cannot ride along in _PLAIN_FIELDS and cannot be
+    # passed to the constructor on the way back — see request_from_dict.
+    data["final_output_path"] = req._final_output_path  # noqa: SLF001
     # A restored job always continues from its partial download.
     data["resumable"] = True
     return data
@@ -115,4 +130,15 @@ def request_from_dict(data: dict[str, Any]) -> DownloadRequest:
             kwargs["platform"] = None
 
     kwargs["resumable"] = True
-    return DownloadRequest(**kwargs)
+    req = DownloadRequest(**kwargs)
+
+    # Assigned after construction: _final_output_path is init=False, so the
+    # constructor will not take it. Restoring it is what keeps a job paused
+    # in the post-download boundary resumable across a restart — see
+    # request_to_dict. A record that predates this field, or one that was
+    # paused before yt-dlp produced anything, simply keeps the default "".
+    final_output_path = data.get("final_output_path")
+    if isinstance(final_output_path, str) and final_output_path:
+        req._final_output_path = final_output_path  # noqa: SLF001
+
+    return req

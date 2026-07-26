@@ -59,12 +59,13 @@ class _FakeOrchestrator:
         self._jobs = dict(jobs)
 
     def live_request_snapshot(self, key: str):
-        import dataclasses
-
         req = self._jobs.get(key)
         if req is None:
             return None, None
-        return None, dataclasses.replace(req)
+        # snapshot_copy, matching the real orchestrator: dataclasses.replace
+        # rebuilds through __init__ and drops the init=False output-path
+        # tracker, which is exactly what a boundary pause depends on.
+        return None, req.snapshot_copy()
 
 
 class _FakeLiveWorker:
@@ -318,6 +319,111 @@ def test_one_malformed_record_skips_the_sweep_entirely(tmp_path, monkeypatch, ap
     assert (survivor / "jobA" / "song.part").exists(), (
         "an incomplete keep-set must disable the sweep, not sweep against it"
     )
+
+
+def test_a_job_paused_in_the_post_download_boundary_survives_a_restart(
+    tmp_path, monkeypatch, app,
+):
+    """The boundary between yt-dlp producing the final workspace file and
+    the post-download checkpoint being written.
+
+    A snapshot taken there carries only ``_final_output_path`` — the
+    init=False tracker — because ``resume_phase``/``resume_final_path`` have
+    not been assigned yet. That tracker used to live in memory only, so the
+    job resumed correctly within the running process but came back from a
+    restart with nothing at all: no checkpoint and no output path. Its
+    resume re-ran yt-dlp against a file that was already complete, so
+    yt-dlp downloaded nothing, fired no postprocessor hook, and the job
+    died with "output file is missing" — a captured paused job that had
+    become permanently unresumable.
+
+    Drives the whole real path: capture through global_pause, persist,
+    reconstruct exactly as startup recovery does, then run the restored
+    request through the engine with yt-dlp behaving the way it really does
+    when its target already exists.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from core.downloader import DownloadEngine, DownloadStatus
+    from utils.paths import make_batch_workspace
+
+    out = tmp_path / "out"
+    out.mkdir()
+    workspace = make_batch_workspace(str(out)) / "jobA"
+    workspace.mkdir()
+    # What yt-dlp had already finished producing when the pause landed.
+    done = workspace / "A.mp3"
+    done.write_bytes(b"fully-downloaded-and-converted")
+
+    # ── 1. Capture, in exactly that boundary state ───────────────────────
+    ctrl1 = _controller(tmp_path, monkeypatch, app)
+    ctrl1._cfg.output_dir = str(out)
+    card = _FakeCard("A")
+    k = str(id(card))
+    live = _req("A", str(workspace))
+    live.output_dir = str(out)
+    live._final_output_path = str(done)      # yt-dlp produced it...
+    assert live.resume_phase is None         # ...but the checkpoint is not written yet
+    assert live.resume_final_path is None
+    ctrl1._key_to_card = {k: card}
+    ctrl1._dl_worker = _FakeLiveWorker([(k, live)])
+
+    ctrl1.global_pause()
+
+    assert k in ctrl1._paused_requests, "the job must be captured as paused"
+
+    # ── 2. Persisted state must carry enough to resume ───────────────────
+    persisted = ctrl1._paused_store.load()
+    assert len(persisted) == 1
+
+    # ── 3. Restart: a fresh controller restores from the same store ──────
+    ctrl2 = _controller(tmp_path, monkeypatch, app)
+    ctrl2._cfg.output_dir = str(out)
+    restored_cards = ctrl2.restore_paused_on_startup(
+        lambda cd: _FakeCard(cd.get("title", "?"), status="paused")
+    )
+    assert len(restored_cards) == 1, "the paused job must survive the restart"
+    restored_req = ctrl2._paused_requests[str(id(restored_cards[0]))]
+
+    # ── 4. Resuming it must publish the finished file, not re-download ───
+    engine = DownloadEngine()
+    events: list = []
+    restored_req.on_progress = lambda p: events.append(p)
+    restored_req.on_finished = lambda p: events.append(p)
+    restored_req.on_error = lambda p: events.append(p)
+
+    ydl_downloads: list = []
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = lambda s: mock_ydl
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+
+    def _already_downloaded(urls):
+        # Exactly what yt-dlp does when its target file already exists: it
+        # reports "has already been downloaded", downloads nothing, and
+        # fires no postprocessor hook — so nothing sets _final_output_path.
+        ydl_downloads.append(urls)
+
+    mock_ydl.download = _already_downloaded
+
+    pipeline_calls: list = []
+    with patch("yt_dlp.YoutubeDL") as cls, \
+         patch.object(engine, "_run_final_pipeline",
+                      side_effect=lambda _r, p: pipeline_calls.append(p) or []):
+        cls.return_value = mock_ydl
+        engine.download(restored_req)
+
+    errors = [p for p in events if p.status == DownloadStatus.ERROR]
+    assert not errors, (
+        "a restored boundary-pause must not fail; got "
+        f"{[p.error_message for p in errors]}"
+    )
+    assert pipeline_calls == [str(done)], (
+        "post-processing must run on the file already sitting in the "
+        f"workspace, got {pipeline_calls}"
+    )
+    published = out / "A.mp3"
+    assert published.read_bytes() == b"fully-downloaded-and-converted"
+    assert events[-1].status == DownloadStatus.FINISHED
 
 
 def test_an_unreadable_state_file_skips_the_sweep(tmp_path, monkeypatch, app):
