@@ -289,7 +289,7 @@ class StatusBar(QFrame):
         """
         if eta_seconds is None:
             return t("eta_calculating")
-        s = int(max(0.0, eta_seconds))
+        s = int(round(max(0.0, eta_seconds)))
         return t("eta_about_left", time=isolate_number(seconds_to_str(s)))
 
     def _tick_eta(self) -> None:
