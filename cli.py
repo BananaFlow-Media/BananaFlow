@@ -127,6 +127,12 @@ class TerminalCallbacks:
         headline = redact_text(getattr(error, "headline", str(error)))
         print(f"\r  ❌  {key}: {headline}", file=sys.stderr)
 
+    def on_track_phase(self, key: str, phase: str, remaining_seconds) -> None:
+        # no-op, not an oversight - the terminal prints one line per track
+        # rather than a live per-track bar, so intra-track stages have nowhere
+        # to go. Same precedent as on_overall_progress below.
+        pass
+
     def on_overall_progress(self, fraction: float) -> None:
         pass
 

@@ -64,6 +64,9 @@ class _SignalAdapter:
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None:
         self._w.track_speed.emit(key, speed_bps, eta_seconds)
 
+    def on_track_phase(self, key: str, phase: str, remaining_seconds) -> None:
+        self._w.track_phase.emit(key, phase, remaining_seconds)
+
     def on_track_status(self, key: str, status: str) -> None:
         self._w.track_status.emit(key, status)
 
@@ -121,6 +124,7 @@ class DownloadWorker(QThread):
     track_progress   = Signal(str, float)
     track_speed      = Signal(str, float, float)
     track_status     = Signal(str, str)
+    track_phase      = Signal(str, str, object)   # key, phase, secs|None
     track_finished   = Signal(str, str)
     track_preexisting = Signal(str, str)   # (key, existing_path) — duplicate-skip, no download ran
     overall_progress = Signal(float)

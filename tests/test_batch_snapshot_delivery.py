@@ -388,7 +388,7 @@ class TestControllerBindsTheIdItMints:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
                 for name in (
-                    "track_progress", "track_speed", "track_status",
+                    "track_progress", "track_speed", "track_status", "track_phase",
                     "track_finished", "track_preexisting", "overall_progress",
                     "metrics", "batch_snapshot", "job_count_changed",
                     "job_error", "all_finished", "track_thumbnail",

@@ -84,6 +84,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Kept short: it has to fit the fixed-width footer ETA slot alongside
         # the longest real duration string, and it is now shown at the start of
         # every batch while the throughput estimate warms up.
+        # Track-card stages. A track spends most of its wall time outside the
+        # byte transfer, so each stage names itself rather than leaving the card
+        # showing a dead "downloading".
+        "phase_matching":    "Finding a match…",
+        "phase_waiting":     "Waiting its turn…",
+        "phase_starting":    "Starting…",
+        "phase_downloading": "Downloading",
+        "phase_processing":  "Finishing up…",
         "eta_calculating": "Calculating…",
         # {time} is a preformatted M:SS / H:MM:SS duration from
         # utils.time_format.seconds_to_str, so the footer can count down by the
@@ -1450,6 +1458,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_with_errors": "{ok} הושלמו, {failed} נכשלו.",
         "status_stopped_summary": "ההורדות נעצרו — {done} מתוך {total} הושלמו.",
         "status_stopped_error": "ההורדות נעצרו עקב שגיאה.",
+        "phase_matching":    "מחפש התאמה…",
+        "phase_waiting":     "ממתין לתור…",
+        "phase_starting":    "מתחיל…",
+        "phase_downloading": "מוריד",
+        "phase_processing":  "מסיים…",
         "eta_calculating": "מחשב…",
         "eta_about_left": "בערך {time} נותרו",
         "eta_tooltip": "הערכת הזמן הנותר לאצווה כולה",

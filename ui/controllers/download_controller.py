@@ -545,6 +545,7 @@ class DownloadController(QObject):
         worker.track_progress.connect(self._on_track_progress)
         worker.track_speed.connect(self._on_track_speed)
         worker.track_status.connect(self._on_track_status)
+        worker.track_phase.connect(self._on_track_phase)
         worker.track_finished.connect(self._on_track_finished)
         worker.track_preexisting.connect(self._on_track_preexisting)
         worker.overall_progress.connect(self._on_worker_overall_progress)
@@ -981,6 +982,7 @@ class DownloadController(QObject):
         resume_worker.track_progress.connect(self._on_track_progress)
         resume_worker.track_speed.connect(self._on_track_speed)
         resume_worker.track_status.connect(self._on_track_status)
+        resume_worker.track_phase.connect(self._on_track_phase)
         resume_worker.track_finished.connect(self._on_track_finished)
         resume_worker.job_error.connect(self._on_track_error)
         resume_worker.all_finished.connect(self._on_batch_done)
@@ -1141,6 +1143,21 @@ class DownloadController(QObject):
     def _on_worker_job_count_changed(self, completed: int, total: int) -> None:
         if self._is_current_batch_worker_signal():
             self.job_count_changed.emit(completed, total)
+
+    def _on_track_phase(self, key: str, phase: str, remaining_seconds) -> None:
+        """Tell one card which stage it is in and how long that leaves.
+
+        The card used to be handed the byte transfer and nothing else, so it
+        showed a dead bar through matching and the gate wait, raced to 95%, and
+        then sat at 95% through post-processing. Both stretches are now named
+        and both advance.
+        """
+        if not self._is_active_worker_signal():
+            return
+        card = self._key_to_card.get(key)
+        if card is None:
+            return
+        card.set_phase(phase, remaining_seconds)
 
     def _on_track_progress(self, key: str, fraction: float) -> None:
         if not self._is_active_worker_signal():
