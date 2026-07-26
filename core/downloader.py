@@ -567,6 +567,15 @@ class DownloadEngine:
                 url=url,
                 title=request.forced_title or "",
             ))
+        except PublishError as exc:
+            # A real failure, but a specific and self-explanatory one — the
+            # generic handler below would relabel it "Unexpected error".
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.ERROR,
+                url=url,
+                title=request.forced_title or "",
+                error_message=str(exc),
+            ), error=True)
         except yt_dlp.utils.DownloadError as exc:
             err_msg = _get_friendly_error(str(exc))
             self._fire(request, DownloadProgress(
@@ -1318,6 +1327,16 @@ class DownloadEngine:
         source's attributes across and would otherwise publish the finished
         file as a hidden file.
 
+        Neither attribute operation is best-effort, and both results are
+        checked. If the temp cannot be hidden, the only alternative is to
+        write a visible growing partial into the user's output folder —
+        precisely what this staging step exists to prevent — so the publish
+        is refused instead (the same stance make_batch_workspace takes
+        toward a location it cannot hide). If the attribute cannot be
+        cleared again, the rename is refused rather than publishing the
+        user's finished track as a file they cannot see. Both leave the
+        destination untouched and the file safely in the workspace.
+
         ``cancel_check`` is polled between copy chunks and once more
         immediately before the final rename; when it reports cancellation
         the staging temp is removed and ``PublishCancelled`` is raised, so a
@@ -1347,10 +1366,25 @@ class DownloadEngine:
             dir=str(dest.parent), prefix=f".{dest.name}.", suffix=cls.PUBLISH_TMP_SUFFIX,
         )
         tmp = Path(tmp_name)
-        # Hide first, write second — see the docstring. Best-effort: a
-        # filesystem that refuses the attribute still gets a correct
-        # publish, just without the extra concealment.
-        _set_hidden_attribute(tmp)
+        # Hide first, write second — see the docstring. NOT best-effort:
+        # if the attribute cannot be applied, the alternative is writing a
+        # visible, growing partial into the user's output folder, which is
+        # the exact thing this staging step exists to prevent. Refuse
+        # instead, exactly as make_batch_workspace refuses a location it
+        # cannot hide; the finished file stays in the workspace and the job
+        # is reported as a publish error rather than silently exposing a
+        # half-written file.
+        if not _set_hidden_attribute(tmp):
+            os.close(fd)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise PublishError(
+                f"Refusing to stage a cross-volume publish next to {dest}: the "
+                f"staging file could not be hidden, and a visible partial must "
+                f"never appear in the output directory"
+            )
         try:
             with os.fdopen(fd, "wb") as out_fh, open(str(src), "rb") as in_fh:
                 while True:
@@ -1364,10 +1398,21 @@ class DownloadEngine:
             if _cancelled():
                 raise PublishCancelled("Cancelled before publish")
             # Unhide only now: the content is complete, and the very next
-            # step renames it onto the visible destination name.
-            _set_hidden_attribute(tmp, hidden=False)
+            # step renames it onto the visible destination name. Also NOT
+            # best-effort: os.replace carries the source's attributes across,
+            # so renaming a still-hidden temp publishes the user's finished
+            # track as a hidden file they cannot find in their own folder.
+            # Failing here leaves the destination untouched and the file
+            # safely in the workspace, which is recoverable; publishing an
+            # invisible file is not.
+            if not _set_hidden_attribute(tmp, hidden=False):
+                raise PublishError(
+                    f"Refusing to publish {dest}: the staging file's Hidden "
+                    f"attribute could not be cleared, and os.replace would "
+                    f"carry it onto the published file"
+                )
             os.replace(str(tmp), str(dest))
-        except (OSError, PublishCancelled):
+        except (OSError, PublishCancelled, PublishError):
             try:
                 if tmp.exists():
                     tmp.unlink()
