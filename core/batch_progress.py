@@ -96,10 +96,13 @@ _THROUGHPUT_WINDOW = 10
 # start so two completions always yield a positive span in normal operation.
 _MIN_COMPLETIONS_FOR_ETA = 2
 
-# How far past the measured cycle the pipeline must go silent before we treat it
-# as genuinely stalled and let the dead time degrade the rate, rather than
-# reading it as ordinary mid-cycle progress (cooldown, matching, ffmpeg).
-_STALL_CYCLE_FACTOR = 3.0
+# (No stall threshold. An earlier revision only degraded the rate once the
+# pipeline had been silent for 3x the measured cycle, which left the estimate
+# provably constant between 1x and 3x — `eta` had already bottomed out at
+# `(outstanding - 1) * cycle` and could not move again until the threshold
+# tripped. With the heartbeat re-publishing that identical value twice a second
+# the footer sat visibly frozen for up to two cycles. Degradation now begins the
+# moment a cycle runs over; see _throughput_cycle_locked.)
 
 # Half-life of the displayed aggregate speed, in seconds. Time-based rather than
 # per-tick so responsiveness does not depend on yt-dlp's tick rate or on how
@@ -313,13 +316,19 @@ class BatchProgressAggregator:
         *,
         conservative_delay_range=_UNSET,
         stagger_delay_range=_UNSET,
+        batch_id: Optional[str] = None,
     ) -> None:
         """Start a fresh batch. Optionally pre-register queued job keys.
 
-        Mints a new ``batch_id`` so snapshots emitted for the previous batch can
-        be told apart from this one's, and re-anchors the throughput window at
-        "now" — a resumed batch measures its own rate rather than inheriting a
-        stale one from before the pause.
+        ``batch_id`` labels every snapshot this batch emits. Pass the id the
+        *caller* already holds — the UI mints one before it starts the worker,
+        so it knows which batch it is showing before the first snapshot can
+        arrive and never has to infer that from whatever signal turns up first.
+        Omitted, a fresh id is generated (CLI, tests, direct use).
+
+        Also re-anchors the throughput window at "now": a resumed batch
+        measures its own rate rather than inheriting a stale one from before
+        the pause.
         """
         with self._lock:
             if conservative_delay_range is not _UNSET:
@@ -331,7 +340,7 @@ class BatchProgressAggregator:
             self._speed_updated_at = None
             self._progress_floor = 0.0
             self._floor_uses_estimates = False
-            self._batch_id = uuid.uuid4().hex
+            self._batch_id = batch_id or uuid.uuid4().hex
             self._batch_start = self._time()
             self._completion_times = []
             self._window_anchor = self._batch_start
@@ -514,11 +523,20 @@ class BatchProgressAggregator:
             job.speed_bps = 0.0
             job.eta_seconds = None
             job.ended_at = self._time()
-            # A failure still paid for a full pipeline cycle — resolve, gate
-            # wait, download attempt, retry backoff — so it is real evidence of
-            # the batch's throughput and belongs in the window. A cancellation
-            # did not, and arrives in bursts besides.
-            if state == JobState.FAILED:
+            # A failure that ran the pipeline — resolve, gate wait, download
+            # attempt, retry backoff — is real evidence of the batch's
+            # throughput and belongs in the window. A cancellation is not, and
+            # arrives in bursts besides.
+            #
+            # `submitted` is the discriminator, and it matters: a job whose
+            # private workspace directory could not be created is failed by the
+            # orchestrator up front, before registration, before the pool ever
+            # sees it. Those failures land together on essentially the same
+            # instant, so two of them would satisfy the warm-up rule with a
+            # near-zero span and collapse the ETA for every healthy job behind
+            # them. They consumed no pipeline time and must not be measured as
+            # though they had.
+            if state == JobState.FAILED and job.submitted:
                 self._record_completion_locked()
             self._recompute_speed_locked()
 
@@ -737,14 +755,22 @@ class BatchProgressAggregator:
             return None
 
         stall = now - t_last
-        if stall > _STALL_CYCLE_FACTOR * cycle:
-            # The pipeline has been silent for far longer than a healthy cycle.
-            # Fold the dead time into the rate so a stuck batch shows a growing
-            # estimate rather than a confident one frozen at its last good
-            # value. Ordinary quiet stretches — cooldown, matching, ffmpeg —
-            # sit well inside one cycle and never reach this branch.
-            degraded = (now - anchor) / n
-            cycle = max(cycle, degraded)
+        if stall > cycle:
+            # This cycle has already run longer than the measured average, so
+            # the batch is behind. Fold the elapsed dead time into the rate:
+            # extend the measured span all the way to now while the completion
+            # count stays put, which is the same span-over-count estimator
+            # applied to what is actually known right now.
+            #
+            # Beginning at `stall > cycle` rather than at some multiple of it is
+            # what keeps the estimate alive. Past that point the
+            # `- min(stall, cycle)` term in _eta_locked has already saturated,
+            # so without this the value would be pinned at exactly
+            # `(outstanding - 1) * cycle` — constant, and republished unchanged
+            # by every heartbeat, which reads as a broken footer rather than an
+            # honest one. Below the threshold the raw span is used untouched, so
+            # a healthy batch never sees its rate inflated mid-cycle.
+            cycle = max(cycle, (now - anchor) / n)
         return cycle
 
     def _slowest_active_byte_time_locked(self) -> Optional[float]:
@@ -854,6 +880,15 @@ class BatchProgressAggregator:
         return eta, True
 
     def _snapshot_locked(self) -> BatchSnapshot:
+        # Advance the speed decay on read, not only on mutation. The decay is a
+        # function of elapsed time, but the mutators are the only things that
+        # used to call it — and during a conservative-mode cooldown there are no
+        # mutators for five to ten seconds. The footer would hold whatever value
+        # the last completion left behind and report a healthy transfer rate
+        # while nothing at all was transferring. Reading advances it, so an idle
+        # pipeline visibly settles to zero.
+        self._recompute_speed_locked()
+
         counts = {s: 0 for s in JobState}
         for j in self._jobs.values():
             counts[j.state] += 1

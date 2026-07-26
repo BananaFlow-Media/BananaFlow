@@ -338,3 +338,82 @@ class TestEtaLabelFitsBothLocales:
                     )
         finally:
             i18n.set_language(original)
+
+
+class TestEtaNeverFreezesOnScreen:
+    """End to end: a real aggregator on a fake clock, its snapshots pushed into
+    a real StatusBar at the heartbeat rate, through a quiet period.
+
+    This is the interaction that made the bug visible rather than merely
+    theoretical. The aggregator's estimate used to be provably constant between
+    one and three measured cycles, and because the footer re-anchors its local
+    countdown on every snapshot, the heartbeat re-publishing that identical
+    value twice a second held the 1 Hz ticker permanently at its starting
+    point. Neither piece looks wrong alone.
+    """
+
+    CYCLE = 10.0
+
+    class _Clock:
+        def __init__(self):
+            self.t = 1000.0
+
+        def __call__(self):
+            return self.t
+
+        def advance(self, dt):
+            self.t += dt
+
+    def _warm_aggregator(self, total=20, completions=4):
+        clock = self._Clock()
+        a = BatchProgressAggregator(speed_smoothing=1.0, time_fn=clock)
+        a.reset([f"k{i}" for i in range(total)])
+        for i in range(completions):
+            clock.advance(self.CYCLE)
+            a.complete(f"k{i}")
+        return a, clock
+
+    def _rendered_over_quiet_period(self, bar, quiet_s, from_stall=0.0):
+        a, clock = self._warm_aggregator()
+        if from_stall:
+            clock.advance(from_stall)
+        seen = []
+        ticks = int(quiet_s / 0.5)
+        for _ in range(ticks):
+            clock.advance(0.5)                    # one heartbeat
+            bar.show_batch_progress(a.snapshot())
+            seen.append(bar._eta_lbl.text())
+        return seen
+
+    def test_display_changes_around_one_and_a_half_cycles(self, bar):
+        seen = self._rendered_over_quiet_period(bar, quiet_s=4.0, from_stall=13.0)
+        assert len(set(seen)) > 1, f"footer stuck on {seen[0]!r}"
+
+    def test_display_changes_around_two_and_a_half_cycles(self, bar):
+        seen = self._rendered_over_quiet_period(bar, quiet_s=4.0, from_stall=23.0)
+        assert len(set(seen)) > 1, f"footer stuck on {seen[0]!r}"
+
+    def test_display_never_stalls_across_the_whole_quiet_period(self, bar):
+        """Sample right through the old dead zone (1x to 3x the cycle) and
+        require the rendered string to keep moving."""
+        seen = self._rendered_over_quiet_period(bar, quiet_s=30.0)
+        longest = best = 1
+        for i in range(1, len(seen)):
+            longest = longest + 1 if seen[i] == seen[i - 1] else 1
+            best = max(best, longest)
+        # At 2 Hz against a 1s-granular display, two identical readings in a row
+        # are expected; a long run of them is the bug.
+        assert best <= 3, f"footer held the same text {best} heartbeats running: {seen}"
+
+    def test_healthy_countdown_still_decreases(self, bar):
+        """The fix must not turn a normal cycle into a rising number."""
+        a, clock = self._warm_aggregator()
+        first = None
+        last = None
+        for _ in range(10):                       # 5s, well inside one cycle
+            clock.advance(0.5)
+            bar.show_batch_progress(a.snapshot())
+            last = bar._eta_base_seconds
+            if first is None:
+                first = last
+        assert last < first

@@ -60,11 +60,12 @@ logger = logging.getLogger(__name__)
 
 _SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
-# How often the batch emits a progress snapshot regardless of download activity,
-# and the floor between two snapshots emitted from a track's progress hook. Both
-# use the same value so the UI sees one steady ~2 Hz stream however the batch is
-# spending its time. Fast enough for a per-second countdown to stay honest,
-# slow enough to stay far below the cost of a repaint.
+# How often the batch publishes whole-batch progress. The heartbeat is the only
+# periodic publisher — per-track progress hooks deliberately emit no batch-level
+# state — so this is the rate the UI actually sees, regardless of how many jobs
+# are running or how fast yt-dlp happens to be reporting. Fast enough for a
+# per-second countdown to stay honest, slow enough to stay far below the cost of
+# a repaint.
 _HEARTBEAT_INTERVAL = 0.5
 
 
@@ -393,6 +394,7 @@ class DownloadOrchestrator:
         jobs: list[tuple[str, DownloadRequest]],
         delay_range: Optional[Tuple[float, float]] = None,
         preexisting: Optional[list[tuple[str, str]]] = None,
+        batch_id: Optional[str] = None,
     ) -> BatchResult:
         """
         Execute a batch of downloads with bounded parallelism and optional staggered start.
@@ -411,7 +413,7 @@ class DownloadOrchestrator:
         if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
             logger.debug("[Orchestrator] Empty batch — skipping")
-            self._aggregator.reset()
+            self._aggregator.reset(batch_id=batch_id)
             self._safe_cb("on_overall_progress", 0.0)
             self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
             self._safe_cb("on_batch_finished", BatchOutcome.COMPLETED)
@@ -427,7 +429,7 @@ class DownloadOrchestrator:
             logger.info("[Orchestrator] run_batch() — started in cancelled state")
             # Mark all as cancelled — including preexisting entries: a batch
             # that starts already-cancelled produces no successes at all.
-            self._aggregator.reset(all_keys)
+            self._aggregator.reset(all_keys, batch_id=batch_id)
             for key in all_keys:
                 self._aggregator.cancel(key)
                 self._safe_cb("on_track_status", key, "cancelled")
@@ -441,10 +443,13 @@ class DownloadOrchestrator:
         self._completed = 0
         self._failed    = 0
         stagger_delay_range = tuple(delay_range) if delay_range else None
+        # batch_id, when the caller supplies one, is the identity it will use
+        # to recognise this batch's snapshots. See DownloadController.
         self._aggregator.reset(
             all_keys,
             conservative_delay_range=CONSERVATIVE_DELAY_RANGE,
             stagger_delay_range=stagger_delay_range,
+            batch_id=batch_id,
         )
         self._cancel_events.clear()
         self._job_locks.clear()
@@ -585,7 +590,9 @@ class DownloadOrchestrator:
         def _heartbeat() -> None:
             while not heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
                 try:
-                    self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+                    snapshot = self._aggregator.snapshot()
+                    self._safe_cb("on_overall_progress", snapshot.progress)
+                    self._safe_cb("on_batch_snapshot", snapshot)
                 except Exception:  # noqa: BLE001 - a UI hiccup must not kill the batch
                     logger.debug("[Orchestrator] heartbeat snapshot failed", exc_info=True)
 
@@ -679,9 +686,26 @@ class DownloadOrchestrator:
                         if not self._claim_job_outcome(key, "terminal"):
                             continue  # paused out from under this thread
                         err = classify_error(exc)
-                        self._failed += 1
+                        # Terminate the job everywhere, not just in the scalar
+                        # counter. Without the aggregator call the job stayed
+                        # QUEUED or ACTIVE forever: absent from
+                        # BatchSnapshot.failed, still counted as outstanding
+                        # work by the ETA, and still weighed as unfinished by
+                        # the progress bar — so a batch that hit this path
+                        # could never reach its final state. The lock and the
+                        # count callback match the other two failure sites
+                        # (on_error, workspace setup) so all three stay
+                        # coherent.
+                        with self._progress_lock:
+                            self._failed += 1
+                        self._aggregator.fail(key)
                         self._safe_cb("on_track_status", key, "error")
                         self._safe_cb("on_track_error", key, err)
+                        self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+                        self._safe_cb(
+                            "on_job_count_changed",
+                            self._completed + self._failed, self._total,
+                        )
                         logger.error(
                             "[Orchestrator] Unhandled exception for %s: %s",
                             key, exc, exc_info=True,
@@ -1060,7 +1084,6 @@ class DownloadOrchestrator:
         # engine-start status.
         engine_start_ts = time.monotonic()
         first_byte_seen = [False]
-        last_snapshot_emit = [0.0]
 
         def on_progress(p: DownloadProgress) -> None:
             if not first_byte_seen[0] and ((p.downloaded_bytes or 0) > 0 or (p.fraction or 0) > 0):
@@ -1092,19 +1115,14 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_progress", key, p.fraction)
             self._safe_cb("on_track_speed", key, p.speed_bps or 0.0, p.eta_seconds or 0.0)
 
-            # Throttle by elapsed time, not by tick count. The counter this
-            # replaces was per-job, so N jobs downloading in parallel emitted N
-            # times as often as one job did, and the rate also rode on whatever
-            # cadence yt-dlp happened to report at. Wall-clock throttling gives
-            # the UI one steady stream regardless of batch shape. The heartbeat
-            # in run_batch covers the stretches where this hook is silent.
-            now = time.monotonic()
-            if now - last_snapshot_emit[0] < _HEARTBEAT_INTERVAL:
-                return
-            last_snapshot_emit[0] = now
-            snapshot = self._aggregator.snapshot()
-            self._safe_cb("on_overall_progress", snapshot.progress)
-            self._safe_cb("on_batch_snapshot", snapshot)
+            # No batch-level emit here. This hook runs once per job, so any
+            # throttle local to it is per-job: three parallel downloads produced
+            # three independent streams, and the combined rate scaled with the
+            # worker count and with whatever cadence yt-dlp happened to report
+            # at. The heartbeat in run_batch is the single periodic publisher of
+            # whole-batch state, which makes the rate a property of the batch
+            # rather than of how many jobs happen to be running. Discrete
+            # transitions (a job finishing, failing) still emit immediately.
 
         def on_finished(p: DownloadProgress) -> None:
             # Completion is a terminal transition and goes through the same

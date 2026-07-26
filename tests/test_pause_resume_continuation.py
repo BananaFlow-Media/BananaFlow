@@ -100,9 +100,10 @@ class _FakeDownloadWorker:
     last_instance = None
 
     def __init__(self, jobs, engine, config, db=None, max_workers=3,
-                 preexisting=None, parent=None) -> None:
+                 preexisting=None, batch_id=None, parent=None) -> None:
         self.jobs = jobs
         self.preexisting = preexisting or []
+        self.batch_id = batch_id
         self.started = False
         for name in (
             "track_progress", "track_speed", "track_status", "track_finished",

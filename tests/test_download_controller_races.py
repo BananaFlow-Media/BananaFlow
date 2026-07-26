@@ -41,9 +41,17 @@ def _controller(tmp_path, monkeypatch, app):
     return DownloadController(AppConfig(), DownloadEngine())
 
 
-def test_stale_worker_snapshot_does_not_forward_to_new_batch(tmp_path, monkeypatch, app):
+def _stamped_snapshot(batch_id):
+    """A snapshot belonging to `batch_id`, the way a live batch produces one."""
     from core.batch_progress import BatchProgressAggregator
 
+    agg = BatchProgressAggregator(speed_smoothing=1.0)
+    agg.reset(["a"], batch_id=batch_id)
+    agg.update("a", downloaded_bytes=10, total_bytes=100)
+    return agg.snapshot()
+
+
+def test_stale_worker_snapshot_does_not_forward_to_new_batch(tmp_path, monkeypatch, app):
     ctrl = _controller(tmp_path, monkeypatch, app)
     old_worker = _FakeWorker()
     new_worker = _FakeWorker()
@@ -53,17 +61,57 @@ def test_stale_worker_snapshot_does_not_forward_to_new_batch(tmp_path, monkeypat
     received = []
     ctrl.batch_snapshot.connect(received.append)
     ctrl._dl_worker = new_worker
+    # _build_batch_worker does this in production: mint the identity of the
+    # batch now being shown, and hand the same value to the worker.
+    ctrl._batch_snapshot_id = "live-batch"
 
-    agg = BatchProgressAggregator(speed_smoothing=1.0)
-    agg.reset(["a"])
-    agg.update("a", downloaded_bytes=10, total_bytes=100)
-    snapshot = agg.snapshot()
+    snapshot = _stamped_snapshot("live-batch")
 
     old_worker.batch_snapshot.emit(snapshot)
     assert received == []
 
     new_worker.batch_snapshot.emit(snapshot)
     assert received == [snapshot]
+
+
+def test_stale_batchs_snapshot_is_rejected_even_from_the_current_worker(
+    tmp_path, monkeypatch, app
+):
+    """Worker identity alone is not enough. A snapshot still in flight from the
+    previous batch can arrive on the current worker's connection; it describes
+    work the footer is no longer showing and must be dropped on its own id."""
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    worker = _FakeWorker()
+    worker.batch_snapshot.connect(ctrl._on_worker_batch_snapshot)
+
+    received = []
+    ctrl.batch_snapshot.connect(received.append)
+    ctrl._dl_worker = worker
+    ctrl._batch_snapshot_id = "batch-2"
+
+    worker.batch_snapshot.emit(_stamped_snapshot("batch-1"))
+    assert received == []
+
+    current = _stamped_snapshot("batch-2")
+    worker.batch_snapshot.emit(current)
+    assert received == [current]
+
+
+def test_no_live_batch_means_nothing_repaints_the_footer(tmp_path, monkeypatch, app):
+    """With no batch established there is no identity to match, so a snapshot
+    from anywhere - notably a single-track resume running its own 1-job
+    aggregator - must not reach the footer."""
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    worker = _FakeWorker()
+    worker.batch_snapshot.connect(ctrl._on_worker_batch_snapshot)
+
+    received = []
+    ctrl.batch_snapshot.connect(received.append)
+    ctrl._dl_worker = worker
+    assert ctrl._batch_snapshot_id is None
+
+    worker.batch_snapshot.emit(_stamped_snapshot("some-resume"))
+    assert received == []
 
 
 def test_stale_worker_finish_cannot_end_newer_batch(tmp_path, monkeypatch, app):

@@ -278,17 +278,47 @@ class TestWindowHygiene:
         # 18 real jobs left at the measured 10s each — untouched by the skips.
         assert a.snapshot().eta_seconds == pytest.approx(180.0, abs=1e-6)
 
-    def test_failures_count_as_pipeline_cycles(self):
-        """A failed job still paid for resolve, gate wait, attempt and retry
-        backoff, so it is real evidence about throughput."""
+    def test_failures_that_ran_the_pipeline_count_as_cycles(self):
+        """A failed job that reached the pool still paid for resolve, gate wait,
+        attempt and retry backoff, so it is real evidence about throughput."""
         a, clock = _agg(_keys(10))
         clock.advance(10.0)
         a.complete("k0")
         clock.advance(10.0)
+        a.mark_submitted("k1")
         a.fail("k1")
         snap = a.snapshot()
         assert snap.failed == 1
         assert snap.eta_seconds == pytest.approx(80.0, abs=1e-6)
+
+    def test_setup_failures_before_submission_are_not_cycles(self):
+        """A job whose private workspace cannot be created is failed by the
+        orchestrator up front - before registration, before the pool sees it.
+        Those failures land together on essentially the same instant, so
+        measuring them would satisfy warm-up with a near-zero span and collapse
+        the ETA for every healthy job behind them."""
+        a, clock = _agg(_keys(10))
+        a.fail("k0")        # never submitted: workspace setup failed
+        a.fail("k1")
+        assert a.snapshot().failed == 2
+        assert a.snapshot().eta_seconds is None      # still nothing measured
+
+    def test_mixed_setup_failures_and_real_downloads(self):
+        """The batch that would have broken: two instant setup failures, then
+        normal downloads. The estimate must reflect the real work, not the
+        failures that consumed no pipeline time."""
+        a, clock = _agg(_keys(12))
+        a.fail("k0")
+        a.fail("k1")
+        for i in range(2, 5):
+            clock.advance(10.0)
+            a.mark_submitted(f"k{i}")
+            a.complete(f"k{i}")
+        # 7 real jobs left at the measured 10s each. Had the two setup failures
+        # entered the window, the cycle would have been 30/5 = 6s and the ETA
+        # ~42s instead of ~70s.
+        assert a._throughput_cycle_locked() == pytest.approx(10.0, abs=1e-6)
+        assert a.snapshot().eta_seconds == pytest.approx(70.0, abs=1e-6)
 
     def test_cancellations_do_not_count_as_cycles(self):
         """A mass-cancel lands as a burst of simultaneous terminal transitions
@@ -488,3 +518,125 @@ class TestRateSmoothing:
         before = a.snapshot().eta_seconds
         a.cancel("k9")
         assert a.snapshot().eta_seconds == pytest.approx(before - 10.0, abs=1e-6)
+
+
+# -- The estimate must never sit frozen --------------------------------------
+
+class TestNoFrozenPlateau:
+    """An earlier revision only degraded the rate once the pipeline had been
+    silent for 3x the measured cycle. Between 1x and 3x the `- min(stall,
+    cycle)` term had already saturated, so the value was pinned at exactly
+    `(outstanding - 1) * cycle` - and the heartbeat republished that identical
+    number twice a second, which reads as a broken footer.
+    """
+
+    @staticmethod
+    def _warm(total=20, cycle=10.0, completions=4):
+        a, clock = _agg(_keys(total))
+        for i in range(completions):
+            clock.advance(cycle)
+            a.complete(f"k{i}")
+        return a, clock
+
+    def test_estimate_moves_at_one_and_a_half_cycles(self):
+        a, clock = self._warm()
+        clock.advance(15.0)                 # 1.5x cycle
+        first = a.snapshot().eta_seconds
+        clock.advance(0.5)                  # one heartbeat later
+        assert a.snapshot().eta_seconds != pytest.approx(first, abs=1e-9)
+
+    def test_estimate_moves_at_two_and_a_half_cycles(self):
+        a, clock = self._warm()
+        clock.advance(25.0)                 # 2.5x cycle
+        first = a.snapshot().eta_seconds
+        clock.advance(0.5)
+        assert a.snapshot().eta_seconds != pytest.approx(first, abs=1e-9)
+
+    def test_never_frozen_across_a_whole_quiet_period(self):
+        """Sample at the heartbeat rate right through the old dead zone."""
+        a, clock = self._warm()
+        seen = []
+        for _ in range(60):                 # 30s == 3x cycle, at 2 Hz
+            clock.advance(0.5)
+            seen.append(a.snapshot().eta_seconds)
+        frozen = [
+            i for i in range(1, len(seen))
+            if seen[i] == pytest.approx(seen[i - 1], abs=1e-9)
+        ]
+        assert not frozen, (
+            f"estimate held still at heartbeats {frozen} - values {seen}"
+        )
+
+    def test_overrun_raises_the_estimate(self):
+        """Falling behind should read as more time left, not less."""
+        a, clock = self._warm()
+        clock.advance(10.0)                 # exactly on schedule
+        on_time = a.snapshot().eta_seconds
+        clock.advance(20.0)                 # badly overdue
+        assert a.snapshot().eta_seconds > on_time
+
+    def test_healthy_cycles_are_not_inflated(self):
+        """Degradation must not touch a batch that is keeping pace: inside one
+        cycle the raw measured span is used untouched."""
+        a, clock = self._warm()
+        clock.advance(5.0)                  # half a cycle in, on schedule
+        # 16 outstanding x 10s, minus 5s elapsed into the current cycle.
+        assert a.snapshot().eta_seconds == pytest.approx(155.0, abs=1e-6)
+
+
+# -- Displayed speed ---------------------------------------------------------
+
+class TestSpeedDecaysOnRead:
+    """Speed is a function of elapsed time, but the mutators used to be the only
+    things that advanced it - and a conservative-mode cooldown has no mutators
+    for five to ten seconds. The footer held whatever the last completion left
+    behind, reporting a healthy transfer rate while nothing was transferring.
+    """
+
+    @staticmethod
+    def _mid_download():
+        a, clock = _agg(["a", "b"], smoothing=0.3)
+        a.update("a", downloaded_bytes=1_000, total_bytes=10_000_000,
+                 speed_bps=1_000_000.0)
+        clock.advance(1.0)
+        a.update("a", downloaded_bytes=2_000, total_bytes=10_000_000,
+                 speed_bps=1_000_000.0)
+        return a, clock
+
+    def test_speed_falls_while_nothing_transfers(self):
+        a, clock = self._mid_download()
+        a.complete("a")
+        first = a.snapshot().speed_bps
+        clock.advance(6.0)                  # two half-lives, no callbacks
+        later = a.snapshot().speed_bps
+        assert later < first / 3.0
+
+    def test_speed_reaches_effectively_zero_over_a_long_idle(self):
+        a, clock = self._mid_download()
+        a.complete("a")
+        clock.advance(30.0)                 # ten half-lives of pure silence
+        assert a.snapshot().speed_bps < 1_000.0
+
+    def test_repeated_reads_keep_advancing_the_decay(self):
+        """Each heartbeat read must move it, not just the first."""
+        a, clock = self._mid_download()
+        a.complete("a")
+        seen = []
+        for _ in range(8):
+            clock.advance(1.5)
+            seen.append(a.snapshot().speed_bps)
+        assert seen == sorted(seen, reverse=True)
+        assert len(set(seen)) == len(seen)
+
+    def test_reading_does_not_invent_speed_while_idle(self):
+        a, clock = _agg(["a", "b"])
+        clock.advance(10.0)
+        assert a.snapshot().speed_bps == 0.0
+
+    def test_active_transfer_is_unaffected(self):
+        a, clock = self._mid_download()
+        clock.advance(10.0)
+        a.update("a", downloaded_bytes=9_000, total_bytes=10_000_000,
+                 speed_bps=1_000_000.0)
+        # Still transferring: the decay pulls toward the live rate, not zero.
+        assert a.snapshot().speed_bps > 500_000.0
