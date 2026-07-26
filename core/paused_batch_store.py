@@ -77,12 +77,28 @@ class PausedJob:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Optional["PausedJob"]:
-        """Rebuild a PausedJob, or None if the record is unusable (not a
-        dict, or has no request payload). Never raises."""
+        """Rebuild a PausedJob, or None if the record is unusable. Never
+        raises.
+
+        Unusable means: not a dict, no request payload, or no workspace
+        path. The last one matters as much as the others even though the
+        record "looks" complete. A paused job IS its workspace — the .part
+        file, the intermediates and any already-finished output all live
+        there, and every job the orchestrator can hand out for a pause has
+        one by construction (run_batch assigns a per-job subdir before any
+        job is registered). A record without one can therefore not be
+        resumed from, and, worse, it contributes NOTHING to the keep-set
+        the startup sweep is about to run: whatever workspace that job
+        really had on disk is unprotected and gets deleted. Reporting the
+        record as unreadable makes the store's caller skip the sweep
+        entirely, which is the safe direction."""
         if not isinstance(d, dict):
             return None
         request = d.get("request")
         if not isinstance(request, dict):
+            return None
+        workspace = request.get("workspace_dir")
+        if not isinstance(workspace, str) or not workspace.strip():
             return None
         return cls(
             key=str(d.get("key", "")),
@@ -129,11 +145,38 @@ class PausedBatchStore:
         dropped, the caller got a keep-set missing that job's workspace, and
         the startup sweep deleted a workspace that was very likely still
         resumable — the single worst outcome the corrupt-file check exists
-        to prevent, reached through the one path that bypassed it."""
+        to prevent, reached through the one path that bypassed it.
+
+        The same reasoning applies to the read itself. Only
+        FileNotFoundError means "nothing was ever paused"; a permission
+        error, a lock, or a transient I/O failure on a network profile
+        means the state is unknown, and treating those as "empty" is what
+        would let one bad read wipe every workspace on disk."""
         try:
             raw = self._path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
+            # The ONLY read failure that genuinely means "nothing was ever
+            # paused". Everything else below is a state we could not read,
+            # which is a different answer entirely.
             return [], False
+        except OSError as exc:
+            # A permission problem, a locked file, a directory in the way,
+            # a transient I/O error on a network profile. Lumping these in
+            # with "missing" handed the startup sweep an empty keep-set and
+            # let it delete every workspace on disk because of a hiccup
+            # that will very likely be gone next run.
+            logger.warning(
+                "[PausedBatchStore] Could not read %s (%s) — reporting the "
+                "paused state as unreadable, not as empty", self._path, exc,
+            )
+            return [], True
+        except (UnicodeDecodeError, ValueError) as exc:
+            # Not valid UTF-8: the file exists and holds something, it just
+            # isn't our state. Unreadable, never "nothing paused".
+            logger.warning(
+                "[PausedBatchStore] %s is not readable as UTF-8 (%s)", self._path, exc,
+            )
+            return [], True
         if not raw.strip():
             return [], False
         try:

@@ -320,6 +320,65 @@ def test_one_malformed_record_skips_the_sweep_entirely(tmp_path, monkeypatch, ap
     )
 
 
+def test_an_unreadable_state_file_skips_the_sweep(tmp_path, monkeypatch, app):
+    """A permission error or a transient I/O failure on the state file is
+    not "nothing was paused". Treating it as such handed the sweep an empty
+    keep-set and let one bad read delete every workspace on disk."""
+    from pathlib import Path as _Path
+
+    from utils.paths import make_batch_workspace
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    out = tmp_path / "out"
+    out.mkdir()
+    ctrl._cfg.output_dir = str(out)
+
+    survivor = make_batch_workspace(str(out))
+    (survivor / "jobA").mkdir()
+    (survivor / "jobA" / "song.part").write_bytes(b"partial")
+
+    ctrl._paused_store.path.parent.mkdir(parents=True, exist_ok=True)
+    ctrl._paused_store.path.write_text("{}", encoding="utf-8")
+
+    def _boom(*_a, **_k):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(_Path, "read_text", _boom)
+
+    ctrl.restore_paused_on_startup(lambda cd: None)
+
+    assert (survivor / "jobA" / "song.part").exists(), (
+        "an unreadable state file must disable the sweep, not empty it"
+    )
+
+
+def test_a_record_with_no_workspace_skips_the_sweep(tmp_path, monkeypatch, app):
+    """A paused record that names no workspace protects nothing, so the
+    keep-set it produces cannot be complete. Sweeping against it deleted
+    whatever workspace that job really had."""
+    import json as _json
+
+    from utils.paths import make_batch_workspace
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    out = tmp_path / "out"
+    out.mkdir()
+    ctrl._cfg.output_dir = str(out)
+
+    survivor = make_batch_workspace(str(out))
+    (survivor / "jobA").mkdir()
+    (survivor / "jobA" / "song.part").write_bytes(b"partial")
+
+    ctrl._paused_store.path.parent.mkdir(parents=True, exist_ok=True)
+    ctrl._paused_store.path.write_text(_json.dumps({"jobs": [
+        {"request": {"url": "u", "output_dir": str(out)}},   # no workspace_dir
+    ]}), encoding="utf-8")
+
+    ctrl.restore_paused_on_startup(lambda cd: None)
+
+    assert (survivor / "jobA" / "song.part").exists()
+
+
 def test_sweep_finds_a_workspace_under_a_forgotten_output_dir(tmp_path, monkeypatch, app):
     """The gap the recorded output roots close: an abandoned workspace under
     an output directory the user has changed away from, with NO persisted
@@ -524,10 +583,18 @@ def test_restore_rebuilds_spotify_resolver_for_pending_job(tmp_path, monkeypatch
     from core.paused_batch_store import PausedJob
     import core.scraper as scraper_mod
 
+    from utils.paths import make_batch_workspace
+
     ctrl = _controller(tmp_path, monkeypatch, app)
     out = tmp_path / "out"
     out.mkdir()
     ctrl._cfg.output_dir = str(out)
+
+    # A pending-match job still has a workspace: run_batch assigns every
+    # job its per-job subdir before any of them is registered, so the
+    # pre-resolve snapshot a pause takes already carries one.
+    workspace = make_batch_workspace(str(out)) / "jobA"
+    workspace.mkdir()
 
     ctrl._paused_store.save([PausedJob(
         key="a",
@@ -538,6 +605,7 @@ def test_restore_rebuilds_spotify_resolver_for_pending_job(tmp_path, monkeypatch
         },
         request={
             "url": "pending-spotify-match", "output_dir": str(out),
+            "workspace_dir": str(workspace),
             "had_pending_resolver": True,
         },
     )])

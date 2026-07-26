@@ -610,7 +610,7 @@ class DownloadController(QObject):
         re-running yt-dlp against an already-complete file (which finds
         nothing to do, fires no postprocessor hook, and fails)."""
         import dataclasses
-        return dataclasses.replace(
+        snapshot = dataclasses.replace(
             req,
             resumable=True,
             cancel_event=None,
@@ -618,7 +618,15 @@ class DownloadController(QObject):
             on_finished=None,
             on_error=None,
             publish_gate=None,
+            publish_release=None,
         )
+        # dataclasses.replace rebuilds through __init__ and resets the
+        # init=False output-path tracker. Re-attached because it is the only
+        # in-memory record of what yt-dlp produced for a job paused in the
+        # instant before its post-download checkpoint was written (see
+        # DownloadRequest.snapshot_copy).
+        snapshot._final_output_path = req._final_output_path  # noqa: SLF001
+        return snapshot
 
     def _worker_for_key(self, key: str):
         """The running worker that currently owns job ``key`` — the main
@@ -716,23 +724,58 @@ class DownloadController(QObject):
             worker.cancel()
 
     def cancel_all(self) -> None:
-        """Cancel the engine (all in-flight yt-dlp downloads) and the worker."""
+        """Cancel everything in flight: the engine, the batch worker, and
+        every per-track resume worker.
+
+        The engine-wide event is NOT sufficient on its own, which is why
+        each worker is cancelled explicitly. A job that reaches ffmpeg —
+        an HLS/DASH stream, or the generic stream-intercept path — polls
+        exactly ONE event while the child process runs, and that is the
+        job's own per-request event (core.hls_downloader.download_hls's
+        ``cancel_event`` parameter, which core.downloader passes as
+        ``request.cancel_event or self._cancel_event``). With a per-request
+        event present, as every batched job has, the engine-wide flag is
+        never looked at, so the remux ran to completion and only then
+        noticed it had been cancelled. Only the worker's own cancel()
+        reaches DownloadOrchestrator.cancel(), which sets those per-job
+        events and shuts the pool down.
+
+        Symmetric with global_pause, which already covers every running
+        worker: a track the user resumed individually lives in its own
+        single-job worker and was previously left running by Cancel All."""
         self._set_termination_intent(BatchOutcome.CANCELLED_BY_USER)
         self._engine.cancel_all()
-        if self._dl_worker and self._dl_worker.isRunning():
-            self._dl_worker.cancel()
+        for worker in [self._dl_worker, *self._resume_workers]:
+            if worker is not None and worker.isRunning():
+                worker.cancel()
 
-    def pause_track(self, card) -> None:
-        """
-        Save the in-flight request for this card and cancel only that track.
+    def pause_track(self, card) -> bool:
+        """Save the in-flight request for this card and cancel only that
+        track. Returns whether the track was actually paused.
+
+        The card is relabelled "paused" ONLY when a snapshot was genuinely
+        taken — which is also exactly when the cancel was delivered (see
+        _pause_and_snapshot). Setting it unconditionally was a lie in every
+        case where the snapshot failed: no worker owns the key, or the job
+        had already finished, errored or been claimed by its own thread. A
+        card reading "paused" over a download that is still running, or
+        over one that already completed, is worse than no feedback at all —
+        the user is offered a Resume that has nothing to resume.
+
         AppWindow looks up the card from _index_to_card and passes it here.
         """
         key = str(id(card))
         snapshot = self._pause_and_snapshot(key)
-        if snapshot is not None:
-            self._paused_requests[key] = snapshot
+        if snapshot is None:
+            logger.info(
+                "[DownloadController] Nothing to pause for card %s — leaving "
+                "its status as %r", key, card.get_status(),
+            )
+            return False
+        self._paused_requests[key] = snapshot
         card.set_status("paused")
         self._persist_paused_state()
+        return True
 
     # ── Paused-state persistence (single authoritative store) ─────────────────
 

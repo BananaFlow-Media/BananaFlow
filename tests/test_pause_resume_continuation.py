@@ -64,12 +64,12 @@ class _FakeOrchestrator:
         self._jobs = dict(jobs)
 
     def live_request_snapshot(self, key: str):
-        import dataclasses
-
         req = self._jobs.get(key)
         if req is None:
             return None, None
-        return None, dataclasses.replace(req)
+        # snapshot_copy, matching the real orchestrator: dataclasses.replace
+        # would drop the init=False output-path tracker.
+        return None, req.snapshot_copy()
 
 
 class _FakeLiveWorker:
@@ -186,18 +186,57 @@ class TestPauseAResumedTrack:
         assert resumed_card.get_status() == "paused"
         assert resume_worker.cancelled is True
 
-    def test_pause_track_for_an_unknown_key_is_a_noop_snapshot(
+    def test_pause_track_does_not_relabel_a_card_it_could_not_pause(
         self, tmp_path, monkeypatch, app,
     ):
+        """No worker owns the key, so nothing was snapshotted and no cancel
+        was delivered. Labelling the card "paused" anyway offered the user a
+        Resume with nothing behind it, over a download that is either still
+        running or already finished."""
         ctrl = _controller(tmp_path, monkeypatch, app)
         card = _FakeCard("A", status="downloading")
         ctrl._dl_worker = None
         ctrl._resume_workers = []
 
-        ctrl.pause_track(card)
-
+        assert ctrl.pause_track(card) is False
         assert ctrl._paused_requests == {}
+        assert card.get_status() == "downloading", (
+            "the card must keep its real status when the pause did not happen"
+        )
+
+    def test_pause_track_does_not_relabel_a_job_that_already_finished(
+        self, tmp_path, monkeypatch, app,
+    ):
+        """The orchestrator refuses a snapshot for a job that reached a
+        terminal state. Overwriting a completed card with "paused" is the
+        same lie in the other direction."""
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        card = _FakeCard("A", status="done")
+        key = str(id(card))
+        ctrl._key_to_card = {key: card}
+        worker = _FakeLiveWorker([(key, _req("A"))])
+        # Stand in for a job the orchestrator considers terminal.
+        worker._orch.live_request_snapshot = lambda _k: (None, None)
+        ctrl._dl_worker = worker
+
+        assert ctrl.pause_track(card) is False
+        assert card.get_status() == "done"
+        assert ctrl._paused_requests == {}
+
+    def test_pause_track_labels_and_records_when_it_really_paused(
+        self, tmp_path, monkeypatch, app,
+    ):
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        card = _FakeCard("A", status="downloading")
+        key = str(id(card))
+        ctrl._key_to_card = {key: card}
+        worker = _FakeLiveWorker([(key, _req("A", workspace="/ws/batch-1/jobA"))])
+        ctrl._dl_worker = worker
+
+        assert ctrl.pause_track(card) is True
         assert card.get_status() == "paused"
+        assert key in ctrl._paused_requests
+        assert worker.cancelled_keys == [key]
 
 
 # ── Post-download pause (post-processing / publish phase) ────────────────────
@@ -330,6 +369,111 @@ class TestPostDownloadResumeCheckpoint:
         engine = DownloadEngine()
         req = _req("A", workspace=str(tmp_path))
         assert engine._resume_checkpoint(req) is None
+
+    def test_checkpoint_is_recorded_from_what_ytdlp_produced(self):
+        """Written as the very next operation after yt-dlp returns, with no
+        I/O of its own — the point is that nothing can run in between."""
+        from core.downloader import DownloadEngine
+
+        req = _req("A", workspace="/ws/batch-1/jobA")
+        req._final_output_path = "/ws/batch-1/jobA/A.mp3"
+
+        DownloadEngine._record_post_download_checkpoint(req)
+
+        assert req.resume_phase == "postprocess"
+        assert req.resume_final_path == "/ws/batch-1/jobA/A.mp3"
+
+    def test_no_checkpoint_when_ytdlp_produced_nothing(self):
+        """A ytsearch that matched no video must fall through to the normal
+        "output file is missing" error, not claim a resume point it has
+        not got."""
+        from core.downloader import DownloadEngine
+
+        req = _req("A", workspace="/ws/batch-1/jobA")
+        DownloadEngine._record_post_download_checkpoint(req)
+
+        assert req.resume_phase is None
+        assert req.resume_final_path is None
+
+    def test_checkpoint_exists_before_the_post_download_cancel_check(self, tmp_path):
+        """The window the finding named: yt-dlp has finished, but the
+        checkpoint used to be assigned only after two context-manager exits
+        (real file I/O), a cancellation check and an existence probe. A
+        pause landing anywhere in there snapshotted a request with no
+        checkpoint AND no output path, and the resume died with "output
+        file is missing"."""
+        from unittest.mock import MagicMock, patch
+
+        from core.downloader import DownloadEngine
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        done = workspace / "A.mp3"
+        done.write_bytes(b"complete")
+
+        engine = DownloadEngine()
+        req = _req("A", workspace=str(workspace))
+        req.output_dir = str(tmp_path / "out")
+        req.on_progress = req.on_finished = req.on_error = lambda p: None
+
+        seen: dict = {}
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = lambda s: mock_ydl
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+
+        def _fake_download(_urls):
+            # Exactly what the postprocessor hook does for a real run.
+            req._final_output_path = str(done)
+
+        mock_ydl.download = _fake_download
+
+        def _capture_pipeline(_r, _p):
+            # By the time anything downstream of yt-dlp runs, the checkpoint
+            # must already be on the request.
+            seen["phase"] = req.resume_phase
+            seen["path"] = req.resume_final_path
+            return []
+
+        with patch("yt_dlp.YoutubeDL") as cls, \
+             patch.object(engine, "_run_final_pipeline", side_effect=_capture_pipeline):
+            cls.return_value = mock_ydl
+            engine.download(req)
+
+        assert seen["phase"] == "postprocess"
+        assert seen["path"] == str(done)
+
+    def test_pause_snapshot_keeps_the_output_path_tracker(
+        self, tmp_path, monkeypatch, app,
+    ):
+        """Belt and braces for the residual instant before the checkpoint
+        lands: the snapshot keeps _final_output_path, which
+        dataclasses.replace resets because the field is init=False."""
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        card = _FakeCard("A", status="downloading")
+        key = str(id(card))
+        live = _req("A", workspace="/ws/batch-1/jobA")
+        live._final_output_path = "/ws/batch-1/jobA/A.mp3"
+        ctrl._key_to_card = {key: card}
+        ctrl._dl_worker = _FakeLiveWorker([(key, live)])
+
+        ctrl.global_pause()
+
+        snap = ctrl._paused_requests[key]
+        assert snap._final_output_path == "/ws/batch-1/jobA/A.mp3"
+
+    def test_snapshot_copy_preserves_init_false_trackers(self):
+        from core.downloader import DownloadRequest, MediaType
+
+        req = DownloadRequest(url="u", output_dir="/out", media_type=MediaType.AUDIO)
+        req._final_output_path = "/ws/x.mp3"
+        req._thumb_sent = True
+
+        copy = req.snapshot_copy()
+
+        assert copy is not req
+        assert copy._final_output_path == "/ws/x.mp3"
+        assert copy._thumb_sent is True
 
 
 # ── global_pause ─────────────────────────────────────────────────────────────

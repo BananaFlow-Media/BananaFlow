@@ -230,16 +230,61 @@ class TestPausedBatchStore:
         ]}), encoding="utf-8")
         assert PausedBatchStore(p).workspace_dirs_or_none() is None
 
-    def test_workspace_dirs_or_none_tolerates_a_record_with_no_workspace(self, tmp_path):
-        """A well-formed record that simply has no workspace yet (a job
-        paused before one was assigned) is readable -- it must NOT be
-        mistaken for corruption and disable the sweep entirely."""
+    def test_a_record_with_no_workspace_is_unusable_not_merely_empty(self, tmp_path):
+        """A paused job IS its workspace: the .part file, the intermediates
+        and any already-finished output all live there, and every job the
+        orchestrator can hand out for a pause has one by construction. A
+        record without one cannot be resumed from AND contributes nothing to
+        the keep-set, so whatever workspace that job really had on disk was
+        left unprotected and swept. It counts as unreadable."""
         p = tmp_path / "paused.json"
         p.write_text(json.dumps({"jobs": [
-            {"request": {"url": "u", "output_dir": "/out"}},
+            {"request": {"url": "u", "output_dir": "/out"}},          # no workspace
             {"request": {"url": "v", "workspace_dir": "/ws/batch-1/ok"}},
         ]}), encoding="utf-8")
-        assert PausedBatchStore(p).workspace_dirs_or_none() == ["/ws/batch-1/ok"]
+
+        store = PausedBatchStore(p)
+        assert store.workspace_dirs_or_none() is None
+        # It is also not offered up as something resumable.
+        assert [j.workspace_dir for j in store.load()] == ["/ws/batch-1/ok"]
+
+    def test_a_blank_workspace_string_counts_the_same(self, tmp_path):
+        p = tmp_path / "paused.json"
+        p.write_text(json.dumps({"jobs": [
+            {"request": {"url": "u", "workspace_dir": "   "}},
+        ]}), encoding="utf-8")
+        assert PausedBatchStore(p).workspace_dirs_or_none() is None
+        assert PausedBatchStore(p).load() == []
+
+    def test_an_unreadable_file_is_not_the_same_as_a_missing_one(self, tmp_path, monkeypatch):
+        """Only FileNotFoundError means "nothing was ever paused". A
+        permission error, a lock, or a transient I/O failure on a network
+        profile means the state is UNKNOWN — reporting it as empty handed
+        the startup sweep an empty keep-set and let one bad read delete
+        every workspace on disk."""
+        p = tmp_path / "paused.json"
+        p.write_text(json.dumps({"jobs": []}), encoding="utf-8")
+
+        def _boom(*_a, **_k):
+            raise PermissionError(13, "Access is denied")
+
+        monkeypatch.setattr(type(p), "read_text", _boom)
+
+        store = PausedBatchStore(p)
+        assert store.workspace_dirs_or_none() is None
+        assert store.load() == []      # still never raises
+
+    def test_undecodable_bytes_are_reported_as_unreadable(self, tmp_path):
+        p = tmp_path / "paused.json"
+        p.write_bytes(b"\xff\xfe\x00\x00not utf-8 at all \xc3\x28")
+        assert PausedBatchStore(p).workspace_dirs_or_none() is None
+        assert PausedBatchStore(p).load() == []
+
+    def test_a_genuinely_missing_file_is_still_an_empty_keep_set(self, tmp_path):
+        """The other half: a first run with nothing ever paused must NOT
+        disable the sweep, or stale workspaces would never be reclaimed."""
+        store = PausedBatchStore(tmp_path / "never" / "written.json")
+        assert store.workspace_dirs_or_none() == []
 
     def test_unexpected_shape_is_reported_as_unreadable(self, tmp_path):
         p = tmp_path / "paused.json"
