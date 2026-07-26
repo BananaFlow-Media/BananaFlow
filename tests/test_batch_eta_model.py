@@ -67,13 +67,22 @@ class TestWarmUp:
         a.complete("k0")
         assert a.snapshot().eta_seconds is None
 
-    def test_eta_appears_on_the_second_completion(self):
+    def test_no_eta_after_only_two_completions(self):
+        """One interval is a coin flip. Measured across randomised batches, a
+        rate from a single interval missed by more than a quarter in a third of
+        runs - the "seven minutes, then four, then one and a half" complaint."""
         a, clock = _agg(_keys(10))
-        clock.advance(10.0)
-        a.complete("k0")
-        clock.advance(10.0)
-        a.complete("k1")
-        assert a.snapshot().eta_seconds == pytest.approx(80.0, abs=1e-6)
+        for i in range(2):
+            clock.advance(10.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is None
+
+    def test_eta_appears_on_the_third_completion(self):
+        a, clock = _agg(_keys(10))
+        for i in range(3):
+            clock.advance(10.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds == pytest.approx(70.0, abs=1e-6)
 
     def test_downloading_bytes_alone_does_not_produce_an_eta(self):
         """Byte totals used to be enough to publish a number. They are not
@@ -223,11 +232,12 @@ class TestParallelBurstArrivals:
         assert snap.eta_seconds is not None
         assert snap.eta_seconds == pytest.approx(14 * (10.0 / 3.0), abs=1e-6)
 
-    def test_a_serialized_batch_still_quotes_after_two_completions(self):
+    def test_a_serialized_batch_quotes_after_three_completions(self):
         """One job in flight means the first completion ends the startup, so
-        the second one already measures steady state."""
+        the two after it are already steady state - where a parallel batch
+        needs two whole waves."""
         a, clock = _agg(_keys(20))
-        for i in range(2):
+        for i in range(3):
             a.update(f"k{i}", fraction=0.5, speed_bps=1000.0)
             clock.advance(10.0)
             a.complete(f"k{i}")
@@ -324,11 +334,11 @@ class TestWindowHygiene:
             a.mark_preexisting(f"k{i}")
         assert a.snapshot().eta_seconds is None      # still no real evidence
 
-        for i in range(20, 22):
+        for i in range(20, 23):
             clock.advance(10.0)
             a.complete(f"k{i}")
-        # 18 real jobs left at the measured 10s each — untouched by the skips.
-        assert a.snapshot().eta_seconds == pytest.approx(180.0, abs=1e-6)
+        # 17 real jobs left at the measured 10s each — untouched by the skips.
+        assert a.snapshot().eta_seconds == pytest.approx(170.0, abs=1e-6)
 
     def test_failures_that_ran_the_pipeline_count_as_cycles(self):
         """A failed job that reached the pool still paid for resolve, gate wait,
@@ -337,11 +347,13 @@ class TestWindowHygiene:
         clock.advance(10.0)
         a.complete("k0")
         clock.advance(10.0)
-        a.mark_submitted("k1")
-        a.fail("k1")
+        a.complete("k1")
+        clock.advance(10.0)
+        a.mark_submitted("k2")
+        a.fail("k2")
         snap = a.snapshot()
         assert snap.failed == 1
-        assert snap.eta_seconds == pytest.approx(80.0, abs=1e-6)
+        assert snap.eta_seconds == pytest.approx(70.0, abs=1e-6)
 
     def test_setup_failures_before_submission_are_not_cycles(self):
         """A job whose private workspace cannot be created is failed by the
@@ -376,10 +388,9 @@ class TestWindowHygiene:
         """A mass-cancel lands as a burst of simultaneous terminal transitions
         that never represented work being done."""
         a, clock = _agg(_keys(10))
-        clock.advance(10.0)
-        a.cancel("k0")
-        clock.advance(10.0)
-        a.cancel("k1")
+        for i in range(3):
+            clock.advance(10.0)
+            a.cancel(f"k{i}")
         assert a.snapshot().eta_seconds is None
 
     def test_window_is_bounded_and_tracks_a_rate_change(self):
@@ -426,7 +437,7 @@ class TestTailFloor:
 class TestPerTrackNeverBecomesBatch:
     def test_per_track_eta_does_not_reach_the_batch_estimate(self):
         a, clock = _agg(_keys(40))
-        for i in range(2):
+        for i in range(3):
             clock.advance(10.0)
             a.complete(f"k{i}")
         baseline = a.snapshot().eta_seconds
@@ -439,7 +450,7 @@ class TestPerTrackNeverBecomesBatch:
 
     def test_job_eta_seconds_is_stored_but_never_read_by_the_estimator(self):
         a, clock = _agg(_keys(20))
-        for i in range(2):
+        for i in range(3):
             clock.advance(10.0)
             a.complete(f"k{i}")
         with_none = a.snapshot().eta_seconds
@@ -473,7 +484,7 @@ class TestLifecycle:
 
     def test_paused_jobs_leave_the_outstanding_count(self):
         a, clock = _agg(_keys(10))
-        for i in range(2):
+        for i in range(3):
             clock.advance(10.0)
             a.complete(f"k{i}")
         before = a.snapshot().eta_seconds
@@ -486,7 +497,7 @@ class TestLifecycle:
         publish. That tail is inside the measured cycle, so the batch estimate
         must not shrink toward zero while it runs."""
         a, clock = _agg(_keys(10))
-        for i in range(2):
+        for i in range(3):
             clock.advance(30.0)
             a.complete(f"k{i}")
         a.update("k2", fraction=0.95, speed_bps=0.0)
@@ -506,7 +517,7 @@ class TestLifecycle:
     def test_reset_mints_a_new_batch_id_and_clears_history(self):
         a, clock = _agg(_keys(4))
         first_id = a.snapshot().batch_id
-        for i in range(2):
+        for i in range(3):
             clock.advance(5.0)
             a.complete(f"k{i}")
         assert a.snapshot().eta_seconds is not None
@@ -518,7 +529,7 @@ class TestLifecycle:
 
     def test_eta_is_never_negative_under_a_long_overrun(self):
         a, clock = _agg(_keys(3))
-        for i in range(2):
+        for i in range(3):
             clock.advance(2.0)
             a.complete(f"k{i}")
         clock.advance(10_000.0)
@@ -564,7 +575,7 @@ class TestRateSmoothing:
         """Smoothing is on the measured rate, not the finished number, so a
         cancellation takes effect at once rather than bleeding in."""
         a, clock = _agg(_keys(10))
-        for i in range(2):
+        for i in range(3):
             clock.advance(10.0)
             a.complete(f"k{i}")
         before = a.snapshot().eta_seconds
