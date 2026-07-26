@@ -81,10 +81,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_with_errors": "{ok} completed, {failed} failed.",
         "status_stopped_summary": "Downloads stopped — {done} of {total} completed.",
         "status_stopped_error": "Downloads stopped because of an error.",
-        "eta_calculating": "Calculating time remaining…",
-        "eta_about_sec": "About {n} sec left",
-        "eta_about_min": "About {n} min left",
-        "eta_about_hr": "About {h} hr {m} min left",
+        # Kept short: it has to fit the fixed-width footer ETA slot alongside
+        # the longest real duration string, and it is now shown at the start of
+        # every batch while the throughput estimate warms up.
+        "eta_calculating": "Calculating…",
+        # {time} is a preformatted M:SS / H:MM:SS duration from
+        # utils.time_format.seconds_to_str, so the footer can count down by the
+        # second instead of rounding to whole minutes. The old per-unit keys
+        # (eta_about_sec/min/hr) could not express seconds above a minute.
+        "eta_about_left": "About {time} left",
         "eta_tooltip": "Estimated time remaining for the whole batch",
         "starting_downloads": "Starting {n} download{plural}…",
         "download_progress_count": "Downloading {current} / {total}…",
@@ -1445,10 +1450,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_with_errors": "{ok} הושלמו, {failed} נכשלו.",
         "status_stopped_summary": "ההורדות נעצרו — {done} מתוך {total} הושלמו.",
         "status_stopped_error": "ההורדות נעצרו עקב שגיאה.",
-        "eta_calculating": "מחשב את הזמן הנותר…",
-        "eta_about_sec": "בערך {n} שנ׳ נותרו",
-        "eta_about_min": "בערך {n} דק׳ נותרו",
-        "eta_about_hr": "בערך {h} שע׳ {m} דק׳ נותרו",
+        "eta_calculating": "מחשב…",
+        "eta_about_left": "בערך {time} נותרו",
         "eta_tooltip": "הערכת הזמן הנותר לאצווה כולה",
         "starting_downloads": "מתחיל הורדה של {n} פריטים…",
         "download_progress_count": "מוריד {current} מתוך {total}…",

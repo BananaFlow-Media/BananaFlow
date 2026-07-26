@@ -60,6 +60,13 @@ logger = logging.getLogger(__name__)
 
 _SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
+# How often the batch emits a progress snapshot regardless of download activity,
+# and the floor between two snapshots emitted from a track's progress hook. Both
+# use the same value so the UI sees one steady ~2 Hz stream however the batch is
+# spending its time. Fast enough for a per-second countdown to stay honest,
+# slow enough to stay far below the cost of a repaint.
+_HEARTBEAT_INTERVAL = 0.5
+
 
 def _safe_subdir_name(key: str) -> str:
     """Filesystem-safe, collision-safe per-job workspace subdirectory name
@@ -558,6 +565,35 @@ class DownloadOrchestrator:
         n_workers = min(self._max_workers, self._total)
         futures: dict = {}
 
+        # ── Snapshot heartbeat ────────────────────────────────────────────────
+        # Batch snapshots used to be emitted only from inside a track's yt-dlp
+        # progress hook, so the footer stopped updating for every stretch where
+        # no bytes were moving — the 5-10s conservative cooldown, Spotify match
+        # resolution, waiting on the serial gate, the gap before the first byte,
+        # and the whole post-processing tail. On a conservative batch that is
+        # most of the wall clock, which is why the progress bar and the ETA
+        # appeared frozen.
+        #
+        # A single daemon thread spanning the entire batch fixes that for every
+        # phase at once. It deliberately covers the staggered submit loop below
+        # as well: with a large lazy batch that loop can run for minutes before
+        # the completion drain is even reached, so a heartbeat attached to the
+        # drain loop would leave exactly the batch opening — the moment the user
+        # is watching most closely — unattended.
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat() -> None:
+            while not heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+                try:
+                    self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+                except Exception:  # noqa: BLE001 - a UI hiccup must not kill the batch
+                    logger.debug("[Orchestrator] heartbeat snapshot failed", exc_info=True)
+
+        heartbeat = threading.Thread(
+            target=_heartbeat, name="dl-heartbeat", daemon=True
+        )
+        heartbeat.start()
+
         # Register EVERY job's cancel event, per-job lock and live request
         # up front — before the (staggered, therefore slow) submit loop
         # below, not one-at-a-time inside it.
@@ -651,6 +687,8 @@ class DownloadOrchestrator:
                             key, exc, exc_info=True,
                         )
         finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=_HEARTBEAT_INTERVAL * 2)
             pool.shutdown(wait=False)
             with self._pool_lock:
                 self._pool = None
@@ -1022,7 +1060,7 @@ class DownloadOrchestrator:
         # engine-start status.
         engine_start_ts = time.monotonic()
         first_byte_seen = [False]
-        update_counter = [0]
+        last_snapshot_emit = [0.0]
 
         def on_progress(p: DownloadProgress) -> None:
             if not first_byte_seen[0] and ((p.downloaded_bytes or 0) > 0 or (p.fraction or 0) > 0):
@@ -1054,9 +1092,16 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_progress", key, p.fraction)
             self._safe_cb("on_track_speed", key, p.speed_bps or 0.0, p.eta_seconds or 0.0)
 
-            update_counter[0] += 1
-            if update_counter[0] % 10 != 0:
+            # Throttle by elapsed time, not by tick count. The counter this
+            # replaces was per-job, so N jobs downloading in parallel emitted N
+            # times as often as one job did, and the rate also rode on whatever
+            # cadence yt-dlp happened to report at. Wall-clock throttling gives
+            # the UI one steady stream regardless of batch shape. The heartbeat
+            # in run_batch covers the stretches where this hook is silent.
+            now = time.monotonic()
+            if now - last_snapshot_emit[0] < _HEARTBEAT_INTERVAL:
                 return
+            last_snapshot_emit[0] = now
             snapshot = self._aggregator.snapshot()
             self._safe_cb("on_overall_progress", snapshot.progress)
             self._safe_cb("on_batch_snapshot", snapshot)

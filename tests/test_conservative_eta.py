@@ -1,16 +1,24 @@
 """
-tests/test_conservative_eta.py  –  Conservative-mode YouTube ETA overhead
-==========================================================================
-core.batch_progress.BatchProgressAggregator must fold the mandatory,
-non-overlappable cooldown the orchestrator's YouTube-conservative gate
-enforces (core.youtube_reliability.CONSERVATIVE_DELAY_RANGE) into the
-whole-batch ETA — otherwise the footer promises a time that ignores a delay
-the application itself is forcing.
+tests/test_conservative_eta.py  –  Conservative-mode YouTube cooldown in the ETA
+================================================================================
+The orchestrator's YouTube-conservative gate (core.youtube_reliability) runs
+one YouTube job at a time and sleeps CONSERVATIVE_DELAY_RANGE between them. The
+whole-batch ETA must account for that delay, because it is wall-clock time the
+application itself is forcing on the user.
 
-These tests are deterministic (a FakeClock stands in for time.monotonic) and
-cover: conservative mode off, one/many queued serialized jobs, a partially
-completed batch, pause/resume, cancellation, unknown/known byte sizes, and
-zero active speed during a cooldown.
+It used to account for it by *modelling* it: one average cooldown added per job
+still queued behind the gate, plus one average start-stagger per unsubmitted
+job. On a real 59-track batch that opened at ~22 minutes against a ~9 minute
+actual — the stagger term double-counted sleeps that overlap the gate wait
+entirely, and neither term shrank as the delays were actually paid.
+
+BatchProgressAggregator now *measures* instead. A job only becomes terminal
+after it has published, so the cooldown that preceded it is already inside the
+wall time between completions. These tests pin that: the cooldown reaches the
+estimate through measurement, no modelled overhead survives on top of it, and
+the estimate tracks the real serial rate rather than a projection of it.
+
+Deterministic — a FakeClock stands in for time.monotonic.
 """
 
 from __future__ import annotations
@@ -33,6 +41,11 @@ class FakeClock:
 
 DELAY_RANGE = (5.0, 10.0)   # avg 7.5s — matches core.youtube_reliability shape
 
+# A serialized YouTube track costs roughly one download plus one cooldown.
+DOWNLOAD_S = 2.0
+COOLDOWN_S = 7.5
+SERVICE_S = DOWNLOAD_S + COOLDOWN_S     # 9.5s per track, one at a time
+
 
 def _agg(keys, conservative=True, clock=None, smoothing=1.0):
     a = BatchProgressAggregator(
@@ -40,167 +53,183 @@ def _agg(keys, conservative=True, clock=None, smoothing=1.0):
         time_fn=clock,
         conservative_delay_range=DELAY_RANGE if conservative else None,
     )
-    a.reset(keys)
+    a.reset(keys, conservative_delay_range=DELAY_RANGE if conservative else None)
+    if conservative:
+        for k in keys:
+            a.mark_serialized(k)
     return a
 
 
-class TestConservativeModeDisabled:
-    def test_no_overhead_when_delay_range_not_configured(self):
-        a = _agg(["a", "b"], conservative=False)
-        a.mark_serialized("b")   # marking has no effect without a delay range
-        a.update("a", downloaded_bytes=50, total_bytes=100, speed_bps=50.0)
+def _run_serial_tracks(a, clock, keys, service=SERVICE_S):
+    """Complete `keys` one at a time, each costing `service` wall seconds."""
+    for k in keys:
+        clock.advance(service)
+        a.complete(k)
+
+
+# ── The cooldown reaches the ETA by measurement ──────────────────────────────
+
+class TestCooldownIsMeasuredNotModelled:
+    def test_serial_cooldown_shows_up_in_the_estimate(self):
+        clock = FakeClock()
+        keys = [f"k{i}" for i in range(20)]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, keys[:4])
+        # 4 tracks in 4 × 9.5s => the measured cycle is the full service cost,
+        # cooldown included, not just the 2s of transfer.
         snap = a.snapshot()
-        # Pure byte-based ETA: (100-50 + 100) remaining / 50 bps = 3.0s exactly,
-        # no conservative overhead added.
-        assert snap.eta_seconds == pytest.approx(3.0, abs=1e-6)
+        assert snap.eta_seconds == pytest.approx(16 * SERVICE_S, abs=1e-6)
 
-
-class TestOneQueuedSerializedJob:
-    def test_overhead_equals_one_average_cooldown(self):
-        a = _agg(["a"])
-        a.mark_serialized("a")   # still QUEUED — never updated
+    def test_no_modelled_overhead_is_added_on_top(self):
+        """The old model added 7.5s per queued serialized job *in addition* to
+        the transfer estimate. Nothing may do that any more, or the cooldown
+        would be counted twice: once measured, once modelled."""
+        clock = FakeClock()
+        keys = [f"k{i}" for i in range(20)]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, keys[:4])
+        measured_only = 16 * SERVICE_S
         snap = a.snapshot()
-        assert snap.eta_seconds == pytest.approx(7.5, abs=1e-6)
-        assert snap.eta_is_estimate is True
+        # The old formula would have produced measured_only + 16 × 7.5 = +120s.
+        assert snap.eta_seconds < measured_only + 1.0
 
-    def test_overhead_added_on_top_of_byte_based_eta(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("b")   # b queued behind the gate
-        a.update("a", downloaded_bytes=50, total_bytes=100, speed_bps=100.0)
+    def test_conservative_flag_does_not_change_the_estimate(self):
+        """mark_serialized is diagnostic now. Two identically-paced batches
+        must estimate identically whether or not the gate flag is set."""
+        keys = [f"k{i}" for i in range(10)]
+
+        c1 = FakeClock()
+        gated = _agg(keys, conservative=True, clock=c1)
+        _run_serial_tracks(gated, c1, keys[:3])
+
+        c2 = FakeClock()
+        plain = _agg(keys, conservative=False, clock=c2)
+        _run_serial_tracks(plain, c2, keys[:3])
+
+        assert gated.snapshot().eta_seconds == pytest.approx(
+            plain.snapshot().eta_seconds, abs=1e-6
+        )
+
+    def test_estimate_tracks_the_real_batch_duration(self):
+        """The regression this whole change exists for: a 59-track serialized
+        batch that really takes ~9.3 minutes must not be announced as ~22."""
+        clock = FakeClock()
+        keys = [f"k{i}" for i in range(59)]
+        a = _agg(keys, clock=clock)
+        start = clock.t
+        true_total = 59 * SERVICE_S            # 560.5s ≈ 9.3 min
+
+        # Warm-up: no number at all until two tracks have actually completed.
+        assert a.snapshot().eta_seconds is None
+
+        done = 0
+        for target in (2, 15, 30, 45):
+            _run_serial_tracks(a, clock, keys[done:target])
+            done = target
+            snap = a.snapshot()
+            true_remaining = true_total - (clock.t - start)
+            assert snap.eta_seconds == pytest.approx(true_remaining, rel=0.25), (
+                f"after {done} completions: predicted {snap.eta_seconds:.0f}s "
+                f"vs true {true_remaining:.0f}s"
+            )
+
+
+# ── Zero speed during a cooldown ─────────────────────────────────────────────
+
+class TestZeroSpeedDuringCooldown:
+    def test_estimate_survives_a_cooldown_with_nothing_active(self):
+        clock = FakeClock()
+        keys = [f"k{i}" for i in range(10)]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, keys[:3])
+        before = a.snapshot().eta_seconds
+
+        clock.advance(COOLDOWN_S)          # gate cooldown: no job transferring
         snap = a.snapshot()
-        # network eta = (50 + 100) remaining / 100 bps = 1.5s; + 7.5s cooldown
-        assert snap.eta_seconds == pytest.approx(1.5 + 7.5, abs=1e-6)
+        assert snap.raw_speed_bps == 0.0
+        assert snap.eta_seconds is not None
+        # It counts down through the dead time rather than freezing or resetting.
+        assert snap.eta_seconds < before
+
+    def test_speed_decays_instead_of_snapping_to_zero(self):
+        """Speed is a display metric and used to flicker to 0 on every
+        completion and throughout every cooldown. It now decays."""
+        clock = FakeClock()
+        a = _agg(["a", "b"], clock=clock, smoothing=0.3)
+        a.update("a", downloaded_bytes=1000, total_bytes=10_000, speed_bps=1000.0)
+        clock.advance(0.5)
+        a.update("a", downloaded_bytes=1500, total_bytes=10_000, speed_bps=1000.0)
+        a.complete("a")
+        # Immediately after the completion the aggregate is still settling.
+        assert a.snapshot().speed_bps > 0.0
 
 
-class TestManyQueuedSerializedJobs:
-    def test_overhead_scales_linearly(self):
-        a = _agg(["a", "b", "c", "d"])
-        for k in ("b", "c", "d"):
-            a.mark_serialized(k)
-        snap = a.snapshot()
-        # 3 queued serialized jobs * 7.5s average = 22.5s (no byte info at all
-        # for "a" either, so nothing else contributes).
-        assert snap.eta_seconds == pytest.approx(22.5, abs=1e-6)
-
-
-class TestPartiallyCompletedBatch:
-    def test_completed_serialized_jobs_do_not_count(self):
-        a = _agg(["a", "b", "c"])
-        for k in ("a", "b", "c"):
-            a.mark_serialized(k)
-        a.complete("a", final_bytes=1000)   # finished — no longer queued
-        snap = a.snapshot()
-        # Only b, c still queued => 2 * 7.5s
-        assert snap.eta_seconds == pytest.approx(15.0, abs=1e-6)
-
-    def test_active_serialized_job_excluded_from_overhead_but_counted_in_bytes(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("a")
-        a.mark_serialized("b")
-        # "a" is now downloading (ACTIVE) — not queued anymore.
-        a.update("a", downloaded_bytes=50, total_bytes=100, speed_bps=50.0)
-        snap = a.snapshot()
-        # network eta for a+b(unknown, mean=100) = (50+100)/50 = 3.0s
-        # + 1 remaining queued serialized job (b) * 7.5s
-        assert snap.eta_seconds == pytest.approx(3.0 + 7.5, abs=1e-6)
-
+# ── Pause / cancel interaction with the outstanding count ────────────────────
 
 class TestPauseResume:
-    def test_paused_serialized_job_does_not_count_as_queued(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("b")
-        a.update("a", downloaded_bytes=10, total_bytes=100, speed_bps=10.0)
-        a.pause("b")
-        snap = a.snapshot()
-        # b is PAUSED, not QUEUED -> no cooldown overhead while paused.
-        assert snap.paused == 1
-        assert snap.eta_seconds == pytest.approx((90 + 100) / 10.0, abs=1e-6)
+    def test_paused_job_is_not_counted_as_outstanding_work(self):
+        clock = FakeClock()
+        keys = ["a", "b", "c", "d"]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, ["a", "b"])
+        with_two_left = a.snapshot().eta_seconds
 
-    def test_resume_restores_overhead_once_queued_again(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("b")
-        a.pause("b")
-        # While paused, "b" is neither queued nor active — no cooldown
-        # overhead accrues and there's no other data, so ETA is unknown.
+        a.pause("c")
+        with_one_left = a.snapshot().eta_seconds
+        assert with_one_left < with_two_left
+        assert a.snapshot().paused == 1
+
+    def test_reset_restarts_the_measurement(self):
+        """A resumed batch runs a fresh orchestrator and aggregator; it measures
+        its own rate rather than inheriting a stale one."""
+        clock = FakeClock()
+        keys = ["a", "b", "c"]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, ["a", "b"])
+        assert a.snapshot().eta_seconds is not None
+
+        a.reset(keys, conservative_delay_range=DELAY_RANGE)
         assert a.snapshot().eta_seconds is None
-        # Resuming a paused job re-enters it as ACTIVE via update(); it should
-        # no longer contribute cooldown overhead (it's now transferring).
-        a.update("b", downloaded_bytes=0, total_bytes=100, speed_bps=10.0)
-        snap = a.snapshot()
-        assert snap.active == 1
-        assert snap.paused == 0
 
 
 class TestCancellation:
-    def test_cancelled_serialized_job_excluded(self):
-        a = _agg(["a", "b", "c"])
-        for k in ("a", "b", "c"):
-            a.mark_serialized(k)
-        a.cancel("a")
-        a.cancel("b")
-        snap = a.snapshot()
-        # Only "c" remains queued and serialized => 1 * 7.5s.
-        assert snap.eta_seconds == pytest.approx(7.5, abs=1e-6)
-
-
-class TestUnknownAndKnownSizes:
-    def test_unknown_sizes_still_produce_an_eta_with_overhead(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("b")
-        a.update("a", fraction=0.5, speed_bps=10.0)   # no byte totals at all
-        snap = a.snapshot()
-        # No byte info anywhere -> falls through to duration/overhead path.
-        # duration history is empty and speed condition requires mean_known,
-        # which is None here, so only the overhead should surface.
-        assert snap.eta_seconds == pytest.approx(7.5, abs=1e-6)
-        assert snap.eta_is_estimate is True
-
-    def test_known_byte_totals_combine_additively_with_overhead(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("b")
-        a.update("a", downloaded_bytes=0, total_bytes=1000, speed_bps=100.0)
-        snap = a.snapshot()
-        # network eta = (1000 + mean_known(1000)) / 100 = 20s; + 7.5s overhead
-        assert snap.eta_seconds == pytest.approx(20.0 + 7.5, abs=1e-6)
-
-
-class TestZeroSpeedDuringCooldown:
-    def test_zero_active_speed_falls_back_to_overhead_plus_duration_history(self):
+    def test_cancelled_jobs_leave_the_outstanding_count(self):
         clock = FakeClock()
-        a = _agg(["a", "b"], clock=clock)
-        a.mark_serialized("b")
-        # "a" runs for 10s then completes (this is the job whose cooldown is
-        # currently elapsing — no job is ACTIVE right now, speed is 0).
-        a.update("a", fraction=0.5, speed_bps=50.0)
-        clock.advance(10.0)
-        a.complete("a", final_bytes=500)
-        snap = a.snapshot()
-        assert snap.active == 0
-        assert snap.speed_bps == 0.0
-        # duration-history fallback (10s * 1 outstanding / 1 "active-or-1")
-        # plus the mandatory cooldown for the still-queued "b".
-        assert snap.eta_seconds == pytest.approx(10.0 + 7.5, abs=1e-6)
-        assert snap.eta_is_estimate is True
+        keys = [f"k{i}" for i in range(10)]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, keys[:2])
+        before = a.snapshot().eta_seconds
 
-    def test_zero_speed_no_history_yet_returns_overhead_only(self):
-        a = _agg(["a"])
-        a.mark_serialized("a")
-        snap = a.snapshot()
-        assert snap.speed_bps == 0.0
-        assert snap.eta_seconds == pytest.approx(7.5, abs=1e-6)
+        a.cancel("k9")
+        after = a.snapshot().eta_seconds
+        assert after == pytest.approx(before - SERVICE_S, abs=1e-6)
 
+    def test_eta_is_none_once_everything_is_terminal(self):
+        clock = FakeClock()
+        keys = ["a", "b", "c"]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, ["a", "b"])
+        a.cancel("c")
+        assert a.snapshot().eta_seconds is None
+
+
+# ── Estimate labelling ───────────────────────────────────────────────────────
 
 class TestEtaAlwaysMarkedEstimate:
-    def test_eta_is_estimate_true_whenever_overhead_present(self):
-        a = _agg(["a", "b"])
-        a.mark_serialized("b")
-        a.update("a", downloaded_bytes=100, total_bytes=100, speed_bps=100.0)
-        a.complete("a")
-        snap = a.snapshot()
-        assert snap.eta_is_estimate is True
+    def test_eta_never_negative(self):
+        clock = FakeClock()
+        keys = [f"k{i}" for i in range(5)]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, keys[:4])
+        clock.advance(600.0)      # long stall, way past the measured cycle
+        eta = a.snapshot().eta_seconds
+        assert eta is None or eta >= 0.0
 
-    def test_eta_never_negative_with_overhead(self):
-        a = _agg(["a"])
-        a.mark_serialized("a")
-        a.update("a", downloaded_bytes=150, total_bytes=100, speed_bps=10.0)  # over-reported
-        assert a.snapshot().eta_seconds >= 0.0
+    def test_eta_is_flagged_an_estimate_whenever_present(self):
+        clock = FakeClock()
+        keys = [f"k{i}" for i in range(6)]
+        a = _agg(keys, clock=clock)
+        _run_serial_tracks(a, clock, keys[:3])
+        snap = a.snapshot()
+        assert snap.eta_seconds is not None
+        assert snap.eta_is_estimate is True

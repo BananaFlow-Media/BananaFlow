@@ -119,7 +119,7 @@ def test_status_strings_carry_no_emoji():
         "status_stopped_error", "status_offline", "status_online",
         "status_batch_done", "status_batch_cancelled",
         "fetching", "scraping", "fetch_done",
-        "eta_calculating", "eta_about_min",
+        "eta_calculating", "eta_about_left",
     ]
     forbidden = "🔍🕷✅⚠❌🔴🚫📡⬇▶⏸"
     for lang in ("en", "he"):
