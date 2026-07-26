@@ -2781,11 +2781,18 @@ class MetadataEditorPanel(QWidget):
     def _on_browse(self) -> None:
         saved_folder = getattr(self._cfg, "tag_editor_last_folder", "") if self._cfg else ""
         if self._root_folder and self._root_folder.is_dir():
-            start_folder = self._root_folder
+            target = self._root_folder
         elif saved_folder and Path(saved_folder).is_dir():
-            start_folder = Path(saved_folder)
+            target = Path(saved_folder)
+        else:
+            target = None
+
+        if target:
+            parent = target.parent
+            start_folder = parent if parent and parent.is_dir() and parent != target else target
         else:
             start_folder = Path.home()
+
         path = QFileDialog.getExistingDirectory(
             self, t("meta_choose_music_folder"), str(start_folder)
         )
