@@ -25,8 +25,10 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, ToolButton
 
+from ui.direction import isolate_number
 from ui.i18n import t
 from ui.theme_manager import ThemeManager, get_colors
+from utils.time_format import seconds_to_str
 
 # Action-button icon colours (semantic, theme-independent). Pause follows the
 # accent and is refreshed on theme change.
@@ -120,6 +122,18 @@ class ShiftClickCheckBox(QCheckBox):
         super().keyPressEvent(event)
 
 
+# Stages that get a caption under the bar, and the string that names each.
+# Anything not listed here (queued, done, error, cancelled, paused) shows no
+# caption - its coloured dot already says everything there is to say.
+_PHASE_CAPTIONS = {
+    "matching":    "phase_matching",
+    "waiting":     "phase_waiting",
+    "starting":    "phase_starting",
+    "downloading": "phase_downloading",
+    "processing":  "phase_processing",
+}
+
+
 class TrackCard(QFrame):
     """
     One entry in the download queue panel.
@@ -188,6 +202,10 @@ class TrackCard(QFrame):
             plat_str = str(platform).lower()
         self._platform = plat_str
         self._status   = "queued"
+        # Caption state: which stage, its remaining time, and the live rate.
+        self._phase: str = "queued"
+        self._phase_remaining: Optional[float] = None
+        self._speed_bps: Optional[float] = None
         self._drag_start_pos: Optional[QPoint] = None
         
         # Action buttons (pause/resume are hidden by default)
@@ -410,30 +428,64 @@ class TrackCard(QFrame):
 
     def set_progress(self, fraction: float) -> None:
         self._progress_bar.setValue(int(fraction * 1000))
-        self._progress_bar.setVisible(fraction > 0.0 and self._status not in ("done", "error", "cancelled"))
+        # Visible for every in-flight stage. Gating on fraction > 0 used to hide
+        # the bar for the whole opening stretch, which is precisely when a user
+        # is looking for evidence that anything is happening at all.
+        self._progress_bar.setVisible(self._status in _PHASE_CAPTIONS)
 
     def update_speed(self, speed_bps: Optional[float], eta_seconds: Optional[float]) -> None:
-        """Show speed/ETA below the progress bar while downloading."""
-        if speed_bps and speed_bps > 0:
-            if speed_bps >= 1_048_576:
-                speed_str = f"{speed_bps / 1_048_576:.1f} MB/s"
-            else:
-                speed_str = f"{speed_bps / 1024:.0f} KB/s"
-            if eta_seconds and eta_seconds > 0:
-                m, s = divmod(int(eta_seconds), 60)
-                eta_str = f"{m}:{s:02d}"
-            else:
-                eta_str = "—"
-            self._speed_lbl.setText(f"{speed_str} · ETA {eta_str}")
-            self._speed_lbl.setVisible(True)
-        else:
+        """Record the live transfer rate for the caption line.
+
+        ``eta_seconds`` is yt-dlp's own estimate and covers the byte transfer
+        only, so it is deliberately ignored: it reads "0:01" while ffmpeg,
+        tagging and publish still have several seconds to run. The caption
+        shows the whole-track remaining time from set_phase() instead.
+        """
+        self._speed_bps = speed_bps if (speed_bps and speed_bps > 0) else None
+        self._refresh_caption()
+
+    def set_phase(self, phase: str, remaining_seconds: Optional[float] = None) -> None:
+        """Show which stage of its life this track is in, and how long is left.
+
+        A track spends most of its wall time outside the byte transfer — being
+        matched, waiting its turn at the conservative YouTube gate, and then in
+        ffmpeg, tagging and publish. The card used to render only the transfer,
+        so it froze, raced, and froze again. Every stage now names itself.
+        """
+        self._phase = phase
+        self._phase_remaining = remaining_seconds
+        self.set_status(phase)
+        self._refresh_caption()
+
+    def _refresh_caption(self) -> None:
+        """Caption under the bar: what it is doing, how fast, how long left."""
+        phase = getattr(self, "_phase", "") or self._status
+        if phase not in _PHASE_CAPTIONS:
             self._speed_lbl.setVisible(False)
+            self._speed_lbl.setText("")
+            return
+
+        parts = [t(_PHASE_CAPTIONS[phase])]
+        speed = getattr(self, "_speed_bps", None)
+        if phase == "downloading" and speed:
+            if speed >= 1_048_576:
+                parts.append(isolate_number(f"{speed / 1_048_576:.1f} MB/s"))
+            else:
+                parts.append(isolate_number(f"{speed / 1024:.0f} KB/s"))
+
+        remaining = getattr(self, "_phase_remaining", None)
+        if remaining is not None and remaining > 0:
+            parts.append(isolate_number(seconds_to_str(int(remaining))))
+
+        self._speed_lbl.setText(" · ".join(parts))
+        self._speed_lbl.setVisible(True)
 
     def set_status(self, status: str) -> None:
         """
         Update the visual state.
 
-        status : one of "queued" | "downloading" | "processing" |
+        status : one of "queued" | "matching" | "waiting" | "starting" |
+                         "downloading" | "processing" |
                          "done" | "error" | "cancelled" | "paused"
         """
         self._status = status
@@ -443,11 +495,11 @@ class TrackCard(QFrame):
         self._dot.style().polish(self._dot)
 
         # Update button visibility
-        self._pause_btn.setVisible(status == "downloading")
+        self._pause_btn.setVisible(status in _PHASE_CAPTIONS)
         self._resume_btn.setVisible(status == "paused")
 
-        # Hide speed label when not downloading
-        if status not in ("downloading", "processing"):
+        # Hide the caption once the track is no longer in flight.
+        if status not in _PHASE_CAPTIONS:
             self._speed_lbl.setVisible(False)
             self._speed_lbl.setText("")
 

@@ -126,7 +126,7 @@ def test_resume_all_clears_the_store(tmp_path, monkeypatch, app):
 
     class _FakeWorker:
         def __init__(self, *a, **k):
-            for n in ("track_progress", "track_speed", "track_status",
+            for n in ("track_progress", "track_speed", "track_status", "track_phase",
                       "track_finished", "track_preexisting", "overall_progress",
                       "metrics", "batch_snapshot", "job_count_changed", "job_error",
                       "all_finished", "track_thumbnail"):
@@ -549,7 +549,7 @@ def test_resume_waits_for_the_worker_to_take_ownership_before_clearing_state(
 
     class _SlowStartWorker:
         def __init__(self, *a, **k):
-            for n in ("track_progress", "track_speed", "track_status",
+            for n in ("track_progress", "track_speed", "track_status", "track_phase",
                       "track_finished", "track_preexisting", "overall_progress",
                       "metrics", "batch_snapshot", "job_count_changed", "job_error",
                       "all_finished", "track_thumbnail"):
@@ -594,7 +594,7 @@ def test_persisted_record_is_kept_when_the_worker_never_starts(tmp_path, monkeyp
 
     class _NeverStartsWorker:
         def __init__(self, *a, **k):
-            for n in ("track_progress", "track_speed", "track_status",
+            for n in ("track_progress", "track_speed", "track_status", "track_phase",
                       "track_finished", "track_preexisting", "overall_progress",
                       "metrics", "batch_snapshot", "job_count_changed", "job_error",
                       "all_finished", "track_thumbnail"):
@@ -744,7 +744,7 @@ def test_resume_track_persists_only_after_the_worker_starts(tmp_path, monkeypatc
         all_finished = type("S", (), {"connect": lambda *a, **k: None})()
 
         def __init__(self, *a, **k):
-            for n in ("track_progress", "track_speed", "track_status",
+            for n in ("track_progress", "track_speed", "track_status", "track_phase",
                       "track_finished", "job_error", "all_finished", "track_thumbnail"):
                 setattr(self, n, type("S", (), {"connect": lambda *a, **k: None})())
 

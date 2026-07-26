@@ -1118,6 +1118,9 @@ QFrame#trackCard ToolButton#trackCardResumeBtn:hover {{
 
 QFrame#trackCard QLabel#trackCardDot[status="queued"] {{ color: #4a4a66; }}
 QFrame#trackCard QLabel#trackCardDot[status="downloading"] {{ color: {accent}; }}
+QFrame#trackCard QLabel#trackCardDot[status="matching"] {{ color: #38bdf8; }}
+QFrame#trackCard QLabel#trackCardDot[status="waiting"] {{ color: #94a3b8; }}
+QFrame#trackCard QLabel#trackCardDot[status="starting"] {{ color: #38bdf8; }}
 QFrame#trackCard QLabel#trackCardDot[status="processing"] {{ color: #8b5cf6; }}
 QFrame#trackCard QLabel#trackCardDot[status="done"] {{ color: #10b981; }}
 QFrame#trackCard QLabel#trackCardDot[status="error"] {{ color: #ef4444; }}
@@ -2386,6 +2389,9 @@ QFrame#trackCard ToolButton#trackCardResumeBtn:hover {{
 
 QFrame#trackCard QLabel#trackCardDot[status="queued"] {{ color: #9aa49d; }}
 QFrame#trackCard QLabel#trackCardDot[status="downloading"] {{ color: {accent}; }}
+QFrame#trackCard QLabel#trackCardDot[status="matching"] {{ color: #38bdf8; }}
+QFrame#trackCard QLabel#trackCardDot[status="waiting"] {{ color: #94a3b8; }}
+QFrame#trackCard QLabel#trackCardDot[status="starting"] {{ color: #38bdf8; }}
 QFrame#trackCard QLabel#trackCardDot[status="processing"] {{ color: #8b5cf6; }}
 QFrame#trackCard QLabel#trackCardDot[status="done"] {{ color: #10b981; }}
 QFrame#trackCard QLabel#trackCardDot[status="error"] {{ color: #ef4444; }}

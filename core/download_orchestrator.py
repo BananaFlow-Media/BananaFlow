@@ -46,6 +46,7 @@ from core.downloader import (
     DownloadStatus,
 )
 from core.playlist_parser import SourcePlatform
+from core.track_phases import TrackPhase, TrackPhaseModel
 from core.retry_policy import DEFAULT_POLICY, retry_download
 from core.youtube_reliability import (
     CONSERVATIVE_DELAY_RANGE,
@@ -104,6 +105,9 @@ class OrchestratorCallbacks(Protocol):
     def on_track_progress(self, key: str, fraction: float) -> None: ...
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None: ...
     def on_track_status(self, key: str, status: str) -> None: ...
+    def on_track_phase(
+        self, key: str, phase: str, remaining_seconds: Optional[float]
+    ) -> None: ...
     def on_track_finished(self, key: str, output_path: str) -> None: ...
     def on_track_preexisting(self, key: str, output_path: str) -> None: ...
     def on_track_error(self, key: str, error: ErrorInfo) -> None: ...
@@ -173,6 +177,14 @@ class DownloadOrchestrator:
         # via the UI card's (delayed) status label. See both methods below.
         self._job_locks: dict[str, threading.Lock] = {}
         self._active_requests: dict[str, DownloadRequest] = {}
+        # What each job is doing right now, and when it entered that phase.
+        # The card used to show only the byte transfer, which on a real batch
+        # is about one second in every nine - it sat dead through matching and
+        # the gate wait, raced to 95%, then sat dead again through ffmpeg and
+        # publish. These let every phase reach the UI. See core.track_phases.
+        self._phase_model = TrackPhaseModel()
+        self._job_phase: dict[str, tuple[TrackPhase, float]] = {}
+        self._phase_state_lock = threading.Lock()
         # Keys whose Spotify two-stage url_resolver has been consumed but
         # whose resolved URL has not yet been committed to req.url. A
         # snapshot of the LIVE request while a key is in here would have
@@ -457,6 +469,9 @@ class DownloadOrchestrator:
         self._resolving_keys.clear()
         self._pending_resolver_requests.clear()
         self._job_outcomes.clear()
+        self._phase_model.reset()
+        with self._phase_state_lock:
+            self._job_phase.clear()
         with self._phase_lock:
             self._phase_times.clear()
         with self._gate_lock:
@@ -850,6 +865,55 @@ class DownloadOrchestrator:
         if req.workspace_dir:
             remove_workspace_tree(Path(req.workspace_dir))
 
+    def _enter_phase(self, key: str, phase: TrackPhase) -> None:
+        """Move a job into a phase, tell the UI, and time the phase it left."""
+        now = time.monotonic()
+        with self._phase_state_lock:
+            previous = self._job_phase.get(key)
+            self._job_phase[key] = (phase, now)
+        if previous is not None:
+            prev_phase, started = previous
+            if prev_phase in (
+                TrackPhase.MATCHING, TrackPhase.WAITING,
+                TrackPhase.STARTING, TrackPhase.DOWNLOADING,
+                TrackPhase.PROCESSING,
+            ):
+                self._phase_model.observe(prev_phase, now - started)
+        self._safe_cb("on_track_status", key, phase.value)
+        self._emit_track_position(key)
+
+    def _finish_phases(self, key: str) -> None:
+        """Close out a job's last phase and count it as a measured track."""
+        now = time.monotonic()
+        with self._phase_state_lock:
+            previous = self._job_phase.pop(key, None)
+        if previous is None:
+            return
+        prev_phase, started = previous
+        self._phase_model.observe(prev_phase, now - started)
+        self._phase_model.note_track_measured()
+
+    def _emit_track_position(
+        self, key: str, byte_fraction: Optional[float] = None
+    ) -> None:
+        """Push this job's whole-track progress and remaining time to its card.
+
+        Deliberately separate from what the aggregator is told: the batch maths
+        keeps taking the raw byte fraction, because that is what byte-weighted
+        batch progress means. The card takes the phase-weighted position, which
+        is what "how far is this track" means to a person watching it.
+        """
+        with self._phase_state_lock:
+            current = self._job_phase.get(key)
+        if current is None:
+            return
+        phase, started = current
+        elapsed = max(0.0, time.monotonic() - started)
+        fraction = self._phase_model.position(phase, elapsed, byte_fraction)
+        remaining = self._phase_model.remaining(phase, elapsed, byte_fraction)
+        self._safe_cb("on_track_progress", key, fraction)
+        self._safe_cb("on_track_phase", key, phase.value, remaining)
+
     def _record_phase(self, name: str, seconds: float) -> None:
         """Accumulate a per-phase duration for the end-of-batch timing summary."""
         with self._phase_lock:
@@ -933,6 +997,10 @@ class DownloadOrchestrator:
         """
         if req.url_resolver is None:
             return False
+
+        # The card used to sit on "queued" through the whole match, which on a
+        # cache miss is two network round-trips. Say what is happening.
+        self._enter_phase(key, TrackPhase.MATCHING)
         resolver = req.url_resolver
         lock = self._job_locks.get(key)
         # Mark the resolver "consumed" and the key "mid-resolve" as one
@@ -1017,6 +1085,10 @@ class DownloadOrchestrator:
                 CONSERVATIVE_MAX_PARALLEL_YOUTUBE,
                 CONSERVATIVE_DELAY_RANGE[0], CONSERVATIVE_DELAY_RANGE[1], key,
             )
+            # Every job but one is parked here, and it is the longest thing a
+            # track does under the gate. Not saying so is what made the card
+            # look hung.
+            self._enter_phase(key, TrackPhase.WAITING)
             gate_start = time.monotonic()
             self._youtube_gate.acquire()
             acquired_at = time.monotonic()
@@ -1075,7 +1147,9 @@ class DownloadOrchestrator:
         Any Spotify two-stage ``url_resolver`` has already run in _download_one
         (before the gate), so ``req.url`` is final here.
         """
-        self._safe_cb("on_track_status", key, "downloading")
+        # extract_info runs here and yields no progress ticks, so this is a
+        # distinct stage rather than a "download" that has not moved yet.
+        self._enter_phase(key, TrackPhase.STARTING)
         logger.debug("[Orchestrator] Starting %s", key)
 
         # "downloading" is emitted here, before any byte arrives. Time the gap
@@ -1094,6 +1168,17 @@ class DownloadOrchestrator:
                     "[timing][track] %s first_byte_wait=%.2fs (engine start -> first byte)",
                     key, first_byte_wait,
                 )
+                self._enter_phase(key, TrackPhase.DOWNLOADING)
+
+            # The engine pins its own fraction at 0.95 and keeps that value for
+            # the whole post-processing tail - ffmpeg, tagging, artwork,
+            # MusicBrainz, ReplayGain, publish. That is the second frozen
+            # stretch users see. Treat it as the phase it is.
+            if p.status == DownloadStatus.PROCESSING:
+                with self._phase_state_lock:
+                    already = self._job_phase.get(key, (None, 0.0))[0]
+                if already != TrackPhase.PROCESSING:
+                    self._enter_phase(key, TrackPhase.PROCESSING)
 
             if p.thumbnail_url and not getattr(req, "_thumb_sent", False):
                 # Prefer the original thumbnail (e.g. Spotify) if we had one
@@ -1112,7 +1197,11 @@ class DownloadOrchestrator:
                 speed_bps=p.speed_bps or 0.0,
                 eta_seconds=p.eta_seconds,
             )
-            self._safe_cb("on_track_progress", key, p.fraction)
+            # Byte fraction goes to the aggregator (above) because byte-weighted
+            # batch progress is defined in bytes; the card gets the whole-track
+            # position instead, which is what a person watching one row means by
+            # "how far along is it".
+            self._emit_track_position(key, byte_fraction=p.fraction)
             self._safe_cb("on_track_speed", key, p.speed_bps or 0.0, p.eta_seconds or 0.0)
 
             # No batch-level emit here. This hook runs once per job, so any
@@ -1150,6 +1239,7 @@ class DownloadOrchestrator:
                 ),
             )
             snapshot = self._aggregator.snapshot()
+            self._finish_phases(key)
             self._safe_cb("on_track_status", key, "done")
             self._safe_cb("on_track_progress", key, 1.0)
             self._safe_cb("on_track_finished", key, p.output_path or "")
@@ -1182,6 +1272,7 @@ class DownloadOrchestrator:
                 cookies_file=req.cookies_file or "",
                 cookies_browser=req.cookies_browser or "",
             )
+            self._finish_phases(key)
             self._safe_cb("on_track_status", key, "error")
             self._safe_cb("on_track_error", key, err)
             self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())

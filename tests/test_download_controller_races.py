@@ -204,6 +204,7 @@ class _FakeResumeDownloadWorker(QObject):
     track_progress    = Signal(str, float)
     track_speed       = Signal(str, float, float)
     track_status      = Signal(str, str)
+    track_phase       = Signal(str, str, object)
     track_finished    = Signal(str, str)
     job_error         = Signal(str, object)
     all_finished      = Signal(object)

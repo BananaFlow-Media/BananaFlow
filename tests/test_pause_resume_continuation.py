@@ -106,7 +106,7 @@ class _FakeDownloadWorker:
         self.batch_id = batch_id
         self.started = False
         for name in (
-            "track_progress", "track_speed", "track_status", "track_finished",
+            "track_progress", "track_speed", "track_status", "track_phase", "track_finished",
             "track_preexisting", "overall_progress", "metrics", "batch_snapshot",
             "job_count_changed", "job_error", "all_finished", "track_thumbnail",
         ):
