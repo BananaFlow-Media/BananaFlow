@@ -523,6 +523,88 @@ class TestCancelDuringPublish:
                 "the published file must be visible to the user"
             )
 
+    def test_publish_is_refused_when_the_staging_temp_cannot_be_hidden(
+        self, tmp_path, monkeypatch,
+    ):
+        """Hiding the staging temp is not cosmetic: if it fails, the copy
+        would write a visible, growing partial straight into the user's
+        output folder — the exact thing the staging step exists to prevent.
+        Refuse instead, leaving the finished file safely in the workspace."""
+        import errno
+
+        import core.downloader as dl_mod
+        from core.downloader import PublishError
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+
+        real_replace = os.replace
+
+        def _force_cross_volume(a, b):
+            if str(a) == str(src):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+        monkeypatch.setattr(dl_mod, "_set_hidden_attribute", lambda p, **kw: False)
+
+        with pytest.raises(PublishError):
+            engine._publish_to_final_location(req, str(src))
+
+        assert not (output_dir / "song.mp3").exists()
+        assert src.exists(), "the finished file stays in the workspace"
+        leftovers = [
+            p.name for p in output_dir.iterdir()
+            if DownloadEngine.PUBLISH_TMP_SUFFIX in p.name
+        ]
+        assert leftovers == [], "the un-hideable staging file must not be left behind"
+
+    def test_publish_is_refused_when_the_temp_cannot_be_unhidden(
+        self, tmp_path, monkeypatch,
+    ):
+        """os.replace carries the source's attributes across, so renaming a
+        still-hidden temp publishes the user's finished track as a file they
+        cannot find. Refuse the rename instead."""
+        import errno
+
+        import core.downloader as dl_mod
+        from core.downloader import PublishError
+        from utils import paths as paths_mod
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+
+        real_replace = os.replace
+
+        def _force_cross_volume(a, b):
+            if str(a) == str(src):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+
+        real_set_hidden = paths_mod._set_hidden_attribute
+
+        def _hide_ok_unhide_fails(path, **kwargs):
+            if kwargs.get("hidden", True) is False:
+                return False
+            return real_set_hidden(path, **kwargs)
+
+        monkeypatch.setattr(dl_mod, "_set_hidden_attribute", _hide_ok_unhide_fails)
+
+        with pytest.raises(PublishError):
+            engine._publish_to_final_location(req, str(src))
+
+        assert not (output_dir / "song.mp3").exists(), (
+            "a file the user cannot see is not a published file"
+        )
+        assert src.exists()
+        leftovers = [
+            p.name for p in output_dir.iterdir()
+            if DownloadEngine.PUBLISH_TMP_SUFFIX in p.name
+        ]
+        assert leftovers == []
+
     def test_hls_path_reports_cancelled_not_error_when_publish_is_cancelled(
         self, tmp_path, monkeypatch,
     ):
