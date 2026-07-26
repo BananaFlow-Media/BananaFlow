@@ -246,3 +246,94 @@ def test_raises_when_no_location_can_be_hidden(tmp_path, monkeypatch):
 
     with pytest.raises(OSError):
         make_batch_workspace(str(output_dir))
+
+
+# ── Recorded output roots ────────────────────────────────────────────────────
+# The persisted record of "output directories BananaFlow has actually placed a
+# workspace container under". Two later mechanisms depend on it: proving a
+# path is ours before deleting it, and rediscovering a workspace stranded
+# under an output directory the user has since changed away from.
+
+class TestKnownOutputRoots:
+    def test_creating_a_workspace_records_its_output_root(self, tmp_path):
+        from utils.paths import known_output_roots
+
+        out = tmp_path / "out"
+        out.mkdir()
+        make_batch_workspace(str(out))
+
+        assert out.resolve() in known_output_roots()
+
+    def test_recording_is_idempotent_across_batches(self, tmp_path):
+        from utils.paths import known_output_roots
+
+        out = tmp_path / "out"
+        out.mkdir()
+        make_batch_workspace(str(out))
+        make_batch_workspace(str(out))
+        make_batch_workspace(str(out))
+
+        assert [p for p in known_output_roots() if p == out.resolve()] == [out.resolve()]
+
+    def test_every_output_dir_the_user_ever_used_is_remembered(self, tmp_path):
+        """The whole point: after the user switches output directory, the OLD
+        one must still be reachable — nothing else on disk will ever point at
+        it again once its paused jobs are gone."""
+        from utils.paths import known_output_roots
+
+        old = tmp_path / "old"
+        new = tmp_path / "new"
+        old.mkdir()
+        new.mkdir()
+        make_batch_workspace(str(old))
+        make_batch_workspace(str(new))
+
+        roots = known_output_roots()
+        assert old.resolve() in roots
+        assert new.resolve() in roots
+
+    def test_app_data_fallback_does_not_record_an_output_root(self, tmp_path, monkeypatch):
+        """The fallback container lives at a fixed app-data location, so
+        there is no per-user root worth recording — and recording the output
+        dir there would claim ownership of a container we never created
+        under it."""
+        from utils import paths as paths_mod
+
+        app_data = tmp_path.parent / f"appdata-roots-{tmp_path.name}"
+        app_data.mkdir()
+        monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        (output_dir / ".bananaflow_tmp").write_bytes(b"not a directory")
+
+        workspace = make_batch_workspace(str(output_dir))
+
+        assert app_data.resolve() in workspace.resolve().parents
+        assert output_dir.resolve() not in paths_mod.known_output_roots()
+
+    def test_corrupt_record_file_reads_back_as_empty_not_a_crash(self, tmp_path, monkeypatch):
+        from utils import paths as paths_mod
+
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+        (app_data / "known_output_roots.json").write_text("{not json", encoding="utf-8")
+
+        assert paths_mod.known_output_roots() == []
+
+    def test_record_is_bounded(self, tmp_path, monkeypatch):
+        from utils import paths as paths_mod
+
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        monkeypatch.setattr(paths_mod, "get_app_data_dir", lambda: app_data)
+
+        for i in range(paths_mod._MAX_KNOWN_OUTPUT_ROOTS + 10):
+            paths_mod.register_output_root(tmp_path / f"root{i}")
+
+        roots = paths_mod.known_output_roots()
+        assert len(roots) == paths_mod._MAX_KNOWN_OUTPUT_ROOTS
+        # Oldest entries drop out first; the most recent one is always kept.
+        newest = tmp_path / f"root{paths_mod._MAX_KNOWN_OUTPUT_ROOTS + 9}"
+        assert newest.resolve() in roots

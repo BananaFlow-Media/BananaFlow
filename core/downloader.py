@@ -118,6 +118,18 @@ class PublishError(Exception):
     workspace, which is about to be cleaned up)."""
 
 
+class PublishCancelled(Exception):
+    """A cancel/pause arrived while the finished file was being published,
+    and the publish was abandoned before the destination was ever touched.
+
+    Deliberately NOT a PublishError: nothing failed, the user stopped it.
+    The caller reports CANCELLED (not an error, and definitely not a
+    success), and the file stays in the workspace where a resume can pick
+    it up — the publish is the last thing that happens, and it is not
+    instantaneous across volumes, so a cancel landing inside it must not be
+    silently overtaken by a completed, visible download."""
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Enumerations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -546,7 +558,10 @@ class DownloadEngine:
                 output_path=final_path,
             ))
 
-        except yt_dlp.utils.DownloadCancelled:
+        except (yt_dlp.utils.DownloadCancelled, PublishCancelled):
+            # PublishCancelled: the user stopped the job while the finished
+            # file was being published. Nothing was committed to the output
+            # directory — this is a cancellation, never an error.
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.CANCELLED,
                 url=url,
@@ -638,6 +653,11 @@ class DownloadEngine:
 
         try:
             output_path = self._publish_to_final_location(request, output_path)
+        except PublishCancelled:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=url, title=title,
+            ))
+            return
         except PublishError as exc:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR, url=url, title=title,
@@ -732,7 +752,7 @@ class DownloadEngine:
                     total_bytes=generic_bytes,
                     output_path=final_path,
                 ))
-            except yt_dlp.utils.DownloadCancelled:
+            except (yt_dlp.utils.DownloadCancelled, PublishCancelled):
                 self._fire(request, DownloadProgress(
                     status=DownloadStatus.CANCELLED,
                     url=page_url,
@@ -824,6 +844,11 @@ class DownloadEngine:
 
         try:
             output_path = self._publish_to_final_location(request, output_path)
+        except PublishCancelled:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=page_url, title=title,
+            ))
+            return
         except PublishError as exc:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR, url=page_url, title=title,
@@ -1145,6 +1170,23 @@ class DownloadEngine:
 
     # ── Atomic publish (batch workspace -> real output directory) ────────────
 
+    def _cancel_check(self, req: DownloadRequest) -> Callable[[], bool]:
+        """A cheap "should this job stop right now?" predicate covering both
+        the per-request cancel Event and the engine-wide one. Handed to the
+        publish step so a cancel arriving *during* publication is honoured
+        instead of being noticed only after the file has already appeared in
+        the user's output directory."""
+        per_request = req.cancel_event
+        global_cancel = self._cancel_event
+
+        def _cancelled() -> bool:
+            return bool(
+                (per_request is not None and per_request.is_set())
+                or global_cancel.is_set()
+            )
+
+        return _cancelled
+
     def _publish_to_final_location(self, req: DownloadRequest, workspace_path: str) -> str:
         """Atomically move a fully-ready file out of the batch workspace and
         into the user's real output directory. Returns the final published
@@ -1172,7 +1214,18 @@ class DownloadEngine:
         published by copying to a hidden temp file adjacent to the
         destination and then os.replace'ing that into place — still atomic
         at the visible destination, still no half-built file ever seen.
+
+        Raises ``PublishCancelled`` if the job is cancelled/paused before
+        the destination is committed — including part-way through a
+        cross-volume copy, which is the one step here that is not
+        instantaneous. Without that, a cancel arriving after the caller's
+        last pre-publish check would still produce a published file and a
+        reported success.
         """
+        cancelled = self._cancel_check(req)
+        if cancelled():
+            raise PublishCancelled("Cancelled before publish")
+
         if not req.workspace_dir:
             return workspace_path
 
@@ -1197,7 +1250,7 @@ class DownloadEngine:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                self._atomic_place(src, dest)
+                self._atomic_place(src, dest, cancel_check=cancelled)
                 return str(dest)
             except OSError as exc:
                 last_exc = exc
@@ -1222,35 +1275,67 @@ class DownloadEngine:
     # see PUBLISH_TMP_SUFFIX / sweep_stale_publish_temp_files.
     PUBLISH_TMP_SUFFIX = ".bananaflow-publish-tmp"
 
+    # Chunk size for the cross-volume staging copy. Small enough that a
+    # cancel is honoured promptly on a slow volume, large enough that the
+    # per-chunk check costs nothing measurable against real I/O.
+    _PUBLISH_COPY_CHUNK = 1024 * 1024
+
     @classmethod
-    def _atomic_place(cls, src: Path, dest: Path) -> None:
+    def _atomic_place(
+        cls,
+        src: Path,
+        dest: Path,
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Put ``src`` at ``dest`` atomically at the visible destination.
 
         Fast path: same-volume ``os.replace`` (a pure rename). Cross-volume
-        (raises OSError with errno EXDEV): copy to a temp file next to dest,
-        then os.replace the temp into place — that rename is same-volume and
-        atomic, so the destination only ever flips from "old/absent" to
-        "fully-copied new", never a partial. The temp is cleaned up on any
-        failure so a cross-volume error can't strand a half-copy.
+        (raises OSError with errno EXDEV): copy to a hidden temp file next
+        to dest, then os.replace the temp into place — that rename is
+        same-volume and atomic, so the destination only ever flips from
+        "old/absent" to "fully-copied new", never a partial. The temp is
+        cleaned up on any failure so a cross-volume error can't strand a
+        half-copy.
 
         The temp name is generated by ``tempfile.mkstemp`` (a securely
         unique name, not a pid-based one) so two concurrent publishes —
         including a retry racing an earlier attempt, or two jobs that
         legitimately target the same destination filename — can never
-        collide on the same temp path. It is hidden only AFTER the content
-        copy succeeds, not before: on Windows, opening an already-hidden
-        file for writing was observed to fail outright (confirmed against a
-        real filesystem, not just in theory — a security product's write
-        interception is the likely cause), so hiding first would silently
-        break every cross-volume publish rather than merely leave a brief
-        visibility window. Writing first and hiding immediately after still
-        keeps that window small — a crash before the final rename can still
-        leave the (by-then hidden) temp behind, which is why its name
-        carries PUBLISH_TMP_SUFFIX — a recognisable marker a startup sweep
-        can find and remove (see utils.paths.sweep_stale_publish_temp_files).
+        collide on the same temp path.
+
+        The temp is hidden BEFORE a single byte of content is written, and
+        the content is then written through mkstemp's own already-open
+        descriptor. That ordering matters on Windows: it is *re-opening* an
+        already-hidden file for writing that fails (CreateFile without
+        FILE_ATTRIBUTE_HIDDEN on an existing hidden file), which is what
+        made an earlier version hide the temp only after copying — leaving
+        a visible, growing partial file sitting in the user's output folder
+        for the whole duration of the copy. Writing through the existing
+        handle never re-opens anything, so the file can be hidden from
+        birth and the user never sees a partial. The attribute is cleared
+        again immediately before the rename, because os.replace carries the
+        source's attributes across and would otherwise publish the finished
+        file as a hidden file.
+
+        ``cancel_check`` is polled between copy chunks and once more
+        immediately before the final rename; when it reports cancellation
+        the staging temp is removed and ``PublishCancelled`` is raised, so a
+        cancel during a long cross-volume copy can never be overtaken by a
+        published file and a reported success. A crash before the final
+        rename can still leave the (hidden) temp behind, which is why its
+        name carries PUBLISH_TMP_SUFFIX — a recognisable marker a startup
+        sweep can find and remove (see
+        utils.paths.sweep_stale_publish_temp_files).
         """
         import errno
         import tempfile
+
+        def _cancelled() -> bool:
+            return bool(cancel_check is not None and cancel_check())
+
+        if _cancelled():
+            raise PublishCancelled("Cancelled before publish")
         try:
             os.replace(str(src), str(dest))
             return
@@ -1262,12 +1347,27 @@ class DownloadEngine:
             dir=str(dest.parent), prefix=f".{dest.name}.", suffix=cls.PUBLISH_TMP_SUFFIX,
         )
         tmp = Path(tmp_name)
-        os.close(fd)
+        # Hide first, write second — see the docstring. Best-effort: a
+        # filesystem that refuses the attribute still gets a correct
+        # publish, just without the extra concealment.
+        _set_hidden_attribute(tmp)
         try:
-            shutil.copy2(str(src), str(tmp))
-            _set_hidden_attribute(tmp)
+            with os.fdopen(fd, "wb") as out_fh, open(str(src), "rb") as in_fh:
+                while True:
+                    if _cancelled():
+                        raise PublishCancelled("Cancelled during cross-volume publish")
+                    chunk = in_fh.read(cls._PUBLISH_COPY_CHUNK)
+                    if not chunk:
+                        break
+                    out_fh.write(chunk)
+            shutil.copystat(str(src), str(tmp))
+            if _cancelled():
+                raise PublishCancelled("Cancelled before publish")
+            # Unhide only now: the content is complete, and the very next
+            # step renames it onto the visible destination name.
+            _set_hidden_attribute(tmp, hidden=False)
             os.replace(str(tmp), str(dest))
-        except OSError:
+        except (OSError, PublishCancelled):
             try:
                 if tmp.exists():
                     tmp.unlink()
