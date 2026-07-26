@@ -705,11 +705,30 @@ class DownloadController(QObject):
             worker.cancel()
 
     def cancel_all(self) -> None:
-        """Cancel the engine (all in-flight yt-dlp downloads) and the worker."""
+        """Cancel everything in flight: the engine, the batch worker, and
+        every per-track resume worker.
+
+        The engine-wide event is NOT sufficient on its own, which is why
+        each worker is cancelled explicitly. A job that reaches ffmpeg —
+        an HLS/DASH stream, or the generic stream-intercept path — polls
+        exactly ONE event while the child process runs, and that is the
+        job's own per-request event (core.hls_downloader.download_hls's
+        ``cancel_event`` parameter, which core.downloader passes as
+        ``request.cancel_event or self._cancel_event``). With a per-request
+        event present, as every batched job has, the engine-wide flag is
+        never looked at, so the remux ran to completion and only then
+        noticed it had been cancelled. Only the worker's own cancel()
+        reaches DownloadOrchestrator.cancel(), which sets those per-job
+        events and shuts the pool down.
+
+        Symmetric with global_pause, which already covers every running
+        worker: a track the user resumed individually lives in its own
+        single-job worker and was previously left running by Cancel All."""
         self._set_termination_intent(BatchOutcome.CANCELLED_BY_USER)
         self._engine.cancel_all()
-        if self._dl_worker and self._dl_worker.isRunning():
-            self._dl_worker.cancel()
+        for worker in [self._dl_worker, *self._resume_workers]:
+            if worker is not None and worker.isRunning():
+                worker.cancel()
 
     def pause_track(self, card) -> bool:
         """Save the in-flight request for this card and cancel only that
@@ -1060,12 +1079,38 @@ class DownloadController(QObject):
         worker (main batch or resume) does that. The finishing sender is
         still present in _resume_workers at this point (its own removal is a
         separately-connected slot that has not necessarily run yet), so it
-        is excluded explicitly rather than relying on that removal."""
+        is excluded explicitly rather than relying on that removal.
+
+        Per-worker workspace cleanup (see _cleanup_cancelled_batch), by
+        contrast, runs for THIS finishing worker regardless of whether it's
+        the last one — an early-finishing resume that was itself cancelled
+        or caught in a fatal stop must have its own abandoned workspace
+        swept immediately, not held hostage until some sibling resume also
+        finishes."""
         if not self._is_current_batch_worker_signal():
             return
+        # Capture the finishing worker's jobs BEFORE nulling _dl_worker so a
+        # cancellation/fatal-stop can clean up exactly that worker's
+        # abandoned work. Safe to read here: all_finished fires only after
+        # run_batch has drained its pool, so no download thread is still
+        # writing.
         sender = self.sender()
+        worker_jobs = list(getattr(sender, "_jobs", []) or [])
+
         if sender is self._dl_worker:
             self._dl_worker = None
+
+        # A deliberate cancel OR a fatal stop (never a pause) removes this
+        # worker's unfinished partial/intermediate work. Fully-published
+        # final files already live in the user's output directory and are
+        # never touched (cleanup only removes the hidden workspace
+        # container). Pause preserves the workspace instead, which is
+        # exactly what keeps the two operations fundamentally different.
+        # Read independent of the last-active-worker check below: this is
+        # this worker's own outcome, not a shared UI-facing signal.
+        worker_outcome = self._termination_intent or orchestrator_outcome or BatchOutcome.COMPLETED
+        if worker_outcome in (BatchOutcome.CANCELLED_BY_USER, BatchOutcome.STOPPED_BY_FATAL_ERROR):
+            self._cleanup_cancelled_batch(worker_jobs)
 
         other_active_workers = [w for w in self._resume_workers if w is not sender]
         if self._dl_worker is not None or other_active_workers:
@@ -1081,6 +1126,34 @@ class DownloadController(QObject):
         self._termination_intent = None
 
         self.batch_finished.emit(outcome)
+
+    def _cleanup_cancelled_batch(self, jobs: list) -> None:
+        """Remove the abandoned workspace of a cancelled OR fatally-stopped
+        batch and drop any paused snapshots for its jobs — both abandon
+        everything, unlike a pause. A fatal stop (e.g. a broken cookie jar
+        that would fail every remaining job the same way) is just as much
+        an abandonment as a deliberate user cancel; leaving it out would
+        strand the batch's workspace on disk forever since nothing else
+        ever sweeps it.
+
+        Only touches the BananaFlow-owned hidden workspace container (via the
+        filesystem-safe remove_workspace_tree); published final files in the
+        output directory are never affected. Jobs that never started leave
+        only empty subdirs, which go with the container. Sibling batches are
+        untouched — cleanup is scoped to this batch's own container(s)."""
+        if not jobs:
+            return
+        from utils.paths import remove_workspace_tree
+
+        containers: set[Path] = set()
+        for key, req in jobs:
+            self._paused_requests.pop(key, None)
+            if req.workspace_dir:
+                # req.workspace_dir is this job's per-job subdir
+                # (<container>/<job_key>); its parent is the batch container.
+                containers.add(Path(req.workspace_dir).parent)
+        for container in containers:
+            remove_workspace_tree(container)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -248,6 +248,182 @@ def test_raises_when_no_location_can_be_hidden(tmp_path, monkeypatch):
         make_batch_workspace(str(output_dir))
 
 
+# ── Filesystem-safe workspace removal (remove_workspace_tree) ────────────────
+# The single authority that keeps cancellation / stale cleanup from ever
+# escaping the BananaFlow workspace tree into the user's own files.
+
+class TestRemoveWorkspaceTree:
+    def _make_container(self, base):
+        from utils.paths import make_batch_workspace
+        ws = make_batch_workspace(str(base))       # base/.bananaflow_tmp/batch-<id>
+        (ws / "job-a").mkdir()
+        (ws / "job-a" / "song.part").write_bytes(b"partial")
+        return ws  # the batch-<id> container
+
+    def test_removes_a_batch_container(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        container = self._make_container(tmp_path)
+        assert container.exists()
+        remove_workspace_tree(container)
+        assert not container.exists()
+
+    def test_removes_a_single_job_subdir_leaving_siblings(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        container = self._make_container(tmp_path)
+        (container / "job-b").mkdir()
+        (container / "job-b" / "keep.part").write_bytes(b"x")
+
+        remove_workspace_tree(container / "job-a")
+
+        assert not (container / "job-a").exists()
+        assert (container / "job-b" / "keep.part").exists()
+
+    def test_prunes_empty_container_and_root(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        container = self._make_container(tmp_path)
+        root = container.parent  # .bananaflow_tmp
+
+        remove_workspace_tree(container)
+
+        assert not container.exists()
+        assert not root.exists(), "empty .bananaflow_tmp root should be pruned too"
+        assert tmp_path.exists(), "the user's output dir must NEVER be removed"
+
+    def test_refuses_to_remove_a_non_workspace_path(self, tmp_path, caplog):
+        """The core safety invariant: a path that is not inside a BananaFlow
+        workspace container must never be deleted, even if asked."""
+        from utils.paths import remove_workspace_tree
+
+        precious = tmp_path / "user_music"
+        precious.mkdir()
+        (precious / "important.mp3").write_bytes(b"do not delete")
+
+        remove_workspace_tree(precious)
+
+        assert precious.exists()
+        assert (precious / "important.mp3").exists()
+
+    def test_refuses_to_remove_the_output_dir_itself(self, tmp_path):
+        from utils.paths import remove_workspace_tree
+        # Even the container's grandparent (the output dir) is off-limits.
+        container = self._make_container(tmp_path)
+        remove_workspace_tree(tmp_path)
+        assert tmp_path.exists()
+
+    def test_traversal_path_cannot_escape_into_a_sibling_directory(self, tmp_path):
+        """A path whose lexical components include workspace-marker names
+        (.bananaflow_tmp, batch-x) -- so a naive name-only check would
+        wrongly accept it -- but which resolves via '..' segments to
+        somewhere OUTSIDE any BananaFlow workspace must never be touched."""
+        from utils.paths import make_batch_workspace, remove_workspace_tree
+
+        precious = tmp_path / "precious_dir"
+        precious.mkdir()
+        (precious / "important.mp3").write_bytes(b"do not delete")
+
+        # A real, owned container, so the traversal is rejected on where it
+        # RESOLVES to and not merely on the root being unrecorded.
+        container = make_batch_workspace(str(tmp_path))
+        traversal = container / ".." / ".." / "precious_dir"
+        assert traversal.resolve() == precious.resolve()
+
+        remove_workspace_tree(traversal)
+
+        assert precious.exists()
+        assert (precious / "important.mp3").exists()
+
+    def test_refuses_a_lookalike_directory_the_app_never_created(self, tmp_path):
+        """Ownership by containment, not by name. A user folder that merely
+        LOOKS like ours -- a `batch-…` directory, or anything under a folder
+        someone happened to call `download_workspaces` -- was previously
+        accepted by the name-based check and handed to a recursive delete."""
+        from utils.paths import remove_workspace_tree
+
+        lookalike_batch = tmp_path / "batch-2019"
+        lookalike_batch.mkdir()
+        (lookalike_batch / "wedding.mp3").write_bytes(b"irreplaceable")
+
+        lookalike_root = tmp_path / "download_workspaces" / "mixes"
+        lookalike_root.mkdir(parents=True)
+        (lookalike_root / "set.mp3").write_bytes(b"irreplaceable")
+
+        remove_workspace_tree(lookalike_batch)
+        remove_workspace_tree(lookalike_root)
+
+        assert (lookalike_batch / "wedding.mp3").exists()
+        assert (lookalike_root / "set.mp3").exists()
+
+    def test_refuses_a_workspace_under_an_unrecorded_root(self, tmp_path):
+        """Even the exact container layout is refused under a root this
+        installation never recorded creating a workspace under — that
+        directory belongs to someone else."""
+        from utils.paths import remove_workspace_tree
+
+        foreign = tmp_path / "someone_elses_output" / ".bananaflow_tmp" / "batch-zzz"
+        foreign.mkdir(parents=True)
+        (foreign / "keep.part").write_bytes(b"not ours")
+
+        remove_workspace_tree(foreign)
+
+        assert (foreign / "keep.part").exists()
+
+
+class TestIsWorkspacePath:
+    def test_recognises_a_container_we_created(self, tmp_path):
+        from utils.paths import is_workspace_path, make_batch_workspace
+
+        workspace = make_batch_workspace(str(tmp_path))
+        assert is_workspace_path(workspace.parent)          # .bananaflow_tmp
+        assert is_workspace_path(workspace)                 # batch-<id>
+        assert is_workspace_path(workspace / "job-1" / "x.part")
+
+    def test_recognises_the_app_data_fallback_container(self, tmp_path):
+        from utils.paths import get_app_data_dir, is_workspace_path
+
+        container = get_app_data_dir() / "download_workspaces"
+        assert is_workspace_path(container)
+        assert is_workspace_path(container / "batch-abc" / "job-1")
+
+    def test_rejects_arbitrary_user_path(self, tmp_path):
+        from utils.paths import is_workspace_path
+        assert not is_workspace_path(tmp_path)
+        assert not is_workspace_path(tmp_path / "Music" / "song.mp3")
+
+    def test_rejects_lookalike_names_outside_an_owned_container(self, tmp_path):
+        """Names are not ownership: `batch-…` anywhere, or anything under a
+        user folder called `download_workspaces`, is not ours."""
+        from utils.paths import is_workspace_path
+
+        assert not is_workspace_path(tmp_path / "batch-abc")
+        assert not is_workspace_path(tmp_path / "download_workspaces")
+        assert not is_workspace_path(tmp_path / "download_workspaces" / "batch-abc")
+        assert not is_workspace_path(tmp_path / ".bananaflow_tmp" / "batch-abc")
+
+    def test_rejects_traversal_path_that_resolves_outside_the_workspace(self, tmp_path):
+        """Component names alone must not be enough -- the path has to
+        actually RESOLVE inside an owned container, not just look like it
+        before its '..' segments are collapsed."""
+        from utils.paths import is_workspace_path, make_batch_workspace
+
+        workspace = make_batch_workspace(str(tmp_path))
+        (tmp_path / "precious_dir").mkdir()
+
+        traversal = workspace / ".." / ".." / "precious_dir"
+        assert not is_workspace_path(traversal)
+
+    def test_accepts_traversal_path_that_resolves_to_a_real_workspace_dir(self, tmp_path):
+        """The flip side: a path with redundant '..' segments that still
+        genuinely resolves INSIDE the workspace must keep working -- the
+        check must resolve-then-check, not reject every non-canonical path."""
+        from utils.paths import is_workspace_path, make_batch_workspace
+
+        workspace = make_batch_workspace(str(tmp_path))
+        (workspace / "job-1").mkdir()
+
+        traversal = workspace / "job-1" / ".." / "job-1"
+        assert is_workspace_path(traversal)
+
+
 # ── Recorded output roots ────────────────────────────────────────────────────
 # The persisted record of "output directories BananaFlow has actually placed a
 # workspace container under". Two later mechanisms depend on it: proving a

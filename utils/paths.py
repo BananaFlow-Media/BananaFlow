@@ -275,6 +275,112 @@ def register_output_root(path) -> None:
         logger.warning("[paths] Could not record output root %s: %s", resolved, exc)
 
 
+# ── Workspace ownership (the authority behind every workspace deletion) ──────
+
+def _owned_workspace_containers() -> list[Path]:
+    """Every workspace container BananaFlow actually owns right now: the
+    fixed app-data fallback container, plus ``<root>/.bananaflow_tmp`` for
+    each recorded output root (see register_output_root). Canonicalised, so
+    the containment checks below compare real filesystem locations."""
+    candidates = [get_app_data_dir() / _APPDATA_CONTAINER_NAME]
+    for root in known_output_roots():
+        candidates.append(root / _WORKSPACE_CONTAINER_NAME)
+    containers: list[Path] = []
+    for candidate in candidates:
+        try:
+            containers.append(candidate.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return containers
+
+
+def _is_workspace_path_resolved(resolved: Path) -> bool:
+    """Containment check on an ALREADY-CANONICALISED path. Never call this
+    directly with an un-resolved path — see is_workspace_path."""
+    for container in _owned_workspace_containers():
+        if resolved == container or container in resolved.parents:
+            return True
+    return False
+
+
+def is_workspace_path(path: Path) -> bool:
+    """Whether ``path`` is inside (or is) a BananaFlow batch-workspace tree.
+
+    Ownership is proven by CONTAINMENT under a container BananaFlow
+    actually created — ``<recorded output root>/.bananaflow_tmp`` or the
+    app-data ``download_workspaces`` — not by directory name. The earlier
+    rule accepted any path whose own name started with ``batch-``, or any
+    path with a component named ``.bananaflow_tmp`` /
+    ``download_workspaces`` anywhere above it. Those are ordinary names a
+    user's own library can contain: a folder called ``batch-2019``, or
+    anything nested under a folder someone happened to call
+    ``download_workspaces``, would have been handed straight to a recursive
+    delete by the cancellation and stale-sweep cleanups. Being contained in
+    a container we recorded creating is a fact about this installation, not
+    a guess from a string.
+
+    Resolves the path FIRST (collapsing ``..``/``.`` segments and symlinks)
+    before checking containment — a lexical check on the path as given
+    would accept a traversal-style path (e.g.
+    ``.../.bananaflow_tmp/batch-x/../../../etc``) that actually lands
+    outside any BananaFlow workspace. A path that cannot be resolved is
+    treated as NOT a workspace path — fail closed."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return _is_workspace_path_resolved(resolved)
+
+
+def _prune_empty_workspace_parents(node: Path) -> None:
+    """rmdir empty BananaFlow-owned parent directories, stopping at the first
+    non-empty or non-owned level. Stops at the workspace container, so it can
+    never reach the user's output directory (which is not contained in any
+    container); rmdir also refuses any level a concurrent batch still
+    occupies."""
+    try:
+        node = Path(node).resolve()
+    except (OSError, RuntimeError):
+        return
+    while _is_workspace_path_resolved(node):
+        try:
+            node.rmdir()
+        except OSError:
+            break
+        node = node.parent
+
+
+def remove_workspace_tree(path: Path) -> None:
+    """Recursively remove a BananaFlow workspace directory (a batch container
+    or a single job's subdir) and peel back any now-empty owned parents.
+
+    Resolves ``path`` once and uses that SAME canonical path for both the
+    ownership check and the actual removal — see is_workspace_path for why
+    a name-based check (or checking one path while deleting a different,
+    un-resolved one) is not safe. Refuses to remove anything that does not
+    resolve inside a container BananaFlow recorded creating, so a cleanup
+    sweep can never escape into — and delete — the user's own files. Never
+    raises: a cleanup failure must not turn an otherwise-fine batch into an
+    error."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.warning("[paths] refusing to remove %s — could not resolve: %s", path, exc)
+        return
+    if not _is_workspace_path_resolved(resolved):
+        logger.warning(
+            "[paths] refusing to remove %s (resolved: %s) — not inside a "
+            "BananaFlow-owned workspace container", path, resolved,
+        )
+        return
+    try:
+        shutil.rmtree(resolved, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[paths] workspace removal failed for %s: %s", resolved, exc)
+        return
+    _prune_empty_workspace_parents(resolved.parent)
+
+
 def _set_hidden_attribute(
     path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15, hidden: bool = True,
 ) -> bool:

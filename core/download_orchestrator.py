@@ -30,7 +30,6 @@ import dataclasses
 import hashlib
 import logging
 import re
-import shutil
 import threading
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -54,18 +53,12 @@ from core.youtube_reliability import (
     is_youtube_url,
 )
 from error_handler import classify_error, ErrorInfo
-from utils.paths import make_batch_workspace
+from utils.paths import make_batch_workspace, remove_workspace_tree
 
 logger = logging.getLogger(__name__)
 
 
 _SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
-
-# Directory names that belong to the BananaFlow batch-workspace structure.
-# Empty-parent cleanup peels back ONLY through these, so an rmdir sweep can
-# never escape into (and delete) the user's own output directory, which
-# always has an arbitrary, non-matching name. See _is_workspace_owned.
-_WORKSPACE_CONTAINER_NAMES = frozenset({".bananaflow_tmp", "download_workspaces"})
 
 
 def _safe_subdir_name(key: str) -> str:
@@ -87,14 +80,6 @@ def _safe_subdir_name(key: str) -> str:
     label = _SUBDIR_UNSAFE.sub("_", key) or "job"
     digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
     return f"{label}-{digest}"
-
-
-def _is_workspace_owned(path: Path) -> bool:
-    """Whether ``path`` is a BananaFlow-owned workspace directory that empty-
-    parent cleanup is allowed to rmdir. True only for a ``batch-*`` dir or a
-    known container root — never for the user's output directory."""
-    name = path.name
-    return name.startswith("batch-") or name in _WORKSPACE_CONTAINER_NAMES
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -786,29 +771,9 @@ class DownloadOrchestrator:
     @staticmethod
     def _cleanup_workspace(batch_container: Path) -> None:
         """Best-effort removal of a whole batch container this orchestrator
-        created, plus the ``.bananaflow_tmp`` root if that leaves it empty.
-        Never raises — a cleanup failure must not turn an otherwise-
-        successful batch into a reported error. Only ever removes the
-        BananaFlow-owned container and its dedicated root, never the user's
-        output directory (``.bananaflow_tmp``'s parent), which rmdir would
-        refuse anyway unless empty."""
-        try:
-            shutil.rmtree(batch_container, ignore_errors=True)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[Orchestrator] Failed to clean up batch workspace %s: %s",
-                batch_container, exc,
-            )
-        # Container root (``.bananaflow_tmp`` / ``download_workspaces``) —
-        # remove only if now empty (a concurrent batch keeps it alive; rmdir
-        # refuses a non-empty dir) and only if it's a recognised workspace
-        # root, so this can never rmdir the user's output directory.
-        root = batch_container.parent
-        if _is_workspace_owned(root):
-            try:
-                root.rmdir()
-            except OSError:
-                pass
+        created (plus now-empty owned roots). Delegates to the single
+        filesystem-safe helper so it can never escape the workspace tree."""
+        remove_workspace_tree(batch_container)
 
     def _cleanup_job_workspace(self, req: DownloadRequest) -> None:
         """Remove a single completed job's private workspace subdirectory and
@@ -816,30 +781,12 @@ class DownloadOrchestrator:
 
         Called when a job publishes successfully. Sibling-safe by
         construction: each job owns a separate subdir, so removing one never
-        races another's files. Also removes the batch container and the
-        ``.bananaflow_tmp`` root if this was the last job in them (only when
-        empty — an rmdir, never a recursive delete) so a resumed single
-        track, whose container this orchestrator did NOT create and would
-        therefore never batch-clean, does not leak an empty workspace."""
-        if not req.workspace_dir:
-            return
-        subdir = Path(req.workspace_dir)
-        try:
-            shutil.rmtree(subdir, ignore_errors=True)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[Orchestrator] job workspace cleanup failed for %s: %s", subdir, exc)
-            return
-        # Peel back empty BananaFlow-owned parents (batch-<id>, then the
-        # container root). The _is_workspace_owned guard stops the sweep
-        # before it could ever reach — let alone rmdir — the user's output
-        # directory; rmdir also refuses any level a sibling still occupies.
-        node = subdir.parent
-        while _is_workspace_owned(node):
-            try:
-                node.rmdir()
-            except OSError:
-                break
-            node = node.parent
+        races another's files. Peels back the batch container and root if
+        this was the last job (empty-only rmdir) so a resumed single track,
+        whose container this orchestrator did NOT create and would therefore
+        never batch-clean, does not leak an empty workspace."""
+        if req.workspace_dir:
+            remove_workspace_tree(Path(req.workspace_dir))
 
     def _record_phase(self, name: str, seconds: float) -> None:
         """Accumulate a per-phase duration for the end-of-batch timing summary."""
