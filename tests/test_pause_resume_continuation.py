@@ -1,4 +1,4 @@
-"""
+﻿"""
 tests/test_pause_resume_continuation.py  –  True global pause/resume
 ========================================================================
 Global pause used to snapshot nothing, and "Resume All" re-entered
@@ -141,6 +141,197 @@ def _req(title: str, workspace: str = "/ws", **kw) -> DownloadRequest:
     )
 
 
+# ── Pausing a track that is already running in a resume worker ───────────────
+
+class TestPauseAResumedTrack:
+    """A track the user resumed individually runs in its OWN single-job
+    worker, not the batch worker. Pause looked only at the batch worker, so
+    that track could not be paused again: no snapshot was taken and no
+    cancel was delivered, while the card was still labelled "paused" — the
+    download simply carried on to completion behind a paused-looking card."""
+
+    def test_pause_track_finds_the_resume_worker(self, tmp_path, monkeypatch, app):
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        card = _FakeCard("A", status="downloading")
+        key = str(id(card))
+        ctrl._key_to_card = {key: card}
+        ctrl._dl_worker = None
+        resume_worker = _FakeLiveWorker([(key, _req("A", workspace="/ws/batch-1/jobA"))])
+        ctrl._resume_workers = [resume_worker]
+
+        ctrl.pause_track(card)
+
+        assert key in ctrl._paused_requests
+        assert ctrl._paused_requests[key].workspace_dir == "/ws/batch-1/jobA"
+        assert resume_worker.cancelled_keys == [key], (
+            "the resume worker must actually be told to stop the track"
+        )
+        assert card.get_status() == "paused"
+
+    def test_global_pause_captures_a_running_resume_worker_too(
+        self, tmp_path, monkeypatch, app,
+    ):
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        batch_card = _FakeCard("B", status="downloading")
+        resumed_card = _FakeCard("R", status="downloading")
+        kb, kr = str(id(batch_card)), str(id(resumed_card))
+        ctrl._key_to_card = {kb: batch_card, kr: resumed_card}
+        ctrl._dl_worker = _FakeLiveWorker([(kb, _req("B"))])
+        resume_worker = _FakeLiveWorker([(kr, _req("R"))])
+        ctrl._resume_workers = [resume_worker]
+
+        ctrl.global_pause()
+
+        assert set(ctrl._paused_requests) == {kb, kr}
+        assert resumed_card.get_status() == "paused"
+        assert resume_worker.cancelled is True
+
+    def test_pause_track_for_an_unknown_key_is_a_noop_snapshot(
+        self, tmp_path, monkeypatch, app,
+    ):
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        card = _FakeCard("A", status="downloading")
+        ctrl._dl_worker = None
+        ctrl._resume_workers = []
+
+        ctrl.pause_track(card)
+
+        assert ctrl._paused_requests == {}
+        assert card.get_status() == "paused"
+
+
+# ── Post-download pause (post-processing / publish phase) ────────────────────
+
+class TestPostDownloadResumeCheckpoint:
+    """yt-dlp's .part continuation only covers the DOWNLOAD. A job paused
+    after every byte arrived is somewhere in post-processing or publishing;
+    without a recorded phase the resumed request re-ran yt-dlp against an
+    already-complete file, no postprocessor hook fired, _final_output_path
+    stayed empty, and the resume died with "output file is missing"."""
+
+    def test_snapshot_preserves_the_phase_and_the_workspace_file_identity(
+        self, tmp_path, monkeypatch, app,
+    ):
+        ctrl = _controller(tmp_path, monkeypatch, app)
+        card = _FakeCard("A", status="downloading")
+        key = str(id(card))
+        live = _req("A", workspace="/ws/batch-1/jobA")
+        live.resume_phase = "postprocess"
+        live.resume_final_path = "/ws/batch-1/jobA/A.mp3"
+        ctrl._key_to_card = {key: card}
+        ctrl._dl_worker = _FakeLiveWorker([(key, live)])
+
+        ctrl.global_pause()
+
+        snap = ctrl._paused_requests[key]
+        assert snap.resume_phase == "postprocess"
+        assert snap.resume_final_path == "/ws/batch-1/jobA/A.mp3"
+
+    def test_engine_resumes_at_the_postprocess_phase_without_rerunning_ytdlp(
+        self, tmp_path, monkeypatch,
+    ):
+        """The behaviour the checkpoint exists for: the resumed request goes
+        straight to post-processing + publish for the file already sitting in
+        its workspace, instead of handing an already-complete download back
+        to yt-dlp."""
+        from core.downloader import DownloadEngine, DownloadStatus
+
+        workspace = tmp_path / "ws"
+        output_dir = tmp_path / "out"
+        workspace.mkdir()
+        output_dir.mkdir()
+        done_file = workspace / "A.mp3"
+        done_file.write_bytes(b"complete-audio")
+
+        engine = DownloadEngine()
+        req = _req("A", workspace=str(workspace))
+        req.output_dir = str(output_dir)
+        req.resume_phase = "postprocess"
+        req.resume_final_path = str(done_file)
+
+        events: list = []
+        req.on_progress = lambda p: events.append(p)
+        req.on_finished = lambda p: events.append(p)
+        req.on_error = lambda p: events.append(p)
+
+        ydl_calls: list = []
+        monkeypatch.setattr(
+            engine, "_build_ydl_opts",
+            lambda r: ydl_calls.append(r) or {},
+        )
+        pipeline_calls: list = []
+        monkeypatch.setattr(
+            engine, "_run_final_pipeline",
+            lambda r, p: pipeline_calls.append(p) or [],
+        )
+
+        engine.download(req)
+
+        assert ydl_calls == [], "a post-download resume must not re-run yt-dlp"
+        assert pipeline_calls == [str(done_file)]
+        assert (output_dir / "A.mp3").read_bytes() == b"complete-audio"
+        assert events[-1].status == DownloadStatus.FINISHED
+        # Published: the checkpoint is cleared so a later re-submit of the
+        # same request object does not skip its own download.
+        assert req.resume_phase is None
+        assert req.resume_final_path is None
+
+    def test_publish_phase_resume_skips_post_processing_too(self, tmp_path, monkeypatch):
+        """Paused during the publish itself: the pipeline already ran, so
+        re-running it would redo artwork/lyrics/ReplayGain work for nothing."""
+        from core.downloader import DownloadEngine, DownloadStatus
+
+        workspace = tmp_path / "ws"
+        output_dir = tmp_path / "out"
+        workspace.mkdir()
+        output_dir.mkdir()
+        done_file = workspace / "A.mp3"
+        done_file.write_bytes(b"ready")
+
+        engine = DownloadEngine()
+        req = _req("A", workspace=str(workspace))
+        req.output_dir = str(output_dir)
+        req.resume_phase = "publish"
+        req.resume_final_path = str(done_file)
+        events: list = []
+        req.on_progress = lambda p: events.append(p)
+        req.on_finished = lambda p: events.append(p)
+        req.on_error = lambda p: events.append(p)
+
+        pipeline_calls: list = []
+        monkeypatch.setattr(
+            engine, "_run_final_pipeline",
+            lambda r, p: pipeline_calls.append(p) or [],
+        )
+
+        engine.download(req)
+
+        assert pipeline_calls == []
+        assert (output_dir / "A.mp3").exists()
+        assert events[-1].status == DownloadStatus.FINISHED
+
+    def test_stale_checkpoint_whose_file_vanished_downloads_again(self, tmp_path):
+        """A checkpoint is only usable while its workspace file still exists.
+        If the workspace was swept (or the user deleted it), the job must
+        fall back to a real download rather than resuming at a phase whose
+        input is gone."""
+        from core.downloader import DownloadEngine
+
+        engine = DownloadEngine()
+        req = _req("A", workspace=str(tmp_path / "ws"))
+        req.resume_phase = "postprocess"
+        req.resume_final_path = str(tmp_path / "ws" / "gone.mp3")
+
+        assert engine._resume_checkpoint(req) is None
+
+    def test_no_checkpoint_means_a_normal_download(self, tmp_path):
+        from core.downloader import DownloadEngine
+
+        engine = DownloadEngine()
+        req = _req("A", workspace=str(tmp_path))
+        assert engine._resume_checkpoint(req) is None
+
+
 # ── global_pause ─────────────────────────────────────────────────────────────
 
 class TestGlobalPause:
@@ -200,7 +391,7 @@ class TestGlobalPause:
         card = _FakeCard("A")
         k = str(id(card))
         live = _req(
-            "A", workspace="/ws/batch/x/keyA", thumbnail_url="http://thumb",
+            "A", workspace="/ws/batch/x/jobA", thumbnail_url="http://thumb",
             forced_album="My Album", category="stream:hls", is_solo=True,
             cookies_browser="chrome", square_thumbnails=True,
         )
@@ -210,7 +401,7 @@ class TestGlobalPause:
         ctrl.global_pause()
 
         saved = ctrl._paused_requests[k]
-        assert saved.workspace_dir == "/ws/batch/x/keyA"
+        assert saved.workspace_dir == "/ws/batch/x/jobA"
         assert saved.thumbnail_url == "http://thumb"
         assert saved.forced_album == "My Album"
         assert saved.category == "stream:hls"
@@ -278,13 +469,13 @@ class TestResumeAll:
         card = _FakeCard("A")
         k = str(id(card))
         ctrl._key_to_card = {k: card}
-        ctrl._paused_requests = {k: _req("A", workspace="/ws/batch-x/keyA")}
+        ctrl._paused_requests = {k: _req("A", workspace="/ws/batch-x/jobA")}
         ctrl._dl_worker = None
 
         ctrl.resume_all()
 
         job_req = dict(_FakeDownloadWorker.last_instance.jobs)[k]
-        assert job_req.workspace_dir == "/ws/batch-x/keyA"
+        assert job_req.workspace_dir == "/ws/batch-x/jobA"
 
     def test_resume_all_with_nothing_paused_is_noop(self, tmp_path, monkeypatch, app):
         import ui.workers.download_worker as dw_mod
@@ -307,7 +498,7 @@ class TestResumeAll:
         card = _FakeCard("A", status="downloading")
         k = str(id(card))
         ctrl._key_to_card = {k: card}
-        ctrl._dl_worker = _FakeLiveWorker([(k, _req("A", workspace="/ws/batch-1/keyA"))])
+        ctrl._dl_worker = _FakeLiveWorker([(k, _req("A", workspace="/ws/batch-1/jobA"))])
 
         # Pause → capture → resume.
         ctrl.global_pause()
@@ -315,7 +506,7 @@ class TestResumeAll:
         ctrl.resume_all()
 
         resumed = dict(_FakeDownloadWorker.last_instance.jobs)[k]
-        assert resumed.workspace_dir == "/ws/batch-1/keyA"
+        assert resumed.workspace_dir == "/ws/batch-1/jobA"
         assert resumed.resumable is True
         # Same job identity (key) throughout.
         assert list(dict(_FakeDownloadWorker.last_instance.jobs).keys()) == [k]

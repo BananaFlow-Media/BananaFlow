@@ -200,12 +200,14 @@ class _BlockingEngine:
         self._cancel_event = threading.Event()
         self.release = threading.Event()
         self.started = threading.Event()
+        self.downloaded: list[str] = []
 
     def cancel_all(self) -> None:
         self._cancel_event.set()
         self.release.set()
 
     def download(self, req: DownloadRequest) -> None:
+        self.downloaded.append(req.url)
         self.started.set()
         self.release.wait(timeout=5)
         if self._cancel_event.is_set():
@@ -234,9 +236,9 @@ class TestLiveRequestSnapshot:
         assert state is None
         assert snapshot is None
 
-    def test_snapshot_is_available_while_active_and_gone_once_terminal(self):
+    def test_snapshot_is_available_while_active(self):
         from core.download_orchestrator import DownloadOrchestrator
-        from core.batch_progress import JobState, is_terminal_state
+        from core.batch_progress import is_terminal_state
 
         engine = _BlockingEngine()
         cb = FakeCallbacks()
@@ -261,16 +263,95 @@ class TestLiveRequestSnapshot:
             engine.release.set()
             thread.join(timeout=5)
 
+    def test_completed_job_is_never_pause_snapshotted(self):
+        from core.download_orchestrator import DownloadOrchestrator
+        from core.batch_progress import JobState
+
+        engine = FakeEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        orch.run_batch([(key, req)])
+
         state, snapshot = orch.live_request_snapshot(key)
         assert state == JobState.COMPLETED
         assert snapshot is None, "a completed job must never be pause-snapshotted"
 
-    def test_snapshot_is_unsafe_while_lazy_url_resolve_is_in_flight(self):
-        """The exact race finding #6 described: url_resolver is consumed
-        (cleared) the instant resolution starts, and the resolved URL is
-        only committed once the resolver returns. A snapshot taken in that
-        window must not be handed out at all -- it would have neither a
-        resolver nor a real URL."""
+    def test_pause_and_completion_are_mutually_exclusive(self):
+        """The atomic pause/completion boundary. A snapshot handed out
+        CLAIMS the job: the pool thread that was about to complete it must
+        then not report it as done, or the batch both finishes the track and
+        offers to resume it."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is not None
+        finally:
+            # Released only now: the engine goes on to fire on_finished for
+            # a job the pause already claimed.
+            engine.release.set()
+            thread.join(timeout=5)
+
+        assert cb.track_finished == [], (
+            "a job captured for a pause must not also be reported as done"
+        )
+        assert ("a", "done") not in cb.track_statuses
+
+    def test_publish_gate_refuses_the_commit_for_a_paused_job(self):
+        """The completion side of the same boundary, at the last possible
+        instant: the engine asks permission immediately before it makes the
+        file visible, and a claimed job is refused."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            assert req.publish_gate is not None
+            assert req.publish_gate() is True, "an unclaimed job may publish"
+        finally:
+            engine.release.set()
+            thread.join(timeout=5)
+
+        # A second orchestrator run, this time claimed by a pause first.
+        engine2 = _BlockingEngine()
+        orch2 = DownloadOrchestrator(engine=engine2, callbacks=FakeCallbacks(), max_workers=1)
+        key2, req2 = _make_job("b", "http://b")
+        t2 = threading.Thread(target=orch2.run_batch, args=([(key2, req2)],))
+        t2.start()
+        try:
+            assert engine2.started.wait(timeout=5)
+            _state, snapshot = orch2.live_request_snapshot(key2)
+            assert snapshot is not None
+            assert req2.publish_gate() is False, (
+                "a paused job must not be allowed to publish"
+            )
+        finally:
+            engine2.release.set()
+            t2.join(timeout=5)
+
+    def test_mid_resolve_pause_returns_the_pre_resolve_request(self):
+        """A job caught between its Spotify two-stage resolver being
+        consumed and the resolved URL being committed must still be
+        capturable. Refusing the snapshot dropped it from the paused set
+        entirely while the engine still cancelled it -- the track was simply
+        lost. The pre-resolve copy is handed back instead, so a resume
+        re-runs the match."""
         from core.download_orchestrator import DownloadOrchestrator
 
         engine = FakeEngine()
@@ -293,19 +374,130 @@ class TestLiveRequestSnapshot:
         try:
             assert resolver_started.wait(timeout=5)
 
-            # Mid-resolve: url_resolver has already been cleared but the
-            # resolved URL has not been committed -- must report "no safe
-            # snapshot", not a request with a stale placeholder URL.
             _state, snapshot = orch.live_request_snapshot(key)
-            assert snapshot is None
+            assert snapshot is not None, "a mid-resolve job must still be pausable"
+            assert snapshot.url_resolver is slow_resolver, (
+                "the snapshot must still carry the resolver so the resume "
+                "re-runs the match"
+            )
+            assert snapshot.url == "placeholder"
+            # Never the half-committed live request.
+            assert snapshot is not req
         finally:
             release_resolver.set()
             thread.join(timeout=5)
 
-        # The resolved URL genuinely reached the engine once resolve
-        # completed -- proves the commit happened, not just that the
-        # snapshot correctly hid it while in flight.
-        assert engine._downloaded == ["http://resolved"]
+    def test_mid_resolve_snapshot_stash_is_cleared_once_resolution_commits(self):
+        """Once the resolved URL is committed, the pause snapshot must come
+        from the LIVE request again -- a stale pre-resolve copy would resume
+        with a placeholder URL and re-run a match that already succeeded."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+
+        key, req = _make_job("a", "placeholder")
+        req.url_resolver = lambda _ev: "http://resolved"
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is not None
+            assert snapshot.url == "http://resolved"
+            assert snapshot.url_resolver is None
+        finally:
+            engine.release.set()
+            thread.join(timeout=5)
+
+    def test_every_job_is_snapshottable_before_it_is_submitted(self):
+        """Registration must not wait for the (staggered, therefore slow)
+        submit loop: a job still queued behind the stagger had no lock, no
+        live request and no cancel event, so Global Pause skipped it, it was
+        never captured as paused, and the whole-batch cancel that follows
+        threw it away."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        jobs = [_make_job(k, f"http://{k}") for k in ("a", "b", "c", "d")]
+
+        thread = threading.Thread(
+            target=orch.run_batch, args=(jobs,), kwargs={"delay_range": (0.4, 0.4)},
+        )
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            # "d" is still waiting behind three stagger sleeps and a
+            # single-worker pool -- it has certainly not been submitted.
+            captured = {}
+            for key, _req in jobs:
+                _state, snapshot = orch.live_request_snapshot(key)
+                if snapshot is not None:
+                    captured[key] = snapshot
+            assert set(captured) == {"a", "b", "c", "d"}, (
+                "every job in the batch must be pausable, submitted or not"
+            )
+        finally:
+            engine.release.set()
+            orch.cancel()
+            thread.join(timeout=10)
+
+    def test_cancel_track_reaches_a_not_yet_submitted_job(self):
+        """The other half of the same registration gap: cancel_track() was a
+        no-op for an unsubmitted job, so pausing one marked the card paused
+        while the download went on to run anyway."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        jobs = [_make_job(k, f"http://{k}") for k in ("a", "b")]
+
+        thread = threading.Thread(
+            target=orch.run_batch, args=(jobs,), kwargs={"delay_range": (0.3, 0.3)},
+        )
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            orch.cancel_track("b")
+        finally:
+            engine.release.set()
+            thread.join(timeout=10)
+
+        assert "http://b" not in engine.downloaded, (
+            "a cancelled not-yet-submitted job must never download"
+        )
+
+    def test_a_paused_job_is_not_reported_as_cancelled(self):
+        """A whole-batch pause cancels the engine, so every paused job lands
+        in the end-of-batch outstanding-cancel sweep. Emitting "cancelled"
+        there would overwrite the "paused" label the pause just set."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        jobs = [_make_job(k, f"http://{k}") for k in ("a", "b")]
+
+        thread = threading.Thread(target=orch.run_batch, args=(jobs,))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            for key, _req in jobs:
+                orch.live_request_snapshot(key)  # claim both for a pause
+        finally:
+            engine.release.set()
+            orch.cancel()
+            thread.join(timeout=10)
+
+        cancelled_keys = {k for k, s in cb.track_statuses if s == "cancelled"}
+        assert cancelled_keys == set(), (
+            f"paused jobs must not be reported cancelled, got {cancelled_keys}"
+        )
 
 
 class TestPreexistingJobs:
