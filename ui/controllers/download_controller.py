@@ -592,7 +592,7 @@ class DownloadController(QObject):
         re-running yt-dlp against an already-complete file (which finds
         nothing to do, fires no postprocessor hook, and fails)."""
         import dataclasses
-        return dataclasses.replace(
+        snapshot = dataclasses.replace(
             req,
             resumable=True,
             cancel_event=None,
@@ -600,7 +600,15 @@ class DownloadController(QObject):
             on_finished=None,
             on_error=None,
             publish_gate=None,
+            publish_release=None,
         )
+        # dataclasses.replace rebuilds through __init__ and resets the
+        # init=False output-path tracker. Re-attached because it is the only
+        # in-memory record of what yt-dlp produced for a job paused in the
+        # instant before its post-download checkpoint was written (see
+        # DownloadRequest.snapshot_copy).
+        snapshot._final_output_path = req._final_output_path  # noqa: SLF001
+        return snapshot
 
     def _worker_for_key(self, key: str):
         """The running worker that currently owns job ``key`` — the main
@@ -703,15 +711,30 @@ class DownloadController(QObject):
         if self._dl_worker and self._dl_worker.isRunning():
             self._dl_worker.cancel()
 
-    def pause_track(self, card) -> None:
-        """
-        Save the in-flight request for this card and cancel only that track.
+    def pause_track(self, card) -> bool:
+        """Save the in-flight request for this card and cancel only that
+        track. Returns whether the track was actually paused.
+
+        The card is relabelled "paused" ONLY when a snapshot was genuinely
+        taken — which is also exactly when the cancel was delivered (see
+        _pause_and_snapshot). Setting it unconditionally was a lie in every
+        case where the snapshot failed: no worker owns the key, or the job
+        had already finished, errored or been claimed by its own thread. A
+        card reading "paused" over a download that is still running, or
+        over one that already completed, is worse than no feedback at all —
+        the user is offered a Resume that has nothing to resume.
+
         AppWindow looks up the card from _index_to_card and passes it here.
         """
         key = str(id(card))
         snapshot = self._pause_and_snapshot(key)
-        if snapshot is not None:
-            self._paused_requests[key] = snapshot
+        if snapshot is None:
+            logger.info(
+                "[DownloadController] Nothing to pause for card %s — leaving "
+                "its status as %r", key, card.get_status(),
+            )
+            return False
+        self._paused_requests[key] = snapshot
         card.set_status("paused")
 
         paused = self._cfg.paused_items
@@ -723,6 +746,7 @@ class DownloadController(QObject):
         })
         self._cfg.paused_items = paused
         self._cfg.save()
+        return True
 
     def resume_track(self, card) -> None:
         """

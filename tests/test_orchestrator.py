@@ -345,6 +345,95 @@ class TestLiveRequestSnapshot:
             engine2.release.set()
             t2.join(timeout=5)
 
+    def test_a_gate_that_does_not_commit_gives_the_claim_back(self):
+        """A publish attempt that turns out not to commit — a same-volume
+        rename that reports the destination is on another volume, or a
+        locked-target retry — must free the job again. Holding the claim
+        across the long copy or the retry wait made Global Pause see
+        "already terminal" for a job that had published nothing and could
+        still be cancelled out from under it, leaving it in no set at all."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            assert req.publish_gate is not None
+            assert req.publish_release is not None
+
+            assert req.publish_gate() is True
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is None, "while the claim is held the job is not pausable"
+
+            req.publish_release()
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is not None, (
+                "an attempt that committed nothing must leave the job pausable"
+            )
+        finally:
+            engine.release.set()
+            orch.cancel()
+            thread.join(timeout=5)
+
+    def test_release_cannot_take_back_a_claim_the_pause_won(self):
+        """Release only ever gives back the caller's OWN claim. If a pause
+        got there first, the engine's release must not silently hand the
+        job back to the publish path."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is not None  # the pause claims it
+
+            req.publish_release()  # engine side, losing the race
+
+            assert req.publish_gate() is False, (
+                "the pause's claim must survive an unrelated release"
+            )
+        finally:
+            engine.release.set()
+            orch.cancel()
+            thread.join(timeout=5)
+
+    def test_pause_snapshot_keeps_the_output_path_tracker(self):
+        """_final_output_path is init=False, so dataclasses.replace silently
+        resets it. It is the only in-memory record of what yt-dlp produced,
+        and a job paused in the instant between yt-dlp returning and its
+        checkpoint being written has nothing else to resume from."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _BlockingEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        key, req = _make_job("a", "http://a")
+
+        thread = threading.Thread(target=orch.run_batch, args=([(key, req)],))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            req._final_output_path = "/ws/batch-1/jobA/Song.mp3"
+
+            _state, snapshot = orch.live_request_snapshot(key)
+            assert snapshot is not None
+            assert snapshot._final_output_path == "/ws/batch-1/jobA/Song.mp3"
+        finally:
+            engine.release.set()
+            orch.cancel()
+            thread.join(timeout=5)
+
     def test_mid_resolve_pause_returns_the_pre_resolve_request(self):
         """A job caught between its Spotify two-stage resolver being
         consumed and the resolved URL being committed must still be
