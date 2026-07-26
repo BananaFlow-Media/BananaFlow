@@ -605,6 +605,104 @@ class TestCancelDuringPublish:
         ]
         assert leftovers == []
 
+    def test_cross_volume_fallback_gives_the_commit_claim_back_before_copying(
+        self, tmp_path, monkeypatch,
+    ):
+        """The gate has to claim BEFORE the same-volume rename — claim and
+        commit must be inseparable. But that rename may report the
+        destination is on another volume, committing nothing and leaving a
+        copy that can take minutes. Holding the claim across that made the
+        job unpausable for the whole operation."""
+        import errno
+
+        import core.downloader as dl_mod
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+
+        events: list[str] = []
+        req.publish_gate = lambda: (events.append("gate"), True)[1]
+        req.publish_release = lambda: events.append("release")
+
+        real_replace = os.replace
+
+        def _force_cross_volume(a, b):
+            if str(a) == str(src):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            events.append("copy-done")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+
+        engine._publish_to_final_location(req, str(src))
+
+        assert events == ["gate", "release", "gate", "copy-done"], (
+            "the claim must be released for the duration of the copy and "
+            f"re-taken only immediately before the rename, got {events}"
+        )
+
+    def test_locked_target_retry_gives_the_commit_claim_back_between_attempts(
+        self, tmp_path, monkeypatch,
+    ):
+        """A locked destination sleeps 2s and retries. Nothing was
+        published, so the job must stay pausable across that wait."""
+        import core.downloader as dl_mod
+
+        engine = DownloadEngine()
+        _ws, _output_dir, src, req = self._setup(tmp_path)
+
+        events: list[str] = []
+        req.publish_gate = lambda: (events.append("gate"), True)[1]
+        req.publish_release = lambda: events.append("release")
+
+        attempts = {"n": 0}
+
+        def _locked_then_ok(a, b):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                exc = OSError("locked")
+                exc.winerror = 32
+                raise exc
+            events.append("committed")
+
+        monkeypatch.setattr(dl_mod.os, "replace", _locked_then_ok)
+        monkeypatch.setattr(dl_mod.time, "sleep", lambda _s: None)
+
+        engine._publish_to_final_location(req, str(src))
+
+        assert events == ["gate", "release", "gate", "committed"], (
+            f"the claim must not be held across the retry wait, got {events}"
+        )
+
+    def test_a_committed_publish_keeps_the_claim(self, tmp_path):
+        """The straightforward case must not regress: a same-volume rename
+        that actually commits keeps the claim, so the completion is
+        reported normally."""
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+
+        events: list[str] = []
+        req.publish_gate = lambda: (events.append("gate"), True)[1]
+        req.publish_release = lambda: events.append("release")
+
+        engine._publish_to_final_location(req, str(src))
+
+        assert events == ["gate"], f"a committed publish must not release, got {events}"
+        assert (output_dir / "song.mp3").exists()
+
+    def test_a_refused_gate_never_publishes(self, tmp_path):
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+        req.publish_gate = lambda: False
+
+        from core.downloader import PublishCancelled
+
+        with pytest.raises(PublishCancelled):
+            engine._publish_to_final_location(req, str(src))
+
+        assert not (output_dir / "song.mp3").exists()
+        assert src.exists()
+
     def test_hls_path_reports_cancelled_not_error_when_publish_is_cancelled(
         self, tmp_path, monkeypatch,
     ):

@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 
 _MULTI_KINDS = {UrlKind.PLAYLIST, UrlKind.ALBUM, UrlKind.ARTIST}
 
+# Card statuses a job never comes back from — captured here (rather than
+# just "done") because Global Pause must not snapshot-and-resume a job that
+# has already reached one of these; a resume of an errored/cancelled card
+# would re-run work the user never asked to continue.
+_TERMINAL_CARD_STATUSES = frozenset({"done", "error", "cancelled"})
+
 
 def _parse_stream_type(category: str) -> Optional[str]:
     """Extract stream_type from a category string like 'stream:hls'."""
@@ -505,12 +511,21 @@ class DownloadController(QObject):
             card.set_status("queued")
             card.set_progress(0.0)
 
-        n = len(jobs) + len(preexisting_jobs)
         self.cancel_visible.emit(True)
         self.downloading_changed.emit(True)
 
+        self._dl_worker = self._build_batch_worker(jobs, preexisting_jobs)
+        self._dl_worker.start()
+
+        self.batch_started.emit()
+
+    def _build_batch_worker(self, jobs, preexisting_jobs):
+        """Create and fully wire a batch DownloadWorker. Shared by
+        start_batch() and resume_all() so a resumed batch is a first-class
+        batch — same footer/progress/snapshot wiring as a fresh one — not a
+        stripped-down side worker."""
         from ui.workers.download_worker import DownloadWorker
-        self._dl_worker = DownloadWorker(
+        worker = DownloadWorker(
             jobs=jobs,
             preexisting=preexisting_jobs,
             engine=self._engine,
@@ -519,21 +534,19 @@ class DownloadController(QObject):
             max_workers=self._cfg.max_parallel_downloads,
             parent=self,
         )
-        self._dl_worker.track_progress.connect(self._on_track_progress)
-        self._dl_worker.track_speed.connect(self._on_track_speed)
-        self._dl_worker.track_status.connect(self._on_track_status)
-        self._dl_worker.track_finished.connect(self._on_track_finished)
-        self._dl_worker.track_preexisting.connect(self._on_track_preexisting)
-        self._dl_worker.overall_progress.connect(self._on_worker_overall_progress)
-        self._dl_worker.metrics.connect(self._on_worker_metrics)
-        self._dl_worker.batch_snapshot.connect(self._on_worker_batch_snapshot)
-        self._dl_worker.job_count_changed.connect(self._on_worker_job_count_changed)
-        self._dl_worker.job_error.connect(self._on_track_error)
-        self._dl_worker.all_finished.connect(self._on_batch_done)
-        self._dl_worker.track_thumbnail.connect(self._on_track_thumbnail)
-        self._dl_worker.start()
-
-        self.batch_started.emit()
+        worker.track_progress.connect(self._on_track_progress)
+        worker.track_speed.connect(self._on_track_speed)
+        worker.track_status.connect(self._on_track_status)
+        worker.track_finished.connect(self._on_track_finished)
+        worker.track_preexisting.connect(self._on_track_preexisting)
+        worker.overall_progress.connect(self._on_worker_overall_progress)
+        worker.metrics.connect(self._on_worker_metrics)
+        worker.batch_snapshot.connect(self._on_worker_batch_snapshot)
+        worker.job_count_changed.connect(self._on_worker_job_count_changed)
+        worker.job_error.connect(self._on_track_error)
+        worker.all_finished.connect(self._on_batch_done)
+        worker.track_thumbnail.connect(self._on_track_thumbnail)
+        return worker
 
     def is_downloading(self) -> bool:
         """True while a batch DownloadWorker is actively running."""
@@ -560,14 +573,136 @@ class DownloadController(QObject):
             ):
                 self._termination_intent = intent
 
+    @staticmethod
+    def _snapshot_for_pause(req: DownloadRequest) -> DownloadRequest:
+        """A complete, standalone copy of a live request, prepared to resume.
+
+        Uses dataclasses.replace so EVERY field survives (workspace_dir,
+        thumbnail_url, forced_album, platform, category, cookies_browser,
+        is_solo, url_resolver, …) — the old hand-written copy silently
+        dropped several, so a resumed track lost its custom artwork/album/
+        crop behaviour. ``resumable=True`` makes yt-dlp pick up the .part
+        file; the per-run transients (cancel_event, callbacks) are cleared
+        so the next orchestrator owns them cleanly, and the init=False
+        output-path trackers reset to their defaults automatically.
+
+        ``resume_phase`` / ``resume_final_path`` are ordinary fields and
+        deliberately DO survive: they are how a track paused during
+        post-processing or publishing resumes at that phase instead of
+        re-running yt-dlp against an already-complete file (which finds
+        nothing to do, fires no postprocessor hook, and fails)."""
+        import dataclasses
+        snapshot = dataclasses.replace(
+            req,
+            resumable=True,
+            cancel_event=None,
+            on_progress=None,
+            on_finished=None,
+            on_error=None,
+            publish_gate=None,
+            publish_release=None,
+        )
+        # dataclasses.replace rebuilds through __init__ and resets the
+        # init=False output-path tracker. Re-attached because it is the only
+        # in-memory record of what yt-dlp produced for a job paused in the
+        # instant before its post-download checkpoint was written (see
+        # DownloadRequest.snapshot_copy).
+        snapshot._final_output_path = req._final_output_path  # noqa: SLF001
+        return snapshot
+
+    def _worker_for_key(self, key: str):
+        """The running worker that currently owns job ``key`` — the main
+        batch worker, or the single-job worker a per-track resume started.
+
+        Pause used to address only the batch worker, so a track that had
+        already been resumed once (and is therefore running in its own
+        resume worker) could not be paused again: the lookup found nothing,
+        no snapshot was taken and no cancel was delivered, so the card was
+        labelled "paused" while the download carried on to completion.
+        """
+        for worker in [self._dl_worker, *self._resume_workers]:
+            if worker is None:
+                continue
+            for job_key, _req in getattr(worker, "_jobs", []) or []:
+                if job_key == key:
+                    return worker
+        return None
+
+    def _pause_and_snapshot(self, key: str) -> Optional[DownloadRequest]:
+        """Claim job ``key`` for a pause and, if it was still safely
+        resumable at that instant, return a resume-ready snapshot of it —
+        else None (already terminal, or its own thread claimed it first).
+
+        CLAIMS first, cancels second (DownloadOrchestrator.
+        live_request_snapshot takes the job's own lock, reads its state and
+        hands back a defensive copy as one atomic step). The claim — not the
+        cancel — is what makes this safe: from that instant the job's pool
+        thread cannot take it terminal, and the engine's publish gate will
+        refuse to make its file visible, so a job captured as paused can
+        never also complete for real. Cancelling first (the earlier order)
+        left the opposite race open: the cancel could be observed and the
+        job marked CANCELLED before the snapshot was taken, and the track
+        was then dropped from the paused set entirely.
+
+        Reading the UI card's status label instead of this would leave both
+        windows open — the card is only updated once a Qt-queued signal from
+        the worker thread is dispatched, one tick behind the orchestrator's
+        own bookkeeping.
+        """
+        worker = self._worker_for_key(key)
+        if worker is None:
+            return None
+        orch = worker._orch  # noqa: SLF001
+        _state, live_req = orch.live_request_snapshot(key)
+        if live_req is None:
+            return None
+        worker.cancel_track(key)
+        # Full-fidelity snapshot (every field, incl. workspace_dir) so the
+        # resumed track continues from its .part file with all its
+        # metadata/artwork behaviour intact.
+        return self._snapshot_for_pause(live_req)
+
     def global_pause(self) -> None:
         """Pause the running batch. Internally this cancels the in-flight
-        downloads (leaving resumable .part files in place), but the *outcome*
-        is a pause, never a cancellation — the distinction is preserved for
-        the UI so the user is offered Resume, not a fresh start."""
+        downloads (leaving resumable .part files in each job's workspace),
+        but the *outcome* is a pause, never a cancellation — the distinction
+        is preserved for the UI so the user is offered Resume, not a fresh
+        start.
+
+        Every unfinished job is snapshotted into ``_paused_requests`` so
+        Resume All continues the SAME jobs (same workspace, same partial
+        downloads) rather than rebuilding a brand-new batch through
+        start_batch() — which would re-run the duplicate policy and discard
+        the partial state. Jobs whose card already reached a terminal state
+        (done/preexisting, errored, or already cancelled) are deliberately
+        NOT captured, so they are never re-run on the next Resume All. A job
+        caught with nothing safe to snapshot (see _pause_and_snapshot) is
+        cancelled outright rather than resumed from unsafe state.
+
+        Covers every running worker, not just the main batch one: a track
+        the user already resumed individually is running in its own
+        single-job worker, and Global Pause must stop and capture that one
+        too rather than leave it downloading."""
         self._set_termination_intent(BatchOutcome.PAUSED_BY_USER)
-        if self._dl_worker and self._dl_worker.isRunning():
-            self._dl_worker.cancel()
+        workers = [
+            w for w in [self._dl_worker, *self._resume_workers]
+            if w is not None and w.isRunning()
+        ]
+        if not workers:
+            return
+        for worker in workers:
+            for key, _req in list(getattr(worker, "_jobs", []) or []):
+                card = self._key_to_card.get(key)
+                if card is not None and card.get_status() in _TERMINAL_CARD_STATUSES:
+                    continue  # already done/errored/cancelled — never resume it
+                snapshot = self._pause_and_snapshot(key)
+                if snapshot is None:
+                    continue
+                self._paused_requests[key] = snapshot
+                if card is not None:
+                    card.set_status("paused")
+        for worker in workers:
+            worker.cancel()
 
     def cancel_all(self) -> None:
         """Cancel the engine (all in-flight yt-dlp downloads) and the worker."""
@@ -576,51 +711,30 @@ class DownloadController(QObject):
         if self._dl_worker and self._dl_worker.isRunning():
             self._dl_worker.cancel()
 
-    def pause_track(self, card) -> None:
-        """
-        Save the in-flight request for this card and cancel only that track.
+    def pause_track(self, card) -> bool:
+        """Save the in-flight request for this card and cancel only that
+        track. Returns whether the track was actually paused.
+
+        The card is relabelled "paused" ONLY when a snapshot was genuinely
+        taken — which is also exactly when the cancel was delivered (see
+        _pause_and_snapshot). Setting it unconditionally was a lie in every
+        case where the snapshot failed: no worker owns the key, or the job
+        had already finished, errored or been claimed by its own thread. A
+        card reading "paused" over a download that is still running, or
+        over one that already completed, is worse than no feedback at all —
+        the user is offered a Resume that has nothing to resume.
+
         AppWindow looks up the card from _index_to_card and passes it here.
         """
         key = str(id(card))
-        req = self._active_request_for_key(key)
-        if req is not None:
-            req_copy = DownloadRequest(
-                url=req.url,
-                output_dir=req.output_dir,
-                media_type=req.media_type,
-                audio_quality=req.audio_quality,
-                video_quality=req.video_quality,
-                audio_format=req.audio_format,
-                video_format=req.video_format,
-                embed_thumbnail=req.embed_thumbnail,
-                embed_metadata=req.embed_metadata,
-                forced_title=req.forced_title,
-                forced_artist=req.forced_artist,
-                forced_index=req.forced_index,
-                playlist_name=req.playlist_name,
-                sponsorblock=req.sponsorblock,
-                sponsorblock_categories=req.sponsorblock_categories,
-                resumable=True,   # pick up .part file on resume
-                embed_lyrics=req.embed_lyrics,
-                replay_gain=req.replay_gain,
-                musicbrainz=req.musicbrainz,
-                square_thumbnails=req.square_thumbnails,
-                expand_thumbnails=req.expand_thumbnails,
-                clean_filename=req.clean_filename,
-                cookies_file=req.cookies_file,
-                proxy_url=req.proxy_url,
-                stream_type=req.stream_type,
-                youtube_reliability_mode=req.youtube_reliability_mode,
-                # Carry the SAME batch workspace forward so the resumed
-                # download finds its .part file exactly where it left off,
-                # instead of run_batch() handing it a brand-new empty
-                # workspace with nothing to continue from.
-                workspace_dir=req.workspace_dir,
+        snapshot = self._pause_and_snapshot(key)
+        if snapshot is None:
+            logger.info(
+                "[DownloadController] Nothing to pause for card %s — leaving "
+                "its status as %r", key, card.get_status(),
             )
-            self._paused_requests[key] = req_copy
-
-        if self._dl_worker:
-            self._dl_worker.cancel_track(key)
+            return False
+        self._paused_requests[key] = snapshot
         card.set_status("paused")
 
         paused = self._cfg.paused_items
@@ -632,6 +746,7 @@ class DownloadController(QObject):
         })
         self._cfg.paused_items = paused
         self._cfg.save()
+        return True
 
     def resume_track(self, card) -> None:
         """
@@ -671,11 +786,79 @@ class DownloadController(QObject):
         resume_worker.all_finished.connect(self._on_batch_done)
         resume_worker.track_thumbnail.connect(self._on_track_thumbnail)
         resume_worker.all_finished.connect(
-            lambda w=resume_worker: (
+            # all_finished carries the BatchOutcome as its one argument, so
+            # the lambda must accept (and ignore) it as its FIRST positional
+            # parameter -- a lambda with only a defaulted `w=resume_worker`
+            # parameter would have that default silently overridden by the
+            # emitted outcome instead, so `w` would never actually be the
+            # worker and this would never remove anything: _resume_workers
+            # would grow forever, one stale entry per resumed track, and
+            # _on_batch_done's "is this the last active worker" check (see
+            # its docstring) would see those stale entries as still active
+            # and stop reporting completion for every resume after the
+            # first one.
+            lambda _outcome=None, w=resume_worker: (
                 self._resume_workers.remove(w) if w in self._resume_workers else None
             )
         )
         resume_worker.start()
+
+    def resume_all(self) -> None:
+        """Continue a globally-paused batch: re-submit every snapshotted
+        paused job as ONE batch, continuing from its .part file in its
+        existing workspace.
+
+        This is deliberately NOT start_batch(): it never rebuilds requests
+        from cards, never runs duplicate detection, and never shows the
+        duplicate dialog. The jobs, their identities (keys), their
+        workspaces and their partial downloads are exactly the ones that
+        were paused. Completed / duplicate-skip cards were never captured
+        (see global_pause), so they are not re-run."""
+        if not self._paused_requests:
+            return
+        if self._dl_worker is not None and self._dl_worker.isRunning():
+            # A batch is already running — don't stack a second one.
+            return
+
+        jobs: list[tuple[str, DownloadRequest]] = []
+        for key, req in self._paused_requests.items():
+            card = self._key_to_card.get(key)
+            if card is not None:
+                card.set_status("queued")
+                card.set_progress(0.0)
+            jobs.append((key, req))
+
+        # Drop any per-track paused_items persistence for the resumed keys
+        # (PR6 replaces this store; for now keep it consistent).
+        resumed_keys = set(self._paused_requests.keys())
+        remaining = [
+            p for p in self._cfg.paused_items if p.get("card_key") not in resumed_keys
+        ]
+        if len(remaining) != len(self._cfg.paused_items):
+            self._cfg.paused_items = remaining
+            self._cfg.save()
+
+        self._paused_requests.clear()
+        self._card_progress.clear()
+
+        # A resume is a fresh run for termination-intent purposes — clear any
+        # lingering pause intent so a clean resume finishes as COMPLETED.
+        with self._fatal_lock:
+            self._fatal_error_triggered = False
+        self._termination_intent = None
+        self._engine._cancel_event.clear()  # noqa: SLF001
+
+        self._batch_click_ts = time.monotonic()
+        self._engine_start_logged = False
+        self._first_byte_logged = False
+
+        self.cancel_visible.emit(True)
+        self.downloading_changed.emit(True)
+
+        self._dl_worker = self._build_batch_worker(jobs, preexisting_jobs=[])
+        self._dl_worker.start()
+
+        self.batch_started.emit()
 
     # ── Private slots (wired to DownloadWorker signals) ───────────────────────
 
@@ -866,10 +1049,28 @@ class DownloadController(QObject):
         a plain cancel. That intent lives here, so a recorded termination
         intent (pause / cancel / fatal) always wins over the orchestrator's
         best guess. Absent any intent, the orchestrator's outcome stands
-        (clean completion vs completion-with-failures)."""
+        (clean completion vs completion-with-failures).
+
+        Multiple per-track resume workers can be running at once (each an
+        independent single-job DownloadWorker started by resume_track), and
+        every one of them connects its all_finished signal to this same
+        slot. One of them finishing must not tell the UI "no longer
+        downloading" — and must not consume the shared termination intent —
+        while a sibling resume is still active; only the truly LAST active
+        worker (main batch or resume) does that. The finishing sender is
+        still present in _resume_workers at this point (its own removal is a
+        separately-connected slot that has not necessarily run yet), so it
+        is excluded explicitly rather than relying on that removal."""
         if not self._is_current_batch_worker_signal():
             return
-        self._dl_worker = None
+        sender = self.sender()
+        if sender is self._dl_worker:
+            self._dl_worker = None
+
+        other_active_workers = [w for w in self._resume_workers if w is not sender]
+        if self._dl_worker is not None or other_active_workers:
+            return
+
         self.cancel_visible.emit(False)
         self.downloading_changed.emit(False)
         self.metrics_update.emit("", "")
@@ -884,10 +1085,12 @@ class DownloadController(QObject):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _active_request_for_key(self, key: str) -> Optional[DownloadRequest]:
-        """Retrieve the live DownloadRequest for a card key from the active worker."""
-        if self._dl_worker is None:
+        """Retrieve the live DownloadRequest for a card key from whichever
+        worker owns it — the batch worker or a per-track resume worker."""
+        worker = self._worker_for_key(key)
+        if worker is None:
             return None
-        for card_key, req in self._dl_worker._jobs:  # noqa: SLF001
+        for card_key, req in getattr(worker, "_jobs", []) or []:
             if card_key == key:
                 return req
         return None
