@@ -8,11 +8,15 @@ Zero GUI imports — pure stdlib only.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def get_app_data_dir() -> Path:
@@ -179,3 +183,263 @@ def get_ffprobe_executable() -> Optional[str]:
         if fp.exists():
             return str(fp)
     return shutil.which("ffprobe")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Batch download workspace (core.download_orchestrator / core.downloader)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_WORKSPACE_CONTAINER_NAME = ".bananaflow_tmp"
+# The app-data fallback container, used when the same-volume container under
+# the user's output directory cannot be created or hidden.
+_APPDATA_CONTAINER_NAME = "download_workspaces"
+
+# Persisted list of output directories BananaFlow has actually created a batch
+# workspace under. This is what later makes workspace ownership *provable*:
+# a directory is BananaFlow-owned because it is contained in a container we
+# created under a root we recorded — not because its name happens to look
+# like one of ours. It is also the only way to rediscover a workspace left
+# under an output directory the user has since changed away from.
+#
+# Bounded, oldest-first: a user who keeps changing their output directory
+# cannot grow the file without limit.
+_OUTPUT_ROOTS_FILENAME = "known_output_roots.json"
+_MAX_KNOWN_OUTPUT_ROOTS = 64
+
+
+def _known_output_roots_path() -> Path:
+    return get_app_data_dir() / _OUTPUT_ROOTS_FILENAME
+
+
+def known_output_roots() -> list[Path]:
+    """Every output directory BananaFlow has recorded a batch workspace
+    under, oldest first. Never raises — a missing or corrupt file yields an
+    empty list, which is the safe answer for both of its consumers (own
+    nothing / discover nothing) rather than a startup failure."""
+    import json
+
+    try:
+        raw = _known_output_roots_path().read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "[paths] Ignoring corrupt known-output-roots file %s",
+            _known_output_roots_path(),
+        )
+        return []
+    if not isinstance(data, list):
+        return []
+    return [Path(item) for item in data if isinstance(item, str) and item.strip()]
+
+
+def register_output_root(path) -> None:
+    """Record ``path`` as an output directory BananaFlow owns a workspace
+    container under.
+
+    Idempotent and best-effort: a write failure is logged, never raised —
+    losing the record costs a later cleanup sweep, never the correctness of
+    the download itself. Written atomically so a crash mid-write cannot
+    leave a half file that would read back as corrupt."""
+    import json
+    import tempfile
+
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return
+    entries = [str(p) for p in known_output_roots()]
+    if str(resolved) in entries:
+        return
+    entries.append(str(resolved))
+    if len(entries) > _MAX_KNOWN_OUTPUT_ROOTS:
+        entries = entries[-_MAX_KNOWN_OUTPUT_ROOTS:]
+
+    target = _known_output_roots_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(entries, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(target))
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    except OSError as exc:
+        logger.warning("[paths] Could not record output root %s: %s", resolved, exc)
+
+
+def _set_hidden_attribute(
+    path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15, hidden: bool = True,
+) -> bool:
+    """Apply the Windows Hidden file attribute so the batch workspace never
+    shows up in a normal Explorer/dir listing.
+
+    Retries a few times: a directory that was just created can transiently
+    fail this call (e.g. an antivirus/indexer briefly holding a handle right
+    after creation) — a bare single attempt would report "exposed" for a
+    purely transient condition that a millisecond-scale retry resolves.
+
+    Returns True if the attribute ends up set (or if we're on a non-Windows
+    platform, where the leading-dot name already hides the folder by
+    convention — matches get_app_data_dir's ``.bananaflow``). Returns
+    False, with a logged warning, only when every attempt genuinely failed —
+    the caller stays functional either way (hiding is cosmetic; an
+    un-hidden workspace still works and is still cleaned up), but a real,
+    persistent failure is never silently reported as success.
+
+    ``hidden=False`` clears the attribute instead. The cross-volume publish
+    needs that: its staging temp is hidden from the moment it is created
+    (so a partial copy is never visible), and the attribute has to come off
+    again just before the temp is renamed into place — os.replace carries
+    the source's attributes with it, so a still-hidden temp would publish
+    the user's finished file as a hidden file.
+    """
+    if os.name != "nt":
+        return True
+    import ctypes
+    FILE_ATTRIBUTE_HIDDEN = 0x02
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    target_attrs = FILE_ATTRIBUTE_HIDDEN if hidden else FILE_ATTRIBUTE_NORMAL
+    last_err = None
+    for attempt in range(attempts):
+        try:
+            ok = ctypes.windll.kernel32.SetFileAttributesW(  # type: ignore[attr-defined]
+                str(path), target_attrs
+            )
+            if ok:
+                return True
+            last_err = ctypes.windll.kernel32.GetLastError()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+        if attempt < attempts - 1:
+            time.sleep(retry_delay_s)
+    logger.warning(
+        "[paths] Could not %s Hidden attribute on %s after %d attempt(s) "
+        "(%s); workspace will be visible but still functional",
+        "set" if hidden else "clear", path, attempts, last_err,
+    )
+    return False
+
+
+def _workspace_container(base: Path) -> Path:
+    return base / _WORKSPACE_CONTAINER_NAME
+
+
+def make_batch_workspace(base_output_dir: str) -> Path:
+    """Create a fresh, uniquely-named batch workspace and return it.
+
+    Downloads, conversion, artwork and metadata post-processing all happen
+    here instead of directly inside the user's visible output folder — the
+    finished file is only moved into the real output directory once it is
+    completely ready (see core.downloader's atomic-publish step).
+
+    Preferred location is ``base_output_dir/.bananaflow_tmp/batch-<id>`` so
+    the workspace is on the same filesystem/volume as the final
+    destination, making the later publish a pure atomic ``os.replace``.
+    If that cannot be created (e.g. a read-only or attribute-restricted
+    output dir), it falls back to the app-data directory — the download
+    still stays fully isolated (never writes visible partials into the
+    user's output folder); the publish step transparently handles the
+    resulting cross-volume move. Only if BOTH locations fail does this
+    raise OSError, so the caller never has to choose between "isolate" and
+    "download at all" — it always isolates.
+
+    The container is given the Windows Hidden attribute (not just a
+    dot-prefixed name) so it never appears in a normal Explorer window.
+    """
+    import uuid
+
+    name = f"batch-{uuid.uuid4().hex[:12]}"
+    try:
+        same_volume_root: Optional[Path] = Path(base_output_dir).expanduser().resolve()
+    except (OSError, RuntimeError):
+        same_volume_root = None
+    candidates = [
+        _workspace_container(same_volume_root) if same_volume_root is not None else None,
+        get_app_data_dir() / _APPDATA_CONTAINER_NAME,
+    ]
+
+    last_exc: Optional[OSError] = None
+    for container in candidates:
+        if container is None:
+            continue
+        try:
+            workspace = container / name
+            workspace.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            last_exc = exc
+            logger.warning(
+                "[paths] Could not create batch workspace under %s: %s", container, exc,
+            )
+            continue
+        # Hide the container (the boundary that keeps the whole subtree out
+        # of a normal Explorer window) and the batch dir itself. Genuinely
+        # hidden is a product requirement, not a cosmetic nicety — a
+        # location that can't satisfy it is treated the same as one that
+        # can't even create the directory: try the next candidate instead
+        # of silently exposing the workspace.
+        container_hidden = _set_hidden_attribute(container)
+        workspace_hidden = _set_hidden_attribute(workspace)
+        if container_hidden and workspace_hidden:
+            # Record the root we actually placed a container under, so later
+            # cleanup can PROVE this tree is ours (containment under a
+            # recorded container) and can still find it after the user
+            # changes their configured output directory. The app-data
+            # fallback container needs no record — its location is fixed.
+            if same_volume_root is not None and container.parent == same_volume_root:
+                register_output_root(same_volume_root)
+            return workspace
+        shutil.rmtree(workspace, ignore_errors=True)
+        last_exc = OSError(f"Could not apply the Hidden attribute under {container}")
+        logger.warning(
+            "[paths] Rejecting workspace location %s: could not be made hidden", container,
+        )
+    # Every candidate location either couldn't be created or couldn't be
+    # hidden — surface it so the orchestrator errors the jobs rather than
+    # writing partials into a workspace the user was promised is invisible.
+    raise last_exc if last_exc is not None else OSError("no workspace location available")
+
+
+# Matches core.downloader.DownloadEngine.PUBLISH_TMP_SUFFIX. Duplicated as a
+# literal (not imported) so this stdlib-only module never has to import
+# core.downloader, which pulls in yt-dlp.
+_PUBLISH_TMP_SUFFIX = ".bananaflow-publish-tmp"
+
+
+def sweep_stale_publish_temp_files(base_dirs) -> list[Path]:
+    """Remove leftover cross-volume publish temp files directly in the given
+    output directories — the residue of a crash between the copy and the
+    final rename in DownloadEngine._atomic_place (same-volume publishes
+    never create one; they're a pure rename). ``base_dirs`` is any iterable
+    of output-dir paths; every recorded output root is swept as well, so a
+    temp stranded under a directory the user has since changed away from is
+    still reclaimed. Never raises; returns the paths removed."""
+    removed: list[Path] = []
+    seen: set[Path] = set()
+    for base in list(base_dirs or ()) + known_output_roots():
+        try:
+            resolved = Path(base).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        try:
+            entries = list(resolved.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.endswith(_PUBLISH_TMP_SUFFIX) and entry.is_file():
+                try:
+                    entry.unlink()
+                    removed.append(entry)
+                except OSError as exc:
+                    logger.warning("[paths] Could not remove stale publish temp %s: %s", entry, exc)
+    return removed

@@ -252,7 +252,7 @@ def test_download_hls_stream_uses_request_format_for_extension(monkeypatch, tmp_
 
     captured: dict = {}
 
-    def fake_download_hls(url, output_path, cookies_file=None):
+    def fake_download_hls(url, output_path, cookies_file=None, cancel_event=None):
         captured["output_path"] = output_path
 
     monkeypatch.setattr("core.hls_downloader.download_hls", fake_download_hls)

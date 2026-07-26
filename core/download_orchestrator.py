@@ -26,10 +26,14 @@ from __future__ import annotations
 
 import time
 import random
+import hashlib
 import logging
+import re
+import shutil
 import threading
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Protocol, Tuple
 
 from core.history_db import DownloadRecord, HistoryDB
@@ -49,8 +53,47 @@ from core.youtube_reliability import (
     is_youtube_url,
 )
 from error_handler import classify_error, ErrorInfo
+from utils.paths import make_batch_workspace
 
 logger = logging.getLogger(__name__)
+
+
+_SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+# Directory names that belong to the BananaFlow batch-workspace structure.
+# Empty-parent cleanup peels back ONLY through these, so an rmdir sweep can
+# never escape into (and delete) the user's own output directory, which
+# always has an arbitrary, non-matching name. See _is_workspace_owned.
+_WORKSPACE_CONTAINER_NAMES = frozenset({".bananaflow_tmp", "download_workspaces"})
+
+
+def _safe_subdir_name(key: str) -> str:
+    """Filesystem-safe, collision-safe per-job workspace subdirectory name
+    derived from a job key.
+
+    Job keys are normally ``str(id(card))`` (digits), but this sanitises any
+    caller/test that uses a freer-form key. Two requirements a naive
+    "replace unsafe chars" pass does NOT meet on its own:
+      * it must never produce ``.`` or ``..`` (which would make the "job
+        subdir" alias the batch container or its parent, defeating per-job
+        isolation and making cleanup delete the wrong thing), and
+      * two different keys must never sanitise to the SAME name (e.g. "a*b"
+        and "a/b" both naively become "a_b").
+    A short hash of the ORIGINAL key is always appended, so the result is
+    both structurally distinct from "." / ".." and collision-safe on the
+    full key content, not just its mangled label.
+    """
+    label = _SUBDIR_UNSAFE.sub("_", key) or "job"
+    digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"{label}-{digest}"
+
+
+def _is_workspace_owned(path: Path) -> bool:
+    """Whether ``path`` is a BananaFlow-owned workspace directory that empty-
+    parent cleanup is allowed to rmdir. True only for a ``batch-*`` dir or a
+    known container root — never for the user's output directory."""
+    name = path.name
+    return name.startswith("batch-") or name in _WORKSPACE_CONTAINER_NAMES
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -247,6 +290,75 @@ class DownloadOrchestrator:
             self._gate_last_release = None
         run_start = time.monotonic()
 
+        # Batch workspace: downloads, conversion and post-processing happen
+        # here instead of visibly inside the user's output directory — see
+        # core.downloader's atomic-publish step and
+        # utils.paths.make_batch_workspace. Skipped for any job that already
+        # carries a workspace_dir (a paused-track resume re-submitted
+        # through DownloadController.pause_track/resume_track) so a resume
+        # keeps using the SAME workspace its .part file already lives in,
+        # instead of orphaning it behind a brand-new empty one.
+        #
+        # Each job gets its OWN subdirectory inside the batch container so
+        # two parallel jobs that resolve to the same final filename (e.g. a
+        # playlist with two same-titled tracks) never collide in temporary
+        # or intermediate storage — their .part / intermediate / final files
+        # live under separate keys and only meet (if ever) at the published
+        # destination.
+        batch_container: Optional[Path] = None
+        jobs_needing_workspace = [(key, req) for key, req in jobs if not req.workspace_dir]
+        workspace_failed_keys: list[str] = []
+        if jobs_needing_workspace:
+            try:
+                batch_container = make_batch_workspace(jobs_needing_workspace[0][1].output_dir)
+            except OSError as exc:
+                # Isolation failed at BOTH the same-volume and app-data
+                # locations. Do NOT fall back to writing visible partials
+                # into the user's output directory — fail these jobs with a
+                # clear error instead (the invariant "downloads never appear
+                # visibly in the output folder" wins over "download anyway").
+                logger.error(
+                    "[Orchestrator] Could not create an isolated batch workspace "
+                    "(%s) — failing %d job(s) rather than writing visible partials",
+                    exc, len(jobs_needing_workspace),
+                )
+                batch_container = None
+
+            if batch_container is not None:
+                for key, req in jobs_needing_workspace:
+                    subdir = batch_container / _safe_subdir_name(key)
+                    try:
+                        subdir.mkdir(parents=True, exist_ok=True)
+                        req.workspace_dir = str(subdir)
+                    except OSError as exc:
+                        # A per-job subdir that can't be created must fail
+                        # THAT job — never fall back to sharing the container
+                        # (a shared workspace_dir would let this job's
+                        # success-cleanup rmtree a sibling's files).
+                        logger.error(
+                            "[Orchestrator] Could not create job workspace %s (%s) "
+                            "— failing this job", subdir, exc,
+                        )
+                        workspace_failed_keys.append(key)
+            else:
+                workspace_failed_keys = [key for key, _ in jobs_needing_workspace]
+
+            if workspace_failed_keys:
+                err = classify_error(
+                    OSError("Could not create a private download workspace")
+                )
+                failed = set(workspace_failed_keys)
+                for key in workspace_failed_keys:
+                    self._aggregator.fail(key)
+                    with self._progress_lock:
+                        self._failed += 1
+                    self._safe_cb("on_track_status", key, "error")
+                    self._safe_cb("on_track_error", key, err)
+                # Drop the failed jobs so they never reach the pool; keep
+                # everything that has a real workspace (fresh subdirs that
+                # succeeded, plus preset-workspace resumes).
+                jobs = [(key, req) for key, req in jobs if key not in failed]
+
         # Resolve duplicate-skips immediately — no engine work, no gate, no
         # stagger. Reported up front so the UI shows these cards as done
         # right away instead of waiting behind the real download jobs.
@@ -364,6 +476,24 @@ class DownloadOrchestrator:
             for key in self._aggregator.cancel_outstanding():
                 self._safe_cb("on_track_status", key, "cancelled")
 
+        # Workspace cleanup: only when this orchestrator created one AND the
+        # batch ran to a natural end with nothing paused/cancelled in it.
+        # A whole-batch cancel might really be a pause — the orchestrator
+        # can't tell the difference (that intent lives one layer up, in
+        # DownloadController) — so its workspace, and any .part /
+        # intermediate files in it, must survive for a possible resume.
+        # A per-track pause (DownloadController.pause_track ->
+        # cancel_track()) doesn't set the engine-level cancel event at all
+        # — only that one job's own cancel_events entry — so was_cancelled
+        # alone would miss it and delete a still-needed .part file out from
+        # under a single paused track while its siblings kept downloading.
+        # Cancellation-specific full cleanup is a separate, later concern.
+        any_track_paused_or_cancelled = any(
+            ev.is_set() for ev in self._cancel_events.values()
+        )
+        if batch_container is not None and not was_cancelled and not any_track_paused_or_cancelled:
+            self._cleanup_workspace(batch_container)
+
         # Never force the bar to 100% on cancellation — the real, weighted
         # progress at the moment we stopped is the honest value. A normal
         # completion reaches 1.0 on its own because every job completed.
@@ -443,6 +573,66 @@ class DownloadOrchestrator:
         if is_lazy:
             return i >= n_workers
         return i > 0
+
+    # ── Batch workspace ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _cleanup_workspace(batch_container: Path) -> None:
+        """Best-effort removal of a whole batch container this orchestrator
+        created, plus the ``.bananaflow_tmp`` root if that leaves it empty.
+        Never raises — a cleanup failure must not turn an otherwise-
+        successful batch into a reported error. Only ever removes the
+        BananaFlow-owned container and its dedicated root, never the user's
+        output directory (``.bananaflow_tmp``'s parent), which rmdir would
+        refuse anyway unless empty."""
+        try:
+            shutil.rmtree(batch_container, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[Orchestrator] Failed to clean up batch workspace %s: %s",
+                batch_container, exc,
+            )
+        # Container root (``.bananaflow_tmp`` / ``download_workspaces``) —
+        # remove only if now empty (a concurrent batch keeps it alive; rmdir
+        # refuses a non-empty dir) and only if it's a recognised workspace
+        # root, so this can never rmdir the user's output directory.
+        root = batch_container.parent
+        if _is_workspace_owned(root):
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+
+    def _cleanup_job_workspace(self, req: DownloadRequest) -> None:
+        """Remove a single completed job's private workspace subdirectory and
+        its intermediates, without touching any sibling job's subdir.
+
+        Called when a job publishes successfully. Sibling-safe by
+        construction: each job owns a separate subdir, so removing one never
+        races another's files. Also removes the batch container and the
+        ``.bananaflow_tmp`` root if this was the last job in them (only when
+        empty — an rmdir, never a recursive delete) so a resumed single
+        track, whose container this orchestrator did NOT create and would
+        therefore never batch-clean, does not leak an empty workspace."""
+        if not req.workspace_dir:
+            return
+        subdir = Path(req.workspace_dir)
+        try:
+            shutil.rmtree(subdir, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[Orchestrator] job workspace cleanup failed for %s: %s", subdir, exc)
+            return
+        # Peel back empty BananaFlow-owned parents (batch-<id>, then the
+        # container root). The _is_workspace_owned guard stops the sweep
+        # before it could ever reach — let alone rmdir — the user's output
+        # directory; rmdir also refuses any level a sibling still occupies.
+        node = subdir.parent
+        while _is_workspace_owned(node):
+            try:
+                node.rmdir()
+            except OSError:
+                break
+            node = node.parent
 
     def _record_phase(self, name: str, seconds: float) -> None:
         """Accumulate a per-phase duration for the end-of-batch timing summary."""
@@ -713,6 +903,12 @@ class DownloadOrchestrator:
                 self._safe_cb("on_status_message", p.warning_message)
             logger.info("[Orchestrator] Track done: %s -> %s", key, p.output_path)
             self._persist_record(req, p)
+            # The final file has already been published out of this job's
+            # private workspace subdir; remove the subdir (and its leftover
+            # intermediates) now. Sibling-safe — each job owns its own
+            # subdir — and it also prevents a resumed single track from
+            # leaking a workspace the batch-level cleanup would never reach.
+            self._cleanup_job_workspace(req)
 
         def on_error(p: DownloadProgress) -> None:
             with self._progress_lock:
