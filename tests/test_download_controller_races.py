@@ -246,8 +246,15 @@ def test_fatal_stop_cleans_up_abandoned_workspace_same_as_cancel(tmp_path, monke
     from core.batch_outcome import BatchOutcome
     from core.downloader import DownloadRequest, MediaType
 
+    from utils.paths import register_output_root
+
     ctrl = _controller(tmp_path, monkeypatch, app)
 
+    # Workspace removal proves ownership by containment under a RECORDED
+    # output root (utils.paths.register_output_root, which the real flow does
+    # from make_batch_workspace) — a hand-built lookalike is deliberately
+    # refused, so the root has to be recorded here too.
+    register_output_root(tmp_path)
     workspace_container = tmp_path / ".bananaflow_tmp" / "batch-1"
     job_dir = workspace_container / "job-a"
     job_dir.mkdir(parents=True)
@@ -280,8 +287,15 @@ def test_plain_completion_never_triggers_workspace_cleanup(tmp_path, monkeypatch
     from core.batch_outcome import BatchOutcome
     from core.downloader import DownloadRequest, MediaType
 
+    from utils.paths import register_output_root
+
     ctrl = _controller(tmp_path, monkeypatch, app)
 
+    # Workspace removal proves ownership by containment under a RECORDED
+    # output root (utils.paths.register_output_root, which the real flow does
+    # from make_batch_workspace) — a hand-built lookalike is deliberately
+    # refused, so the root has to be recorded here too.
+    register_output_root(tmp_path)
     workspace_container = tmp_path / ".bananaflow_tmp" / "batch-1"
     job_dir = workspace_container / "job-a"
     job_dir.mkdir(parents=True)

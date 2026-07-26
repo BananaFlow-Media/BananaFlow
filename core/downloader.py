@@ -118,6 +118,18 @@ class PublishError(Exception):
     workspace, which is about to be cleaned up)."""
 
 
+class PublishCancelled(Exception):
+    """A cancel/pause arrived while the finished file was being published,
+    and the publish was abandoned before the destination was ever touched.
+
+    Deliberately NOT a PublishError: nothing failed, the user stopped it.
+    The caller reports CANCELLED (not an error, and definitely not a
+    success), and the file stays in the workspace where a resume can pick
+    it up — the publish is the last thing that happens, and it is not
+    instantaneous across volumes, so a cancel landing inside it must not be
+    silently overtaken by a completed, visible download."""
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Enumerations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -231,8 +243,30 @@ class DownloadRequest:
     # unchanged. Set by DownloadOrchestrator.run_batch for real batches.
     workspace_dir: Optional[str] = None
 
+    # Post-download resume checkpoint. yt-dlp's own .part continuation only
+    # covers the DOWNLOAD; a job paused after the bytes were all fetched is
+    # somewhere in post-processing or publishing, and re-running yt-dlp on
+    # resume would find nothing to do — no postprocessor hook fires, so
+    # _final_output_path stays empty and the resumed job reports "output
+    # file is missing". These two fields record where the job actually got
+    # to, so a resume picks up at that phase instead of from scratch:
+    #   resume_phase      None | "postprocess" | "publish"
+    #   resume_final_path the workspace path of the fully-downloaded file
+    # Ordinary dataclass fields (unlike the init=False trackers below) so
+    # dataclasses.replace — how a pause snapshot is taken — preserves them,
+    # and so they can be persisted across an application restart.
+    resume_phase:      Optional[str] = None
+    resume_final_path: Optional[str] = None
+
     # Per-request cancellation (parallel downloads)
     cancel_event: Optional[threading.Event] = field(default=None, repr=False)
+
+    # Asked once, immediately before the finished file is made visible in
+    # the user's output directory. Returning False means an outside owner (a
+    # Global Pause) claimed this job first: the publish is abandoned and
+    # PublishCancelled is raised, so "paused" and "published" can never both
+    # be true for one job. None (default) always commits.
+    publish_gate: Optional[Callable[[], bool]] = field(default=None, repr=False)
 
     # Lazy URL resolver (Spotify two-stage import). When set, ``url`` is a
     # placeholder and the real target URL is produced by calling this the
@@ -429,6 +463,38 @@ class DownloadEngine:
         ))
 
         try:
+            resumed_phase = self._resume_checkpoint(request)
+            if resumed_phase is not None:
+                # This request was paused AFTER its bytes were all fetched —
+                # somewhere in post-processing or publishing. Re-running
+                # yt-dlp here would find the output already present, fire no
+                # postprocessor hook, leave _final_output_path empty and then
+                # fail with "output file is missing"; the user's paused track
+                # would be unresumable. Pick up at the recorded phase instead.
+                final_path = request.resume_final_path or ""
+                pp_failures: list[str] = []
+                logger.info(
+                    "[Downloader] Resuming at the '%s' phase: %s",
+                    resumed_phase, final_path,
+                )
+                if resumed_phase != "publish":
+                    self._fire(request, DownloadProgress(
+                        status=DownloadStatus.PROCESSING,
+                        url=url,
+                        title=request.forced_title or "",
+                        output_path=final_path,
+                    ))
+                    pp_failures = self._run_final_pipeline(request, final_path)
+                    request.resume_phase = "publish"
+                return self._finalize_download(
+                    request, url, final_path, pp_failures, cancel_ev, global_cancel,
+                )
+
+            # Not a post-download resume: any stale checkpoint is from a
+            # workspace that no longer holds the file, so start clean.
+            request.resume_phase = None
+            request.resume_final_path = None
+
             opts = self._build_ydl_opts(request)
 
             def _abort_hook(_info: dict) -> None:  # noqa: ANN001
@@ -498,6 +564,13 @@ class DownloadEngine:
 
             final_path = request._final_output_path  # noqa: SLF001
             if final_path and os.path.exists(final_path):
+                # Every byte is now on disk. Record the checkpoint BEFORE the
+                # pipeline runs, so a pause taken during post-processing is
+                # snapshotted with the phase and the workspace file identity
+                # it needs to resume (see _resume_checkpoint).
+                request.resume_final_path = final_path
+                request.resume_phase = "postprocess"
+
                 # Notify UI we are processing
                 self._fire(request, DownloadProgress(
                     status=DownloadStatus.PROCESSING,
@@ -508,45 +581,19 @@ class DownloadEngine:
 
                 # Execute steps; collect non-fatal failures for the UI
                 pp_failures = self._run_final_pipeline(request, final_path)
+                request.resume_phase = "publish"
             else:
                 # If the file wasn't created, yt-dlp failed silently (e.g., ytsearch found nothing)
                 raise Exception("Download completed but output file is missing. (Search may have yielded no results)")
 
-            if cancel_ev.is_set() or global_cancel.is_set():
-                raise yt_dlp.utils.DownloadCancelled()
+            return self._finalize_download(
+                request, url, final_path, pp_failures, cancel_ev, global_cancel,
+            )
 
-            warning_msg = ""
-            if pp_failures:
-                warning_msg = "Post-processing partial failure: " + "; ".join(pp_failures)
-                logger.warning(f"[Downloader] {warning_msg}")
-
-            # Atomic publish: only now — after conversion AND every
-            # post-processing step succeeded or failed — is the file moved
-            # out of the hidden batch workspace into the user's real output
-            # directory. A no-op when request.workspace_dir isn't set.
-            final_path = self._publish_to_final_location(request, final_path)
-
-            # Report the real on-disk size on completion. A fast/tiny/cached
-            # download can finish before yt-dlp ever fires a "downloading"
-            # progress hook, in which case the batch aggregator would
-            # otherwise never learn this job's true byte size and would fall
-            # back to estimating it from other jobs (core.batch_progress's
-            # unknown-size path) — accurate but avoidable when the real
-            # number is sitting right there on disk.
-            final_bytes = _safe_file_size(final_path)
-
-            self._fire(request, DownloadProgress(
-                status=DownloadStatus.FINISHED,
-                url=url,
-                title=request.forced_title or "",
-                fraction=1.0,
-                downloaded_bytes=final_bytes or 0,
-                total_bytes=final_bytes,
-                warning_message=warning_msg,
-                output_path=final_path,
-            ))
-
-        except yt_dlp.utils.DownloadCancelled:
+        except (yt_dlp.utils.DownloadCancelled, PublishCancelled):
+            # PublishCancelled: the user stopped the job while the finished
+            # file was being published. Nothing was committed to the output
+            # directory — this is a cancellation, never an error.
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.CANCELLED,
                 url=url,
@@ -571,6 +618,82 @@ class DownloadEngine:
 
     def cancel(self) -> None:
         self._cancel_event.set()
+
+    # ── Post-download resume checkpoint ───────────────────────────────────────
+
+    @staticmethod
+    def _resume_checkpoint(req: DownloadRequest) -> Optional[str]:
+        """The phase this request should resume at, or None to download.
+
+        A pause taken after yt-dlp finished (during post-processing, or
+        during the publish) records where the job got to on the request
+        itself, and the fully-downloaded file stays in the job's workspace.
+        Both have to still be true for a resume to short-circuit the
+        download: a checkpoint whose file is gone (the workspace was swept,
+        or the user deleted it) is stale and the job downloads again from
+        scratch.
+        """
+        phase = req.resume_phase
+        if phase not in ("postprocess", "publish"):
+            return None
+        path = req.resume_final_path or ""
+        if not path or not os.path.exists(path):
+            return None
+        return phase
+
+    def _finalize_download(
+        self,
+        request:       DownloadRequest,
+        url:           str,
+        final_path:    str,
+        pp_failures:   list[str],
+        cancel_ev:     threading.Event,
+        global_cancel: threading.Event,
+    ) -> None:
+        """Publish the finished file and emit FINISHED.
+
+        Shared by the ordinary path and the post-download resume path so
+        both honour the same last cancellation check, the same atomic
+        publish and the same completion reporting.
+        """
+        if cancel_ev.is_set() or global_cancel.is_set():
+            raise yt_dlp.utils.DownloadCancelled()
+
+        warning_msg = ""
+        if pp_failures:
+            warning_msg = "Post-processing partial failure: " + "; ".join(pp_failures)
+            logger.warning(f"[Downloader] {warning_msg}")
+
+        # Atomic publish: only now — after conversion AND every
+        # post-processing step succeeded or failed — is the file moved
+        # out of the hidden batch workspace into the user's real output
+        # directory. A no-op when request.workspace_dir isn't set.
+        final_path = self._publish_to_final_location(request, final_path)
+
+        # Published: the checkpoint has nothing left to protect, and leaving
+        # it set would make a re-submitted request skip its own download.
+        request.resume_phase = None
+        request.resume_final_path = None
+
+        # Report the real on-disk size on completion. A fast/tiny/cached
+        # download can finish before yt-dlp ever fires a "downloading"
+        # progress hook, in which case the batch aggregator would
+        # otherwise never learn this job's true byte size and would fall
+        # back to estimating it from other jobs (core.batch_progress's
+        # unknown-size path) — accurate but avoidable when the real
+        # number is sitting right there on disk.
+        final_bytes = _safe_file_size(final_path)
+
+        self._fire(request, DownloadProgress(
+            status=DownloadStatus.FINISHED,
+            url=url,
+            title=request.forced_title or "",
+            fraction=1.0,
+            downloaded_bytes=final_bytes or 0,
+            total_bytes=final_bytes,
+            warning_message=warning_msg,
+            output_path=final_path,
+        ))
 
     # ── HLS / DASH stream download via ffmpeg ─────────────────────────────────
 
@@ -638,6 +761,11 @@ class DownloadEngine:
 
         try:
             output_path = self._publish_to_final_location(request, output_path)
+        except PublishCancelled:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=url, title=title,
+            ))
+            return
         except PublishError as exc:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR, url=url, title=title,
@@ -732,7 +860,7 @@ class DownloadEngine:
                     total_bytes=generic_bytes,
                     output_path=final_path,
                 ))
-            except yt_dlp.utils.DownloadCancelled:
+            except (yt_dlp.utils.DownloadCancelled, PublishCancelled):
                 self._fire(request, DownloadProgress(
                     status=DownloadStatus.CANCELLED,
                     url=page_url,
@@ -824,6 +952,11 @@ class DownloadEngine:
 
         try:
             output_path = self._publish_to_final_location(request, output_path)
+        except PublishCancelled:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.CANCELLED, url=page_url, title=title,
+            ))
+            return
         except PublishError as exc:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR, url=page_url, title=title,
@@ -1145,6 +1278,23 @@ class DownloadEngine:
 
     # ── Atomic publish (batch workspace -> real output directory) ────────────
 
+    def _cancel_check(self, req: DownloadRequest) -> Callable[[], bool]:
+        """A cheap "should this job stop right now?" predicate covering both
+        the per-request cancel Event and the engine-wide one. Handed to the
+        publish step so a cancel arriving *during* publication is honoured
+        instead of being noticed only after the file has already appeared in
+        the user's output directory."""
+        per_request = req.cancel_event
+        global_cancel = self._cancel_event
+
+        def _cancelled() -> bool:
+            return bool(
+                (per_request is not None and per_request.is_set())
+                or global_cancel.is_set()
+            )
+
+        return _cancelled
+
     def _publish_to_final_location(self, req: DownloadRequest, workspace_path: str) -> str:
         """Atomically move a fully-ready file out of the batch workspace and
         into the user's real output directory. Returns the final published
@@ -1172,8 +1322,23 @@ class DownloadEngine:
         published by copying to a hidden temp file adjacent to the
         destination and then os.replace'ing that into place — still atomic
         at the visible destination, still no half-built file ever seen.
+
+        Raises ``PublishCancelled`` if the job is cancelled/paused before
+        the destination is committed — including part-way through a
+        cross-volume copy, which is the one step here that is not
+        instantaneous. Without that, a cancel arriving after the caller's
+        last pre-publish check would still produce a published file and a
+        reported success.
         """
+        cancelled = self._cancel_check(req)
+        if cancelled():
+            raise PublishCancelled("Cancelled before publish")
+
         if not req.workspace_dir:
+            # No workspace: the file was written straight to its final
+            # location, so this is the commit point.
+            if req.publish_gate is not None and not req.publish_gate():
+                raise PublishCancelled("Paused before publish")
             return workspace_path
 
         try:
@@ -1197,7 +1362,9 @@ class DownloadEngine:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                self._atomic_place(src, dest)
+                self._atomic_place(
+                    src, dest, cancel_check=cancelled, commit_gate=req.publish_gate,
+                )
                 return str(dest)
             except OSError as exc:
                 last_exc = exc
@@ -1222,35 +1389,79 @@ class DownloadEngine:
     # see PUBLISH_TMP_SUFFIX / sweep_stale_publish_temp_files.
     PUBLISH_TMP_SUFFIX = ".bananaflow-publish-tmp"
 
+    # Chunk size for the cross-volume staging copy. Small enough that a
+    # cancel is honoured promptly on a slow volume, large enough that the
+    # per-chunk check costs nothing measurable against real I/O.
+    _PUBLISH_COPY_CHUNK = 1024 * 1024
+
     @classmethod
-    def _atomic_place(cls, src: Path, dest: Path) -> None:
+    def _atomic_place(
+        cls,
+        src: Path,
+        dest: Path,
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        commit_gate: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Put ``src`` at ``dest`` atomically at the visible destination.
 
         Fast path: same-volume ``os.replace`` (a pure rename). Cross-volume
-        (raises OSError with errno EXDEV): copy to a temp file next to dest,
-        then os.replace the temp into place — that rename is same-volume and
-        atomic, so the destination only ever flips from "old/absent" to
-        "fully-copied new", never a partial. The temp is cleaned up on any
-        failure so a cross-volume error can't strand a half-copy.
+        (raises OSError with errno EXDEV): copy to a hidden temp file next
+        to dest, then os.replace the temp into place — that rename is
+        same-volume and atomic, so the destination only ever flips from
+        "old/absent" to "fully-copied new", never a partial. The temp is
+        cleaned up on any failure so a cross-volume error can't strand a
+        half-copy.
 
         The temp name is generated by ``tempfile.mkstemp`` (a securely
         unique name, not a pid-based one) so two concurrent publishes —
         including a retry racing an earlier attempt, or two jobs that
         legitimately target the same destination filename — can never
-        collide on the same temp path. It is hidden only AFTER the content
-        copy succeeds, not before: on Windows, opening an already-hidden
-        file for writing was observed to fail outright (confirmed against a
-        real filesystem, not just in theory — a security product's write
-        interception is the likely cause), so hiding first would silently
-        break every cross-volume publish rather than merely leave a brief
-        visibility window. Writing first and hiding immediately after still
-        keeps that window small — a crash before the final rename can still
-        leave the (by-then hidden) temp behind, which is why its name
-        carries PUBLISH_TMP_SUFFIX — a recognisable marker a startup sweep
-        can find and remove (see utils.paths.sweep_stale_publish_temp_files).
+        collide on the same temp path.
+
+        The temp is hidden BEFORE a single byte of content is written, and
+        the content is then written through mkstemp's own already-open
+        descriptor. That ordering matters on Windows: it is *re-opening* an
+        already-hidden file for writing that fails (CreateFile without
+        FILE_ATTRIBUTE_HIDDEN on an existing hidden file), which is what
+        made an earlier version hide the temp only after copying — leaving
+        a visible, growing partial file sitting in the user's output folder
+        for the whole duration of the copy. Writing through the existing
+        handle never re-opens anything, so the file can be hidden from
+        birth and the user never sees a partial. The attribute is cleared
+        again immediately before the rename, because os.replace carries the
+        source's attributes across and would otherwise publish the finished
+        file as a hidden file.
+
+        ``cancel_check`` is polled between copy chunks and once more
+        immediately before the final rename; when it reports cancellation
+        the staging temp is removed and ``PublishCancelled`` is raised, so a
+        cancel during a long cross-volume copy can never be overtaken by a
+        published file and a reported success. A crash before the final
+        rename can still leave the (hidden) temp behind, which is why its
+        name carries PUBLISH_TMP_SUFFIX — a recognisable marker a startup
+        sweep can find and remove (see
+        utils.paths.sweep_stale_publish_temp_files).
+
+        ``commit_gate`` gets the last word before the rename that makes the
+        file visible: an outside owner (a Global Pause) that has claimed
+        this job returns False and the publish is abandoned. It is asked
+        here, not by the caller, precisely because here is the only place
+        genuinely adjacent to the commit.
         """
         import errno
         import tempfile
+
+        def _cancelled() -> bool:
+            return bool(cancel_check is not None and cancel_check())
+
+        def _may_commit() -> bool:
+            return commit_gate is None or bool(commit_gate())
+
+        if _cancelled():
+            raise PublishCancelled("Cancelled before publish")
+        if not _may_commit():
+            raise PublishCancelled("Paused before publish")
         try:
             os.replace(str(src), str(dest))
             return
@@ -1262,12 +1473,29 @@ class DownloadEngine:
             dir=str(dest.parent), prefix=f".{dest.name}.", suffix=cls.PUBLISH_TMP_SUFFIX,
         )
         tmp = Path(tmp_name)
-        os.close(fd)
+        # Hide first, write second — see the docstring. Best-effort: a
+        # filesystem that refuses the attribute still gets a correct
+        # publish, just without the extra concealment.
+        _set_hidden_attribute(tmp)
         try:
-            shutil.copy2(str(src), str(tmp))
-            _set_hidden_attribute(tmp)
+            with os.fdopen(fd, "wb") as out_fh, open(str(src), "rb") as in_fh:
+                while True:
+                    if _cancelled():
+                        raise PublishCancelled("Cancelled during cross-volume publish")
+                    chunk = in_fh.read(cls._PUBLISH_COPY_CHUNK)
+                    if not chunk:
+                        break
+                    out_fh.write(chunk)
+            shutil.copystat(str(src), str(tmp))
+            if _cancelled():
+                raise PublishCancelled("Cancelled before publish")
+            if not _may_commit():
+                raise PublishCancelled("Paused before publish")
+            # Unhide only now: the content is complete, and the very next
+            # step renames it onto the visible destination name.
+            _set_hidden_attribute(tmp, hidden=False)
             os.replace(str(tmp), str(dest))
-        except OSError:
+        except (OSError, PublishCancelled):
             try:
                 if tmp.exists():
                     tmp.unlink()

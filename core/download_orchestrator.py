@@ -167,9 +167,18 @@ class DownloadOrchestrator:
         self._active_requests: dict[str, DownloadRequest] = {}
         # Keys whose Spotify two-stage url_resolver has been consumed but
         # whose resolved URL has not yet been committed to req.url. A
-        # snapshot taken while a key is in here would have neither a
-        # resolver nor a real URL — see _resolve_lazy_url.
+        # snapshot of the LIVE request while a key is in here would have
+        # neither a resolver nor a real URL, so the pre-resolve copy taken
+        # at the same instant is handed out instead — see _resolve_lazy_url.
         self._resolving_keys: set[str] = set()
+        self._pending_resolver_requests: dict[str, DownloadRequest] = {}
+        # First-writer-wins record of how each job ended up being disposed
+        # of: "paused" (an outside Global Pause captured it for a later
+        # resume) or "terminal" (it completed, failed or was cancelled).
+        # Every transition into either goes through _claim_job_outcome under
+        # the job's own lock, so the two can never both happen for one job.
+        # See _claim_job_outcome and live_request_snapshot.
+        self._job_outcomes: dict[str, str] = {}
 
         # Progress accounting. The aggregator owns byte-weighted batch
         # progress, aggregate speed, and the whole-batch ETA (see
@@ -230,6 +239,56 @@ class DownloadOrchestrator:
         of a UI card's status label when the answer needs to be race-free."""
         return self._aggregator.job_state(key)
 
+    # ── Per-job outcome claim (the pause / completion boundary) ───────────────
+
+    def _claim_job_outcome(self, key: str, outcome: str) -> bool:
+        """First-writer-wins claim of how job ``key`` is disposed of.
+
+        ``outcome`` is ``"paused"`` (an outside Global Pause captured it) or
+        ``"terminal"`` (it completed, failed, or was cancelled). Serialized
+        on the job's OWN lock — the same one live_request_snapshot holds —
+        so a pause and a completing download can never both succeed for the
+        same job: whichever reaches the lock first wins and the other backs
+        off. Returns True when the caller owns the outcome (including when
+        it already owned it — the claim is idempotent per outcome), False
+        when the other side got there first.
+
+        Without this, "pause" and "complete" were two independent, unlocked
+        code paths: the aggregator's terminal transition happened on a pool
+        thread with no lock at all, so Global Pause could read a job as
+        still-live, snapshot it for resume, and have that same job publish
+        and report success a microsecond later — the batch then both
+        finished the track and offered to resume it.
+
+        A key this orchestrator never registered (a stale key, or a
+        test/CLI harness that never went through run_batch) has nothing to
+        serialize against and is always granted.
+        """
+        lock = self._job_locks.get(key)
+        if lock is None:
+            return True
+        with lock:
+            return self._claim_job_outcome_locked(key, outcome)
+
+    def _claim_job_outcome_locked(self, key: str, outcome: str) -> bool:
+        """_claim_job_outcome's body, for callers already holding the lock."""
+        current = self._job_outcomes.get(key)
+        if current is None:
+            self._job_outcomes[key] = outcome
+            return True
+        return current == outcome
+
+    def _mark_cancelled(self, key: str) -> None:
+        """Record a job as cancelled and tell the UI — unless a Global Pause
+        already claimed it, in which case the job is *paused*, not cancelled,
+        and must keep both its resumable state and its "paused" card label
+        (cancellation and pause set the same events; only the claim tells
+        them apart)."""
+        if not self._claim_job_outcome(key, "terminal"):
+            return
+        self._aggregator.cancel(key)
+        self._safe_cb("on_track_status", key, "cancelled")
+
     def live_request_snapshot(
         self, key: str,
     ) -> Tuple[Optional[JobState], Optional[DownloadRequest]]:
@@ -251,23 +310,44 @@ class DownloadOrchestrator:
             has not yet been committed, so the snapshot has neither a
             resolver nor a usable URL.
 
+        Handing back a request also CLAIMS the job for the pause (see
+        _claim_job_outcome), which is what actually closes the window: from
+        that instant the job's own pool thread can no longer take it
+        terminal — not by completing, not by failing, and not by
+        publishing, since the engine asks the same claim for permission
+        immediately before it commits the file to the user's output
+        directory. Callers must therefore treat a returned request as "this
+        job is now mine to pause", not as a passive read.
+
+        A job caught mid-resolve is NOT skipped: the pre-resolve copy taken
+        at the moment its resolver was consumed is handed back instead, so
+        the job resumes by re-running the match rather than being silently
+        dropped from the paused set (which lost the track outright — the
+        engine still cancelled it, but nothing recorded it as resumable).
+
         Returns ``(None, None)`` for a key this orchestrator never
-        registered a lock for (never submitted, or a stale key from a
-        previous batch). Returns ``(state, None)`` when a snapshot isn't
-        safe right now — a terminal state, or a job whose lazy URL
-        resolution is still in flight — even though the key is known;
-        callers must treat a ``None`` request as "do not pause this job".
+        registered a lock for (a stale key from a previous batch). Returns
+        ``(state, None)`` when the job cannot be paused — it already reached
+        a terminal state, or its own thread claimed it first — even though
+        the key is known; callers must treat a ``None`` request as "do not
+        pause this job".
         """
         lock = self._job_locks.get(key)
         if lock is None:
             return None, None
         with lock:
             state = self._aggregator.job_state(key)
-            if is_terminal_state(state) or key in self._resolving_keys:
+            if is_terminal_state(state):
                 return state, None
-            req = self._active_requests.get(key)
-            snapshot = dataclasses.replace(req) if req is not None else None
-            return state, snapshot
+            if key in self._resolving_keys:
+                req = self._pending_resolver_requests.get(key)
+            else:
+                req = self._active_requests.get(key)
+            if req is None:
+                return state, None
+            if not self._claim_job_outcome_locked(key, "paused"):
+                return state, None
+            return state, dataclasses.replace(req)
 
     # ── Main entry point (blocking — call from background thread) ─────────────
 
@@ -333,6 +413,8 @@ class DownloadOrchestrator:
         self._job_locks.clear()
         self._active_requests.clear()
         self._resolving_keys.clear()
+        self._pending_resolver_requests.clear()
+        self._job_outcomes.clear()
         with self._phase_lock:
             self._phase_times.clear()
         with self._gate_lock:
@@ -446,6 +528,31 @@ class DownloadOrchestrator:
         n_workers = min(self._max_workers, self._total)
         futures: dict = {}
 
+        # Register EVERY job's cancel event, per-job lock and live request
+        # up front — before the (staggered, therefore slow) submit loop
+        # below, not one-at-a-time inside it.
+        #
+        # A job that had not yet reached its turn in that loop had no
+        # registration at all, and that had two consequences, both of which
+        # silently lost work:
+        #   * Global Pause's live_request_snapshot returned "unknown key",
+        #     so the job was skipped, never captured as paused, and then
+        #     cancelled outright by the whole-batch cancel that follows —
+        #     with a delay_range configured, a 50-track batch paused a few
+        #     seconds in lost nearly all of it;
+        #   * cancel_track() was a no-op for it, so pausing a single
+        #     not-yet-submitted track marked the card paused while the job
+        #     went on to download anyway.
+        # Registration is cheap and side-effect-free; only mark_submitted()
+        # and the pool.submit() itself belong in the staggered loop.
+        for key, req in jobs:
+            ev = threading.Event()
+            req.cancel_event = ev
+            self._cancel_events[key] = ev
+            self._job_locks[key] = threading.Lock()
+            self._active_requests[key] = req
+            self._aggregator.register(key)
+
         pool = ThreadPoolExecutor(
             max_workers=n_workers,
             thread_name_prefix="dl-pool",
@@ -476,12 +583,9 @@ class DownloadOrchestrator:
                 if self._engine._cancel_event.is_set():
                     break
 
-                ev = threading.Event()
-                req.cancel_event = ev
-                self._cancel_events[key] = ev
-                self._job_locks[key] = threading.Lock()
-                self._active_requests[key] = req
-                self._aggregator.register(key)
+                # Cancel event / lock / live-request registration already
+                # happened up front (see above) — only the submission
+                # itself is staggered.
                 self._aggregator.mark_submitted(key)
 
                 future = pool.submit(self._download_one, key, req)
@@ -501,13 +605,13 @@ class DownloadOrchestrator:
                     try:
                         future.result()
                     except CancelledError:
-                        self._aggregator.cancel(key)
-                        self._safe_cb("on_track_status", key, "cancelled")
+                        self._mark_cancelled(key)
                     except Exception as exc:  # noqa: BLE001
                         if self._engine._cancel_event.is_set():  # noqa: SLF001
-                            self._aggregator.cancel(key)
-                            self._safe_cb("on_track_status", key, "cancelled")
+                            self._mark_cancelled(key)
                             continue
+                        if not self._claim_job_outcome(key, "terminal"):
+                            continue  # paused out from under this thread
                         err = classify_error(exc)
                         self._failed += 1
                         self._safe_cb("on_track_status", key, "error")
@@ -525,6 +629,13 @@ class DownloadOrchestrator:
         was_cancelled = self._engine._cancel_event.is_set()  # noqa: SLF001
         if was_cancelled:
             for key in self._aggregator.cancel_outstanding():
+                # A job a Global Pause claimed is paused, not cancelled: it
+                # keeps its snapshot and its "paused" card. Telling the UI
+                # "cancelled" here would overwrite that label a moment after
+                # the pause set it (a whole-batch pause cancels the engine,
+                # so every paused job lands in this loop).
+                if self._job_outcomes.get(key) == "paused":
+                    continue
                 self._safe_cb("on_track_status", key, "cancelled")
 
         # Workspace cleanup: only when this orchestrator created one AND the
@@ -737,12 +848,19 @@ class DownloadOrchestrator:
         # can never observe url_resolver already cleared but req.url still
         # holding the stale placeholder. The resolver call itself — a
         # network round-trip — deliberately runs OUTSIDE the lock so a
-        # snapshot request for some OTHER job is never blocked on it; a
-        # snapshot request for THIS job instead sees it flagged in
-        # _resolving_keys (added below, before the lock is released) and
-        # reports "no safe snapshot right now" rather than blocking.
+        # snapshot request for some OTHER job is never blocked on it.
+        #
+        # A pre-resolve COPY is stashed in the same atomic step. A Global
+        # Pause that lands in this window used to be told "no safe snapshot
+        # right now" and skipped the job entirely — but the pause still
+        # cancelled it, so the track was simply lost: absent from the
+        # paused set, so Resume All never brought it back. The stashed copy
+        # still carries the resolver and the placeholder URL, which is
+        # exactly what a resume needs: it re-runs the match and then
+        # downloads, the same as if it had never started.
         if lock is not None:
             with lock:
+                self._pending_resolver_requests[key] = dataclasses.replace(req)
                 req.url_resolver = None
                 self._resolving_keys.add(key)
         else:
@@ -751,8 +869,8 @@ class DownloadOrchestrator:
             if lock is not None:
                 with lock:
                     self._resolving_keys.discard(key)
-            self._aggregator.cancel(key)
-            self._safe_cb("on_track_status", key, "cancelled")
+                    self._pending_resolver_requests.pop(key, None)
+            self._mark_cancelled(key)
             return True
         resolve_start = time.monotonic()
         try:
@@ -768,11 +886,11 @@ class DownloadOrchestrator:
                 if resolved:
                     req.url = resolved
                 self._resolving_keys.discard(key)
+                self._pending_resolver_requests.pop(key, None)
         elif resolved:
             req.url = resolved
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
-            self._aggregator.cancel(key)
-            self._safe_cb("on_track_status", key, "cancelled")
+            self._mark_cancelled(key)
             return True
         return False
 
@@ -780,8 +898,7 @@ class DownloadOrchestrator:
         cancel_ev = self._cancel_events[key]
 
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
-            self._aggregator.cancel(key)
-            self._safe_cb("on_track_status", key, "cancelled")
+            self._mark_cancelled(key)
             return
 
         # Decide gate membership BEFORE resolving — a Spotify two-stage job's
@@ -825,8 +942,7 @@ class DownloadOrchestrator:
                 self._record_phase("gate_idle", max(0.0, acquired_at - last_release))
             if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
                 self._youtube_gate.release()
-                self._aggregator.cancel(key)
-                self._safe_cb("on_track_status", key, "cancelled")
+                self._mark_cancelled(key)
                 return
 
         download_start = time.monotonic()
@@ -916,6 +1032,19 @@ class DownloadOrchestrator:
             self._safe_cb("on_batch_snapshot", snapshot)
 
         def on_finished(p: DownloadProgress) -> None:
+            # Completion is a terminal transition and goes through the same
+            # per-job claim a Global Pause uses, so the two are mutually
+            # exclusive rather than two unlocked code paths that could both
+            # "win". Losing the claim is not an error: the engine's publish
+            # gate (below) already refused to commit the file, so nothing
+            # was written to the user's output directory — the job is paused
+            # and will be resumed.
+            if not self._claim_job_outcome(key, "terminal"):
+                logger.info(
+                    "[Orchestrator] %s was paused before it completed — "
+                    "not reporting it as done", key,
+                )
+                return
             with self._progress_lock:
                 self._completed += 1
             self._aggregator.complete(
@@ -947,6 +1076,11 @@ class DownloadOrchestrator:
             self._cleanup_job_workspace(req)
 
         def on_error(p: DownloadProgress) -> None:
+            # Failure is terminal too — a job a pause already claimed keeps
+            # its resumable snapshot and its "paused" card instead of being
+            # flipped to "error" (the resume retries it).
+            if not self._claim_job_outcome(key, "terminal"):
+                return
             with self._progress_lock:
                 self._failed += 1
             self._aggregator.fail(key)
@@ -963,6 +1097,14 @@ class DownloadOrchestrator:
 
         req.on_progress = on_progress
         req.on_finished = on_finished
+        # The engine asks this immediately before it makes the finished file
+        # visible in the user's output directory. Returning False means a
+        # Global Pause claimed the job first, so the publish is abandoned and
+        # the file stays in the workspace for the resume — the completion
+        # side of the same boundary live_request_snapshot guards, moved to
+        # the last possible instant so "paused" and "published" can never
+        # both be true.
+        req.publish_gate = lambda: self._claim_job_outcome(key, "terminal")
 
         # ── Retry wrapper ─────────────────────────────────────────────────────
         # engine.download() signals failure via req.on_error callback (not
