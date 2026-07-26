@@ -3,9 +3,39 @@ title = "BananaFlow secret scanning"
 [extend]
 useDefault = true
 
-[allowlist]
+# NOTE: the plural [[allowlists]] form is required — gitleaks refuses a config
+# that mixes the deprecated singular [allowlist] table with it.
+[[allowlists]]
 description = "Generated, ignored, or vendored build trees are not source inputs"
 paths = [
   '''(^|/)(\.pytest_cache|\.tmp_appdata_.*|build|dist|test-evidence|venv)(/|$)''',
   '''^packaging/(pot-provider-backend|pot-provider-cache|pot-provider-server|runtime|yt-dlp-plugins)/''',
 ]
+
+# Confirmed-benign generic-api-key match, suppressed by CONTENT rather than by
+# a .gitleaksignore commit fingerprint.
+#
+# What is matched: a pause/resume test fixture whose local variable name ends
+# in "key" sits immediately before `thumbnail_url="…"`, so the default
+# generic-api-key rule reads the keyword, takes the following text as a
+# "secret", and reports the literal string `thumbnail_url=`. There is no
+# credential anywhere near it. The fixture has since been renamed so no new
+# commit reproduces this, but the scan walks the whole history and the commit
+# that introduced the line is immutable.
+#
+# Why not .gitleaksignore: its fingerprints are `commit:file:rule:line` and
+# these branches land on main by SQUASH merge, so the pinned SHA stops
+# existing the moment the work merges - the suppression lapses silently and
+# the finding reappears on main with nobody expecting it. It is also useless
+# on a stacked PR whose own history does not contain the pinned commit.
+# Matching on content survives any rewrite, squash or rebase.
+#
+# Scope: condition = "AND" means BOTH the path and the exact matched secret
+# must match, so this suppresses precisely this finding in precisely this
+# file - not the rule, and not the tests directory.
+# Enforced by tests/test_secret_scan_suppressions.py.
+[[allowlists]]
+description = "generic-api-key false positive: `thumbnail_url=` in a pause/resume test fixture"
+condition = "AND"
+paths = ['''(^|/)tests/test_pause_resume_continuation\.py$''']
+regexes = ['''^thumbnail_url=$''']
