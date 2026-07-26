@@ -125,6 +125,11 @@ class DownloadController(QObject):
         self._card_progress: dict = {}
         # key → DownloadRequest snapshot saved at pause time
         self._paused_requests: dict[str, DownloadRequest] = {}
+        # The single authoritative on-disk store of paused download state
+        # (replaces the old write-only config.paused_items). Persisted after
+        # every pause change; loaded on startup to survive a restart.
+        from core.paused_batch_store import PausedBatchStore
+        self._paused_store = PausedBatchStore()
                 
         self._fatal_error_triggered = False  # Track if a fatal dialog was already shown
         self._fatal_lock = threading.Lock()  # Synchronize fatal error reporting
@@ -306,18 +311,7 @@ class DownloadController(QObject):
                     "artist":           card.artist,
                     "duration_sec":     getattr(card, "duration_sec", None),
                 }
-                cookies = self._cfg.cookies_file or None
-
-                def _resolve(ev, _td=td, _cookies=cookies):
-                    from core.scraper import resolve_track_to_youtube
-                    from utils.url_cleaner import clean_youtube_url as _clean
-                    resolved = resolve_track_to_youtube(
-                        _td, cookies_file=_cookies,
-                        cancel_check=lambda: ev is not None and ev.is_set(),
-                    )
-                    return _clean(resolved)
-
-                req.url_resolver = _resolve
+                req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
 
             return req
 
@@ -574,6 +568,30 @@ class DownloadController(QObject):
                 self._termination_intent = intent
 
     @staticmethod
+    def _build_spotify_resolver(td: dict, cookies: Optional[str]):
+        """Build a lazy url_resolver closure for a Spotify two-stage match
+        from the minimal identity dict it needs (spotify_id,
+        spotify_key_kind, title, artist, duration_sec).
+
+        Shared by start_batch (building a fresh request from a live queue
+        card) and restore_paused_jobs (rebuilding an EQUIVALENT resolver
+        for a paused job that was never resolved before the app
+        restarted). The resolver itself is a live closure and cannot be
+        persisted, but everything it needs to rebuild an equivalent one
+        can be -- see core.download_request_codec's had_pending_resolver
+        flag and _card_to_dict's spotify_id/spotify_key_kind/duration_sec
+        fields."""
+        def _resolve(ev, _td=td, _cookies=cookies):
+            from core.scraper import resolve_track_to_youtube
+            from utils.url_cleaner import clean_youtube_url as _clean
+            resolved = resolve_track_to_youtube(
+                _td, cookies_file=_cookies,
+                cancel_check=lambda: ev is not None and ev.is_set(),
+            )
+            return _clean(resolved)
+        return _resolve
+
+    @staticmethod
     def _snapshot_for_pause(req: DownloadRequest) -> DownloadRequest:
         """A complete, standalone copy of a live request, prepared to resume.
 
@@ -701,6 +719,7 @@ class DownloadController(QObject):
                 self._paused_requests[key] = snapshot
                 if card is not None:
                     card.set_status("paused")
+        self._persist_paused_state()
         for worker in workers:
             worker.cancel()
 
@@ -755,17 +774,169 @@ class DownloadController(QObject):
             return False
         self._paused_requests[key] = snapshot
         card.set_status("paused")
-
-        paused = self._cfg.paused_items
-        paused.append({
-            "card_key": key,
-            "title":    card.title,
-            "artist":   card.artist,
-            "url":      card.track_url,
-        })
-        self._cfg.paused_items = paused
-        self._cfg.save()
+        self._persist_paused_state()
         return True
+
+    # ── Paused-state persistence (single authoritative store) ─────────────────
+
+    @staticmethod
+    def _card_to_dict(card) -> dict:
+        """Display metadata needed to rebuild a paused card after restart.
+
+        NOT the same key spelling as AppWindow._save_queue_state's general-
+        queue dict (which uses "url"/"duration_str" and is read back through
+        an intermediate object wrapper). This dict is instead passed
+        STRAIGHT to AppWindow._add_track_to_queue as `data`, which hits its
+        isinstance(data, dict) branch and reads "track_url"/"duration"
+        directly -- using the general-queue spelling here silently restored
+        every paused card with an empty URL and duration.
+
+        Also carries the Spotify two-stage identity fields
+        (spotify_id/spotify_key_kind/duration_sec/match_status) a pending
+        (unresolved) card needs -- restore_paused_jobs uses these to rebuild
+        an equivalent url_resolver, since the live resolver closure itself
+        cannot be persisted (see _build_spotify_resolver)."""
+        return {
+            "title":            getattr(card, "title", ""),
+            "artist":           getattr(card, "artist", ""),
+            "track_url":        getattr(card, "track_url", ""),
+            "duration":         getattr(card, "duration", ""),
+            "thumbnail_url":    getattr(card, "thumbnail_url", ""),
+            "platform":         getattr(card, "platform", "youtube"),
+            "album":            getattr(card, "album", ""),
+            "parent_artist":    getattr(card, "parent_artist", ""),
+            "release_type":     getattr(card, "release_type", ""),
+            "category":         getattr(card, "category", ""),
+            "album_index":      getattr(card, "album_index", 0),
+            "total_tracks":     getattr(card, "total_tracks", 0),
+            "duration_sec":     getattr(card, "duration_sec", None),
+            "spotify_id":       getattr(card, "spotify_id", ""),
+            "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
+            "match_status":     getattr(card, "match_status", "matched"),
+        }
+
+    def _persist_paused_state(self) -> None:
+        """Write the current in-memory paused set to the authoritative store,
+        or clear the store when nothing is paused. Best-effort — a persistence
+        failure must never break pausing itself (the store swallows errors)."""
+        from core.download_request_codec import request_to_dict
+        from core.paused_batch_store import PausedJob
+
+        jobs = []
+        for key, req in self._paused_requests.items():
+            card = self._key_to_card.get(key)
+            jobs.append(PausedJob(
+                key=key,
+                request=request_to_dict(req),
+                card=self._card_to_dict(card) if card is not None else {},
+            ))
+        if jobs:
+            self._paused_store.save(jobs)
+        else:
+            self._paused_store.clear()
+
+    def restore_paused_on_startup(self, card_factory) -> list:
+        """Startup entry point: sweep abandoned workspaces and restore the
+        valid persisted paused jobs.
+
+        The sweep removes every batch workspace under the output directory
+        that no valid paused job still needs — crashed runs and completed
+        batches whose cleanup didn't finish — while keeping the workspaces of
+        the jobs about to be restored. Runs even when there is nothing to
+        restore, so stale workspaces are always reclaimed. Returns the
+        restored cards (empty if none)."""
+        store_jobs = self._paused_store.load()
+        try:
+            from utils.paths import sweep_stale_workspaces
+            keep = self._paused_store.workspace_dirs_or_none()
+            if keep is None:
+                # The persisted state could not be read in full -- bad JSON,
+                # an unexpected shape, or even one unreadable record. Its
+                # keep-set is unknowable, NOT empty, and a PARTIAL keep-set
+                # is just as dangerous as an empty one: the entries missing
+                # from it are precisely the workspaces that would be swept.
+                # Skip the sweep rather than delete resumable work.
+                logger.warning(
+                    "[DownloadController] Paused-state file could not be read "
+                    "in full — skipping the stale-workspace sweep this run "
+                    "rather than risk deleting resumable work"
+                )
+            else:
+                # Every output dir a currently-loaded paused job actually
+                # points at, PLUS the current config's output dir.
+                # sweep_stale_workspaces additionally searches every RECORDED
+                # output root (utils.paths.known_output_roots), which is what
+                # finds an abandoned workspace under a directory the user has
+                # since changed away from — nothing here still references
+                # such a path once its paused job is gone.
+                base_dirs: list[str] = []
+                current = getattr(self._cfg, "output_dir", None)
+                if current:
+                    base_dirs.append(current)
+                for pj in store_jobs:
+                    job_output_dir = pj.request.get("output_dir")
+                    if job_output_dir and job_output_dir not in base_dirs:
+                        base_dirs.append(job_output_dir)
+                removed = sweep_stale_workspaces(base_dirs, keep)
+                if removed:
+                    logger.info("[DownloadController] Swept %d stale workspace(s)", len(removed))
+                # Cross-volume publish temps stranded by a crash between the
+                # staging copy and the final rename. Same discovery rule, and
+                # nothing else ever removes them.
+                from utils.paths import sweep_stale_publish_temp_files
+                temps = sweep_stale_publish_temp_files(base_dirs)
+                if temps:
+                    logger.info(
+                        "[DownloadController] Removed %d stale publish temp file(s)",
+                        len(temps),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DownloadController] Stale-workspace sweep failed: %s", exc)
+
+        if not store_jobs:
+            return []
+        return self.restore_paused_jobs(store_jobs, card_factory)
+
+    def restore_paused_jobs(self, store_jobs, card_factory) -> list:
+        """Rebuild the in-memory paused set from persisted records after a
+        restart. ``card_factory(card_dict) -> card`` creates and registers a
+        (paused) queue card; returns None to skip. A record whose workspace
+        no longer exists (swept as stale, or the user deleted it) is skipped
+        — there is nothing left to resume from. Returns the list of restored
+        cards so the caller can wire their pause/resume signals."""
+        from core.download_request_codec import request_from_dict
+
+        restored: list = []
+        for pj in store_jobs:
+            if pj.workspace_dir and not Path(pj.workspace_dir).exists():
+                continue
+            card = card_factory(pj.card)
+            if card is None:
+                continue
+            key = str(id(card))
+            req = request_from_dict(pj.request)
+            # A job paused before its Spotify two-stage match ever ran has
+            # no resolved URL AND (per request_to_dict) no persisted
+            # resolver -- a live closure can't be serialised. Rebuild an
+            # EQUIVALENT one from the identity fields _card_to_dict saved,
+            # so it re-matches to YouTube instead of trying to download a
+            # placeholder URL.
+            if pj.request.get("had_pending_resolver") and pj.card.get("spotify_id"):
+                td = {
+                    "spotify_id":       pj.card.get("spotify_id", ""),
+                    "spotify_key_kind": pj.card.get("spotify_key_kind", "spotify_id"),
+                    "title":            pj.card.get("title", ""),
+                    "artist":           pj.card.get("artist", ""),
+                    "duration_sec":     pj.card.get("duration_sec"),
+                }
+                req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
+            self._paused_requests[key] = req
+            self._key_to_card[key] = card
+            restored.append(card)
+        # Re-persist so the store reflects exactly what was restorable
+        # (drops records whose workspace had vanished).
+        self._persist_paused_state()
+        return restored
 
     def resume_track(self, card) -> None:
         """
@@ -779,10 +950,6 @@ class DownloadController(QObject):
         if req is None:
             logger.warning("[DownloadController] No paused request for card %s", key)
             return
-
-        paused = [p for p in self._cfg.paused_items if p.get("card_key") != key]
-        self._cfg.paused_items = paused
-        self._cfg.save()
 
         card.set_status("queued")
         card.set_progress(0.0)
@@ -821,6 +988,7 @@ class DownloadController(QObject):
             )
         )
         resume_worker.start()
+        self._release_paused_record(resume_worker)
 
     def resume_all(self) -> None:
         """Continue a globally-paused batch: re-submit every snapshotted
@@ -847,16 +1015,6 @@ class DownloadController(QObject):
                 card.set_progress(0.0)
             jobs.append((key, req))
 
-        # Drop any per-track paused_items persistence for the resumed keys
-        # (PR6 replaces this store; for now keep it consistent).
-        resumed_keys = set(self._paused_requests.keys())
-        remaining = [
-            p for p in self._cfg.paused_items if p.get("card_key") not in resumed_keys
-        ]
-        if len(remaining) != len(self._cfg.paused_items):
-            self._cfg.paused_items = remaining
-            self._cfg.save()
-
         self._paused_requests.clear()
         self._card_progress.clear()
 
@@ -876,8 +1034,41 @@ class DownloadController(QObject):
 
         self._dl_worker = self._build_batch_worker(jobs, preexisting_jobs=[])
         self._dl_worker.start()
+        self._release_paused_record(self._dl_worker)
 
         self.batch_started.emit()
+
+    def _release_paused_record(self, worker) -> None:
+        """Drop the on-disk paused record for the jobs ``worker`` has just
+        taken over — but only once it has genuinely entered its run
+        lifecycle.
+
+        QThread.start() only guarantees the thread was SCHEDULED; run() may
+        not have executed a line yet. Rewriting the persisted state on the
+        strength of start() alone leaves a real window in which a crash or a
+        kill loses the jobs outright: the record that said "these are
+        paused, keep their workspaces" is already gone, and the worker that
+        was supposed to assume ownership never did — so the next startup
+        sweeps those workspaces as abandoned. Waiting for the worker to
+        actually enter run() means the record only disappears once something
+        is running that can re-create it.
+
+        A worker that does not report started within the timeout keeps its
+        record: an extra, stale paused entry is harmless (it is re-persisted
+        from live state on the next pause, and its workspace is protected
+        meanwhile), whereas dropping it prematurely is not."""
+        try:
+            started = worker.wait_until_running(timeout_ms=3000)
+        except Exception:  # noqa: BLE001 — a fake/stub worker in tests
+            started = True
+        if not started:
+            logger.warning(
+                "[DownloadController] Resume worker did not report started — "
+                "keeping the persisted paused record so its workspace stays "
+                "protected"
+            )
+            return
+        self._persist_paused_state()
 
     # ── Private slots (wired to DownloadWorker signals) ───────────────────────
 
@@ -1146,14 +1337,18 @@ class DownloadController(QObject):
         from utils.paths import remove_workspace_tree
 
         containers: set[Path] = set()
+        dropped = False
         for key, req in jobs:
-            self._paused_requests.pop(key, None)
+            if self._paused_requests.pop(key, None) is not None:
+                dropped = True
             if req.workspace_dir:
                 # req.workspace_dir is this job's per-job subdir
                 # (<container>/<job_key>); its parent is the batch container.
                 containers.add(Path(req.workspace_dir).parent)
         for container in containers:
             remove_workspace_tree(container)
+        if dropped:
+            self._persist_paused_state()  # cancelled work is no longer paused
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

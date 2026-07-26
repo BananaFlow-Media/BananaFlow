@@ -21,7 +21,6 @@ New fields (Phase 2 & rate-limit handling)
   tray_on_close            – minimise to system tray instead of quitting
   global_hotkeys_enabled   – register OS-level pause/open hotkeys
   queue_state              – serialised queue for smart auto-resume
-  paused_items             – items paused by the user (cancel+part file)
   download_delay_range     – Min/Max seconds between requests (rate-limit politeness)
 """
 
@@ -163,7 +162,7 @@ _DEFAULTS: dict[str, Any] = {
 
     # ── Auto-resume (smart queue persistence) ─────────────────────────────────
     "queue_state":           [],            # NEW – list[dict] of pending TrackMeta
-    "paused_items":          [],            # NEW – list[dict] of paused-item state
+    # paused_items removed — superseded by core.paused_batch_store (see below).
     "magic_auto_ops":        ["title_strip", "track_num", "normalize_spaces"],
     "tag_editor_zoom":       100,
     "tag_editor_splitter_sizes": [],
@@ -716,14 +715,11 @@ class AppConfig:
     def queue_state(self, value: list) -> None:
         self._data["queue_state"] = list(value)
 
-    @property
-    def paused_items(self) -> list:
-        val = self._data.get("paused_items", [])
-        return val if isinstance(val, list) else []
-
-    @paused_items.setter
-    def paused_items(self, value: list) -> None:
-        self._data["paused_items"] = list(value)
+    # NOTE: the former ``paused_items`` config list was a write-only dead
+    # path — nothing ever read it back to resume anything. It is superseded
+    # by core.paused_batch_store.PausedBatchStore, the single authoritative
+    # persisted-pause mechanism (see DownloadController). Any stale
+    # ``paused_items`` key left in an existing config file is simply ignored.
 
     def __repr__(self) -> str:
         return (

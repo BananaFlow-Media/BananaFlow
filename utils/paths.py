@@ -381,6 +381,82 @@ def remove_workspace_tree(path: Path) -> None:
     _prune_empty_workspace_parents(resolved.parent)
 
 
+def iter_batch_workspaces(base_dirs) -> list[Path]:
+    """Enumerate every ``batch-*`` workspace directory that currently exists
+    under a BananaFlow workspace container. ``base_dirs`` is any iterable of
+    output-dir paths; EVERY recorded output root is searched as well, plus
+    the app-data fallback container. Missing containers are simply skipped;
+    never raises.
+
+    Including the recorded roots is what makes an abandoned workspace under
+    an output directory the user has since changed away from findable at
+    all. Searching only the caller's list meant such a directory could only
+    be reached while some currently-persisted paused job still pointed at
+    it — once that job was resumed or dropped, the workspace became
+    permanently invisible to cleanup and stayed on disk forever."""
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for base in list(base_dirs) + list(known_output_roots()) + [None]:
+        if base is None:
+            container = get_app_data_dir() / _APPDATA_CONTAINER_NAME
+        else:
+            try:
+                container = _workspace_container(Path(base).expanduser().resolve())
+            except (OSError, RuntimeError):
+                continue
+        if container in seen:
+            continue
+        seen.add(container)
+        roots.append(container)
+
+    batches: list[Path] = []
+    for container in roots:
+        try:
+            entries = list(container.iterdir())
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            continue
+        for entry in entries:
+            if entry.name.startswith("batch-") and entry.is_dir():
+                batches.append(entry)
+    return batches
+
+
+def sweep_stale_workspaces(base_dirs, keep_workspace_dirs) -> list[Path]:
+    """Remove every batch workspace under ``base_dirs`` that is NOT part of a
+    still-valid paused batch, and return the paths removed.
+
+    ``keep_workspace_dirs`` is the set of per-job workspace subdirs that a
+    valid persisted paused batch still needs (see
+    core.paused_batch_store.PausedBatchStore.workspace_dirs). A batch-<id>
+    container is kept when ANY kept subdir lives under it; every other
+    ``batch-*`` directory is abandoned (a crashed run, or a completed batch
+    whose cleanup didn't finish) and is removed via the filesystem-safe
+    remove_workspace_tree. Never raises."""
+    keep_containers: set[Path] = set()
+    for ws in keep_workspace_dirs or ():
+        try:
+            p = Path(ws).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        # The kept subdir is <container>/<job_key>; keep its batch container.
+        if p.name.startswith("batch-"):
+            keep_containers.add(p)
+        else:
+            keep_containers.add(p.parent)
+
+    removed: list[Path] = []
+    for batch in iter_batch_workspaces(base_dirs):
+        try:
+            resolved = batch.resolve()
+        except OSError:
+            resolved = batch
+        if resolved in keep_containers:
+            continue
+        remove_workspace_tree(batch)
+        removed.append(batch)
+    return removed
+
+
 def _set_hidden_attribute(
     path: Path, *, attempts: int = 3, retry_delay_s: float = 0.15, hidden: bool = True,
 ) -> bool:

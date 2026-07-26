@@ -25,6 +25,7 @@ all_finished()                Entire batch complete.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -153,8 +154,26 @@ class DownloadWorker(QThread):
             db=db,
             max_workers=max_workers,
         )
+        # Set the instant run() actually begins — see wait_until_running.
+        self._run_entered = threading.Event()
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def wait_until_running(self, timeout_ms: int = 5000) -> bool:
+        """Block until this worker's run() has actually begun, or the timeout
+        expires. Returns whether it started.
+
+        QThread.start() returns as soon as the thread has been *scheduled*;
+        run() may not have executed a single line yet. That gap matters to
+        the caller that owns this worker's persisted state: clearing "these
+        jobs are paused" on the strength of start() alone leaves a window
+        where a crash (or a kill) in between loses the jobs entirely — the
+        worker never took ownership, and the next startup no longer has a
+        record protecting their workspaces from the stale sweep. Waiting for
+        this event means the on-disk record is only dropped once something
+        is genuinely running that can re-create it.
+        """
+        return self._run_entered.wait(timeout=timeout_ms / 1000.0)
 
     def cancel(self) -> None:
         """Cancel all in-flight downloads."""
@@ -190,6 +209,13 @@ class DownloadWorker(QThread):
         not exist in a windowed build.  The visible result was a click
         that did nothing, permanently and with no error message.
         """
+        # Signalled first thing, before any work: this worker has now
+        # genuinely taken ownership of its jobs, which is what the caller
+        # waits for before dropping their persisted paused record (see
+        # wait_until_running). Set even if run_batch dies immediately —
+        # ownership has still transferred, and the failure path below
+        # releases the UI.
+        self._run_entered.set()
         try:
             delay_range = self._cfg.download_delay_range
             self._orch.run_batch(
