@@ -268,6 +268,13 @@ class DownloadRequest:
     # be true for one job. None (default) always commits.
     publish_gate: Optional[Callable[[], bool]] = field(default=None, repr=False)
 
+    # The counterpart to publish_gate: called when a gated attempt turns out
+    # NOT to commit after all — a same-volume rename that reports the
+    # destination is on another volume, or a locked-target retry. Handing
+    # the claim back keeps the job pausable through the long cross-volume
+    # copy, or the retry wait, that follows.
+    publish_release: Optional[Callable[[], None]] = field(default=None, repr=False)
+
     # Lazy URL resolver (Spotify two-stage import). When set, ``url`` is a
     # placeholder and the real target URL is produced by calling this the
     # instant before the download starts — so a large catalog's YouTube
@@ -294,6 +301,25 @@ class DownloadRequest:
     # tools can see it.
     _final_output_path: str = field(default="", init=False, repr=False)
     _thumb_sent: bool = field(default=False, init=False, repr=False)
+
+    def snapshot_copy(self) -> "DownloadRequest":
+        """A defensive copy of this request, for a pause snapshot.
+
+        ``dataclasses.replace`` rebuilds the object through ``__init__``,
+        which silently resets every ``init=False`` field — including
+        ``_final_output_path``, the only in-memory record of where yt-dlp
+        put the finished file. Carried across explicitly so a snapshot
+        taken in the instant between yt-dlp returning and the post-download
+        checkpoint being written still knows what was produced, and the
+        resumed request can publish it instead of re-running a download
+        that has nothing left to do.
+        """
+        import dataclasses
+
+        copy = dataclasses.replace(self)
+        copy._final_output_path = self._final_output_path
+        copy._thumb_sent = self._thumb_sent
+        return copy
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -536,6 +562,20 @@ class DownloadEngine:
                     for attempt in range(max_retries):
                         try:
                             ydl.download([url])
+                            # Checkpoint the INSTANT yt-dlp hands control
+                            # back — not after the two context-manager
+                            # exits (which do real file I/O), the
+                            # cancellation check and the existence probe
+                            # that used to sit between here and the
+                            # assignment. A pause landing anywhere in that
+                            # gap took a snapshot with no checkpoint and —
+                            # because _final_output_path is init=False, so
+                            # dataclasses.replace resets it — no output path
+                            # either. The resumed job then re-ran yt-dlp
+                            # against a file that was already complete, so
+                            # no postprocessor hook fired and it died with
+                            # "output file is missing".
+                            self._record_post_download_checkpoint(request)
                             break
                         except Exception as exc:
                             # Check for Windows file-lock errors by winerror code (locale-safe)
@@ -564,12 +604,10 @@ class DownloadEngine:
 
             final_path = request._final_output_path  # noqa: SLF001
             if final_path and os.path.exists(final_path):
-                # Every byte is now on disk. Record the checkpoint BEFORE the
-                # pipeline runs, so a pause taken during post-processing is
-                # snapshotted with the phase and the workspace file identity
-                # it needs to resume (see _resume_checkpoint).
-                request.resume_final_path = final_path
-                request.resume_phase = "postprocess"
+                # The "postprocess" checkpoint was already written the
+                # moment yt-dlp returned (see above), so a pause taken
+                # anywhere from here on already carries the phase and the
+                # workspace file identity it needs to resume.
 
                 # Notify UI we are processing
                 self._fire(request, DownloadProgress(
@@ -629,6 +667,27 @@ class DownloadEngine:
         self._cancel_event.set()
 
     # ── Post-download resume checkpoint ───────────────────────────────────────
+
+    @staticmethod
+    def _record_post_download_checkpoint(req: DownloadRequest) -> None:
+        """Mark the download half finished: yt-dlp has produced its output.
+
+        Called as the very next operation after ``ydl.download()`` returns,
+        and deliberately does no I/O of its own — the point is that nothing
+        can run between yt-dlp finishing and this being written. Whether the
+        recorded file actually still exists is validated later, by
+        _resume_checkpoint, at the moment a resume would rely on it.
+
+        A request that produced nothing (a ytsearch that matched no video)
+        gets no checkpoint, so it falls through to the normal
+        "output file is missing" error rather than claiming a resume point
+        it does not have.
+        """
+        path = req._final_output_path  # noqa: SLF001
+        if not path:
+            return
+        req.resume_final_path = path
+        req.resume_phase = "postprocess"
 
     @staticmethod
     def _resume_checkpoint(req: DownloadRequest) -> Optional[str]:
@@ -1372,7 +1431,10 @@ class DownloadEngine:
         for attempt in range(max_retries):
             try:
                 self._atomic_place(
-                    src, dest, cancel_check=cancelled, commit_gate=req.publish_gate,
+                    src, dest,
+                    cancel_check=cancelled,
+                    commit_gate=req.publish_gate,
+                    commit_release=req.publish_release,
                 )
                 return str(dest)
             except OSError as exc:
@@ -1411,6 +1473,7 @@ class DownloadEngine:
         *,
         cancel_check: Optional[Callable[[], bool]] = None,
         commit_gate: Optional[Callable[[], bool]] = None,
+        commit_release: Optional[Callable[[], None]] = None,
     ) -> None:
         """Put ``src`` at ``dest`` atomically at the visible destination.
 
@@ -1467,6 +1530,15 @@ class DownloadEngine:
         this job returns False and the publish is abandoned. It is asked
         here, not by the caller, precisely because here is the only place
         genuinely adjacent to the commit.
+
+        ``commit_release`` undoes a gate that did not lead to a commit. The
+        same-volume attempt has to be gated before it runs — the gate and
+        the rename must be inseparable — but that attempt may report the
+        destination is on another volume, or fail on a locked target and be
+        retried seconds later. Handing the claim back in those cases is what
+        keeps the job pausable across the long cross-volume copy, and across
+        the caller's retry wait, instead of freezing it as "terminal" for
+        the whole operation while nothing has actually been published.
         """
         import errno
         import tempfile
@@ -1477,6 +1549,10 @@ class DownloadEngine:
         def _may_commit() -> bool:
             return commit_gate is None or bool(commit_gate())
 
+        def _undo_commit_claim() -> None:
+            if commit_release is not None:
+                commit_release()
+
         if _cancelled():
             raise PublishCancelled("Cancelled before publish")
         if not _may_commit():
@@ -1485,6 +1561,10 @@ class DownloadEngine:
             os.replace(str(src), str(dest))
             return
         except OSError as exc:
+            # Nothing was committed, so the claim taken above is given back
+            # before either continuing to the (slow) cross-volume path or
+            # handing a retryable error to the caller.
+            _undo_commit_claim()
             if getattr(exc, "errno", None) != errno.EXDEV:
                 raise
 
@@ -1525,21 +1605,28 @@ class DownloadEngine:
                 raise PublishCancelled("Cancelled before publish")
             if not _may_commit():
                 raise PublishCancelled("Paused before publish")
-            # Unhide only now: the content is complete, and the very next
-            # step renames it onto the visible destination name. Also NOT
-            # best-effort: os.replace carries the source's attributes across,
-            # so renaming a still-hidden temp publishes the user's finished
-            # track as a hidden file they cannot find in their own folder.
-            # Failing here leaves the destination untouched and the file
-            # safely in the workspace, which is recoverable; publishing an
-            # invisible file is not.
-            if not _set_hidden_attribute(tmp, hidden=False):
-                raise PublishError(
-                    f"Refusing to publish {dest}: the staging file's Hidden "
-                    f"attribute could not be cleared, and os.replace would "
-                    f"carry it onto the published file"
-                )
-            os.replace(str(tmp), str(dest))
+            # The claim is held from here on; anything that stops short of
+            # the rename must hand it back, or the job is stuck as
+            # "terminal" without ever having been published.
+            try:
+                # Unhide only now: the content is complete, and the very next
+                # step renames it onto the visible destination name. Also NOT
+                # best-effort: os.replace carries the source's attributes
+                # across, so renaming a still-hidden temp publishes the
+                # user's finished track as a hidden file they cannot find in
+                # their own folder. Failing here leaves the destination
+                # untouched and the file safely in the workspace, which is
+                # recoverable; publishing an invisible file is not.
+                if not _set_hidden_attribute(tmp, hidden=False):
+                    raise PublishError(
+                        f"Refusing to publish {dest}: the staging file's Hidden "
+                        f"attribute could not be cleared, and os.replace would "
+                        f"carry it onto the published file"
+                    )
+                os.replace(str(tmp), str(dest))
+            except (OSError, PublishError):
+                _undo_commit_claim()
+                raise
         except (OSError, PublishCancelled, PublishError):
             try:
                 if tmp.exists():

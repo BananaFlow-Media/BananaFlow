@@ -293,6 +293,31 @@ class DownloadOrchestrator:
             return True
         return current == outcome
 
+    def _release_job_outcome(self, key: str, outcome: str) -> None:
+        """Give back a claim whose operation did not actually happen.
+
+        The publish gate has to claim BEFORE it attempts the commit —
+        that's the whole point, the claim and the commit must be
+        inseparable. But the first attempt is a bare ``os.replace`` that
+        may turn out to be cross-volume, or may hit a file lock and be
+        retried seconds later; in both cases nothing was committed and the
+        job goes on to spend a long time copying or waiting. Holding the
+        claim across that made the job unpausable for the whole operation
+        — Global Pause was told "already terminal" for a job that had not
+        finished anything and might still be cancelled out from under it,
+        leaving it absent from the paused set entirely.
+
+        So a gate that does not reach its commit hands the claim back, and
+        the job is pausable again until the next attempt. Only the caller
+        that currently owns ``outcome`` can release it, so this can never
+        take away a claim someone else won in the meantime."""
+        lock = self._job_locks.get(key)
+        if lock is None:
+            return
+        with lock:
+            if self._job_outcomes.get(key) == outcome:
+                del self._job_outcomes[key]
+
     def _mark_cancelled(self, key: str) -> None:
         """Record a job as cancelled and tell the UI — unless a Global Pause
         already claimed it, in which case the job is *paused*, not cancelled,
@@ -362,7 +387,12 @@ class DownloadOrchestrator:
                 return state, None
             if not self._claim_job_outcome_locked(key, "paused"):
                 return state, None
-            return state, dataclasses.replace(req)
+            # snapshot_copy, not dataclasses.replace: replace() rebuilds
+            # through __init__ and silently drops the init=False
+            # output-path tracker, which is what a job paused in the
+            # instant between yt-dlp finishing and its checkpoint being
+            # written has to keep in order to resume at all.
+            return state, req.snapshot_copy()
 
     # ── Main entry point (blocking — call from background thread) ─────────────
 
@@ -913,7 +943,7 @@ class DownloadOrchestrator:
         # downloads, the same as if it had never started.
         if lock is not None:
             with lock:
-                self._pending_resolver_requests[key] = dataclasses.replace(req)
+                self._pending_resolver_requests[key] = req.snapshot_copy()
                 req.url_resolver = None
                 self._resolving_keys.add(key)
         else:
@@ -1157,7 +1187,14 @@ class DownloadOrchestrator:
         # side of the same boundary live_request_snapshot guards, moved to
         # the last possible instant so "paused" and "published" can never
         # both be true.
+        #
+        # publish_release is its counterpart: a gated attempt that turns out
+        # NOT to commit (a same-volume rename that raises EXDEV, or a
+        # file-lock retry) gives the claim straight back, so the job stays
+        # pausable through the long cross-volume copy or the retry wait
+        # instead of being frozen as "terminal" for the whole operation.
         req.publish_gate = lambda: self._claim_job_outcome(key, "terminal")
+        req.publish_release = lambda: self._release_job_outcome(key, "terminal")
 
         # ── Retry wrapper ─────────────────────────────────────────────────────
         # engine.download() signals failure via req.on_error callback (not
