@@ -173,7 +173,7 @@ def test_publish_failure_raises_and_leaves_existing_destination_intact(tmp_path,
     req = _req(output_dir=str(output_dir), workspace_dir=str(workspace))
 
     # Force the atomic placement to fail with a non-recoverable error.
-    def _boom(_src, _dest):
+    def _boom(_src, _dest, **_kwargs):
         raise OSError("simulated publish failure")
 
     monkeypatch.setattr(engine, "_atomic_place", _boom)
@@ -326,6 +326,258 @@ def test_hls_publish_failure_reports_error_not_finished(tmp_path, monkeypatch):
     # also produce an "error" event and make this assertion vacuous.
     error_progress = next(p for k, p in events if k == "error")
     assert "simulated publish failure" in error_progress.error_message
+
+
+# ── Cancellation during publication ──────────────────────────────────────────
+# Publication is the LAST thing a job does and — across volumes — it is not
+# instantaneous. A cancel/pause landing inside it must abandon the publish,
+# not be overtaken by a file appearing in the user's output folder and a
+# reported success.
+
+class TestCancelDuringPublish:
+    def _setup(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        output_dir = tmp_path / "output"
+        workspace.mkdir()
+        output_dir.mkdir()
+        src = workspace / "song.mp3"
+        src.write_bytes(b"CONTENT" * 4096)
+        req = _req(output_dir=str(output_dir), workspace_dir=str(workspace))
+        return workspace, output_dir, src, req
+
+    def test_per_request_cancel_before_publish_aborts_without_touching_dest(self, tmp_path):
+        import threading
+
+        from core.downloader import PublishCancelled
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+        req.cancel_event = threading.Event()
+        req.cancel_event.set()
+
+        with pytest.raises(PublishCancelled):
+            engine._publish_to_final_location(req, str(src))
+
+        assert not (output_dir / "song.mp3").exists()
+        assert src.exists(), "the workspace file survives so a resume can use it"
+
+    def test_engine_wide_cancel_before_publish_aborts(self, tmp_path):
+        from core.downloader import PublishCancelled
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+        engine.cancel_all()
+
+        with pytest.raises(PublishCancelled):
+            engine._publish_to_final_location(req, str(src))
+
+        assert not (output_dir / "song.mp3").exists()
+
+    def test_cancel_arriving_during_cross_volume_copy_is_honoured(self, tmp_path, monkeypatch):
+        """The window the pre-publish check cannot cover: a multi-gigabyte
+        cross-volume copy. Cancelling half-way must abandon the copy, remove
+        the staging temp, and leave the destination untouched."""
+        import errno
+        import threading
+
+        import core.downloader as dl_mod
+        from core.downloader import PublishCancelled
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+        # Big enough to need several chunks.
+        src.write_bytes(b"x" * (DownloadEngine._PUBLISH_COPY_CHUNK * 4))
+        cancel = threading.Event()
+        req.cancel_event = cancel
+
+        real_replace = os.replace
+
+        def _force_cross_volume(a, b):
+            if str(a) == str(src):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+
+        # Trip the cancel once the copy is genuinely under way.
+        chunks = {"n": 0}
+        real_fdopen = dl_mod.os.fdopen
+
+        class _CountingWriter:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def write(self, data):
+                chunks["n"] += 1
+                if chunks["n"] == 2:
+                    cancel.set()
+                return self._fh.write(data)
+
+            def __enter__(self):
+                self._fh.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._fh.__exit__(*exc)
+
+        monkeypatch.setattr(
+            dl_mod.os, "fdopen", lambda fd, mode: _CountingWriter(real_fdopen(fd, mode)),
+        )
+
+        with pytest.raises(PublishCancelled):
+            engine._publish_to_final_location(req, str(src))
+
+        assert not (output_dir / "song.mp3").exists()
+        assert src.exists()
+        leftovers = [
+            p.name for p in output_dir.iterdir()
+            if DownloadEngine.PUBLISH_TMP_SUFFIX in p.name
+        ]
+        assert leftovers == [], "the abandoned staging temp must be removed"
+
+    def test_cross_volume_staging_temp_is_hidden_before_any_content_is_written(
+        self, tmp_path, monkeypatch,
+    ):
+        """The destination-side partial must never be visible. The temp has to
+        carry the Hidden attribute from creation — hiding it only after the
+        copy leaves a growing, visible file in the user's output folder for
+        the whole duration of the copy."""
+        import errno
+
+        import core.downloader as dl_mod
+        from utils import paths as paths_mod
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+
+        real_replace = os.replace
+
+        def _force_cross_volume(a, b):
+            if str(a) == str(src):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+
+        events: list[tuple[str, str, bool]] = []
+        real_set_hidden = paths_mod._set_hidden_attribute
+
+        def _tracking(path, **kwargs):
+            hidden = kwargs.get("hidden", True)
+            size = 0
+            try:
+                size = os.path.getsize(str(path))
+            except OSError:
+                pass
+            events.append(("hide" if hidden else "unhide", str(path), size > 0))
+            return real_set_hidden(path, **kwargs)
+
+        monkeypatch.setattr(dl_mod, "_set_hidden_attribute", _tracking)
+
+        result = engine._publish_to_final_location(req, str(src))
+
+        assert Path(result) == output_dir / "song.mp3"
+        assert (output_dir / "song.mp3").exists()
+        hides = [e for e in events if e[0] == "hide"]
+        assert hides, "the staging temp must be hidden"
+        assert all(not had_content for _, _, had_content in hides), (
+            "the temp was hidden only after content was written — a visible "
+            "partial file existed in the output directory during the copy"
+        )
+        # And unhidden again before the rename, so the published file is not
+        # itself hidden from the user.
+        assert [e[0] for e in events][-1] == "unhide"
+
+    def test_published_file_is_not_hidden_after_a_cross_volume_publish(
+        self, tmp_path, monkeypatch,
+    ):
+        """os.replace carries the source's attributes across — a staging temp
+        that stayed hidden would publish the user's finished track as a
+        hidden file they cannot find."""
+        import errno
+
+        import core.downloader as dl_mod
+
+        engine = DownloadEngine()
+        _ws, output_dir, src, req = self._setup(tmp_path)
+
+        real_replace = os.replace
+
+        def _force_cross_volume(a, b):
+            if str(a) == str(src):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(dl_mod.os, "replace", _force_cross_volume)
+
+        engine._publish_to_final_location(req, str(src))
+
+        dest = output_dir / "song.mp3"
+        assert dest.exists()
+        if os.name == "nt":
+            import ctypes
+
+            FILE_ATTRIBUTE_HIDDEN = 0x02
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(dest))
+            assert not (attrs & FILE_ATTRIBUTE_HIDDEN), (
+                "the published file must be visible to the user"
+            )
+
+    def test_hls_path_reports_cancelled_not_error_when_publish_is_cancelled(
+        self, tmp_path, monkeypatch,
+    ):
+        """End-to-end at a real call site: a cancel during publish is a
+        cancellation, never an error and never a success."""
+        import threading
+
+        from core.downloader import DownloadStatus
+
+        engine = DownloadEngine()
+        workspace = tmp_path / "workspace"
+        output_dir = tmp_path / "output"
+        workspace.mkdir()
+        output_dir.mkdir()
+
+        events: list = []
+        cancel = threading.Event()
+        req = DownloadRequest(
+            url="https://example.test/stream.m3u8",
+            output_dir=str(output_dir),
+            workspace_dir=str(workspace),
+            media_type=MediaType.AUDIO,
+            stream_type="hls",
+            forced_title="Song",
+            cancel_event=cancel,
+        )
+        req.on_finished = lambda p: events.append(("finished", p))
+        req.on_error = lambda p: events.append(("error", p))
+        req.on_progress = lambda p: events.append(("progress", p))
+
+        import core.hls_downloader as hls_mod
+
+        def _fake_download_hls(url, output_path, cookies_file=None, cancel_event=None):
+            Path(output_path).write_bytes(b"stream-bytes")
+            # The cancel lands after ffmpeg finished but before publish — the
+            # exact window the pre-publish check was added for; here it is
+            # tripped one step later still, inside the publish itself.
+
+        monkeypatch.setattr(hls_mod, "download_hls", _fake_download_hls)
+
+        real_publish = engine._publish_to_final_location
+
+        def _cancel_then_publish(r, path):
+            cancel.set()
+            return real_publish(r, path)
+
+        monkeypatch.setattr(engine, "_publish_to_final_location", _cancel_then_publish)
+
+        engine.download(req)
+
+        assert "finished" not in [k for k, _ in events]
+        assert "error" not in [k for k, _ in events]
+        statuses = [p.status for k, p in events if k == "progress"]
+        assert DownloadStatus.CANCELLED in statuses
+        assert not (output_dir / "Song.mp3").exists()
 
 
 # ── outtmpl routing (the write side of the same guarantee) ──────────────────
