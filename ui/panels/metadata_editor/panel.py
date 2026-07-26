@@ -296,12 +296,6 @@ class MetadataEditorPanel(QWidget):
         self._root_folder: Optional[Path] = None
         self._navigation = TagEditorNavigationState()
         self._is_filtering_view = False
-        saved_folder = getattr(self._cfg, "tag_editor_last_folder", "") if self._cfg else ""
-        if saved_folder:
-            candidate = Path(saved_folder)
-            if candidate.is_dir():
-                self._root_folder = candidate
-                self._navigation.set_root(candidate)
         self._file_operations = FileOperationService(self._root_folder)
         # Every physical mutation of a loaded path belongs to the controller,
         # which is the only owner able to pause monitoring, register the
@@ -2785,7 +2779,13 @@ class MetadataEditorPanel(QWidget):
     # ── Toolbar handlers ──────────────────────────────────────────────────────
 
     def _on_browse(self) -> None:
-        start_folder = self._root_folder if self._root_folder and self._root_folder.is_dir() else Path.home()
+        saved_folder = getattr(self._cfg, "tag_editor_last_folder", "") if self._cfg else ""
+        if self._root_folder and self._root_folder.is_dir():
+            start_folder = self._root_folder
+        elif saved_folder and Path(saved_folder).is_dir():
+            start_folder = Path(saved_folder)
+        else:
+            start_folder = Path.home()
         path = QFileDialog.getExistingDirectory(
             self, t("meta_choose_music_folder"), str(start_folder)
         )
@@ -4555,8 +4555,9 @@ class MetadataEditorPanel(QWidget):
         if hasattr(self, "_insp_folder_title"):
             self._insp_folder_title.setText(t("meta_inspector_no_selection_title"))
         if hasattr(self, "_browse_btn"):
+            has_tracks = bool(self._model.get_all_tracks())
             self._browse_btn.setText(
-                self._toolbar_text("meta_change_folder" if self._root_folder else "meta_browse_folder")
+                self._toolbar_text("meta_change_folder" if (self._root_folder and has_tracks) else "meta_browse_folder")
             )
         self._refresh_toolbar_action_styles()
 
