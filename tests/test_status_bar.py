@@ -16,6 +16,7 @@ Headless (QT_QPA_PLATFORM=offscreen); skips when PySide6 is missing.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
@@ -49,6 +50,14 @@ def bar(app):
 
 
 def _snapshot(progress=0.34, done=17, total=50, speed=2_000_000.0, eta=1000.0):
+    """A real BatchSnapshot with a chosen batch ETA.
+
+    `eta` is set on the snapshot directly rather than fed to a job, because the
+    batch ETA is derived from measured completion throughput and a per-track
+    eta_seconds deliberately has no path into it (see
+    tests/test_batch_eta_model.py). These are widget tests: the footer's job is
+    to render whatever the aggregator hands it, and nothing else.
+    """
     a = BatchProgressAggregator(speed_smoothing=1.0)
     a.reset([str(i) for i in range(total)])
     # Drive to the requested aggregate progress with byte-weighted jobs.
@@ -57,8 +66,8 @@ def _snapshot(progress=0.34, done=17, total=50, speed=2_000_000.0, eta=1000.0):
             a.complete(str(i), final_bytes=1_000_000)
         elif i == done:
             a.update(str(i), downloaded_bytes=int(1_000_000 * ((progress * total) - done)),
-                     total_bytes=1_000_000, speed_bps=speed, eta_seconds=eta)
-    return a.snapshot()
+                     total_bytes=1_000_000, speed_bps=speed)
+    return dataclasses.replace(a.snapshot(), eta_seconds=eta)
 
 
 # ── Idle ────────────────────────────────────────────────────────────────────
@@ -215,3 +224,196 @@ class TestOffline:
         # AppWindow routes offline to the OfflineBanner; the footer stays quiet.
         bar.show_offline()
         assert bar._status_lbl.text() == ""
+
+
+# ── Live ETA countdown (seconds-granular, ticks between snapshots) ──────────
+
+class TestEtaCountdown:
+    """The footer ETA used to round to whole minutes above 60s and only
+    repaint when a batch snapshot arrived — and snapshots stop entirely
+    between tracks, so the number sat frozen. It now renders M:SS / H:MM:SS
+    and ticks itself down at 1 Hz between snapshots."""
+
+    def test_eta_is_seconds_granular(self, bar):
+        bar.show_batch_progress(_snapshot(eta=452.0))
+        text = bar._eta_lbl.text()
+        # "7:32", not "About 8 min left".
+        assert "7:32" in text
+        assert "min" not in text
+
+    def test_eta_renders_hours_when_long(self, bar):
+        bar.show_batch_progress(_snapshot(eta=3725.0))
+        assert "1:02:05" in bar._eta_lbl.text()
+
+    def test_calculating_placeholder_when_estimate_unavailable(self, bar):
+        from ui.i18n import t
+        bar.show_batch_progress(_snapshot(eta=None))
+        assert bar._eta_lbl.text() == t("eta_calculating")
+        assert not bar._eta_timer.isActive()
+
+    def test_countdown_timer_runs_during_a_download(self, bar):
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        assert bar._eta_timer.isActive()
+
+    def test_tick_decrements_the_displayed_value(self, bar):
+        import time as _time
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        assert "5:00" in bar._eta_lbl.text()
+        # Pretend two seconds have passed since the snapshot, then tick.
+        bar._eta_base_at = _time.monotonic() - 2.0
+        bar._tick_eta()
+        assert "4:58" in bar._eta_lbl.text()
+
+    def test_tick_floors_at_zero_and_never_goes_negative(self, bar):
+        import time as _time
+        bar.show_batch_progress(_snapshot(eta=3.0))
+        bar._eta_base_at = _time.monotonic() - 120.0
+        bar._tick_eta()
+        assert "0:00" in bar._eta_lbl.text()
+        assert "-" not in bar._eta_lbl.text()
+
+    def test_a_new_snapshot_re_anchors_the_countdown(self, bar):
+        import time as _time
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        bar._eta_base_at = _time.monotonic() - 30.0
+        bar._tick_eta()
+        assert "4:30" in bar._eta_lbl.text()
+        # The aggregator is authoritative; the ticker only fills the gaps.
+        bar.show_batch_progress(_snapshot(eta=600.0))
+        assert "10:00" in bar._eta_lbl.text()
+
+    def test_countdown_stops_when_paused(self, bar):
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        assert bar._eta_timer.isActive()
+        bar.show_paused()
+        assert not bar._eta_timer.isActive()
+
+    def test_countdown_stops_when_cancelling(self, bar):
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        bar.show_cancelling()
+        assert not bar._eta_timer.isActive()
+
+    def test_countdown_stops_when_idle(self, bar):
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        bar.reset_to_idle()
+        assert not bar._eta_timer.isActive()
+        assert bar._eta_lbl.text() == ""
+
+    def test_tick_outside_downloading_is_inert(self, bar):
+        bar.show_batch_progress(_snapshot(eta=300.0))
+        bar.show_paused()
+        before = bar._eta_lbl.text()
+        bar._tick_eta()
+        assert bar._eta_lbl.text() == before
+
+
+class TestEtaLabelFitsBothLocales:
+    """The ETA slot is fixed-width so a changing duration never shifts the rest
+    of the footer. It was 120px, which silently clipped even the old
+    "Calculating time remaining…" placeholder. Pin the real font metrics."""
+
+    LONGEST_SECONDS = [59, 599, 3599, 35999, 359999]   # up to 99:59:59
+
+    def test_every_eta_string_fits_in_both_languages(self, bar):
+        from ui import i18n
+        from ui.direction import isolate_number
+        from utils.time_format import seconds_to_str
+
+        fm = bar._eta_lbl.fontMetrics()
+        width = bar._eta_lbl.width()
+        original = i18n._current
+        try:
+            for lang in ("en", "he"):
+                i18n.set_language(lang)
+                candidates = [i18n.t("eta_calculating")]
+                candidates += [
+                    i18n.t("eta_about_left",
+                           time=isolate_number(seconds_to_str(s)))
+                    for s in self.LONGEST_SECONDS
+                ]
+                for text in candidates:
+                    assert fm.horizontalAdvance(text) <= width, (
+                        f"{lang}: {text!r} needs "
+                        f"{fm.horizontalAdvance(text)}px but the slot is {width}px"
+                    )
+        finally:
+            i18n.set_language(original)
+
+
+class TestEtaNeverFreezesOnScreen:
+    """End to end: a real aggregator on a fake clock, its snapshots pushed into
+    a real StatusBar at the heartbeat rate, through a quiet period.
+
+    This is the interaction that made the bug visible rather than merely
+    theoretical. The aggregator's estimate used to be provably constant between
+    one and three measured cycles, and because the footer re-anchors its local
+    countdown on every snapshot, the heartbeat re-publishing that identical
+    value twice a second held the 1 Hz ticker permanently at its starting
+    point. Neither piece looks wrong alone.
+    """
+
+    CYCLE = 10.0
+
+    class _Clock:
+        def __init__(self):
+            self.t = 1000.0
+
+        def __call__(self):
+            return self.t
+
+        def advance(self, dt):
+            self.t += dt
+
+    def _warm_aggregator(self, total=20, completions=4):
+        clock = self._Clock()
+        a = BatchProgressAggregator(speed_smoothing=1.0, time_fn=clock)
+        a.reset([f"k{i}" for i in range(total)])
+        for i in range(completions):
+            clock.advance(self.CYCLE)
+            a.complete(f"k{i}")
+        return a, clock
+
+    def _rendered_over_quiet_period(self, bar, quiet_s, from_stall=0.0):
+        a, clock = self._warm_aggregator()
+        if from_stall:
+            clock.advance(from_stall)
+        seen = []
+        ticks = int(quiet_s / 0.5)
+        for _ in range(ticks):
+            clock.advance(0.5)                    # one heartbeat
+            bar.show_batch_progress(a.snapshot())
+            seen.append(bar._eta_lbl.text())
+        return seen
+
+    def test_display_changes_around_one_and_a_half_cycles(self, bar):
+        seen = self._rendered_over_quiet_period(bar, quiet_s=4.0, from_stall=13.0)
+        assert len(set(seen)) > 1, f"footer stuck on {seen[0]!r}"
+
+    def test_display_changes_around_two_and_a_half_cycles(self, bar):
+        seen = self._rendered_over_quiet_period(bar, quiet_s=4.0, from_stall=23.0)
+        assert len(set(seen)) > 1, f"footer stuck on {seen[0]!r}"
+
+    def test_display_never_stalls_across_the_whole_quiet_period(self, bar):
+        """Sample right through the old dead zone (1x to 3x the cycle) and
+        require the rendered string to keep moving."""
+        seen = self._rendered_over_quiet_period(bar, quiet_s=30.0)
+        longest = best = 1
+        for i in range(1, len(seen)):
+            longest = longest + 1 if seen[i] == seen[i - 1] else 1
+            best = max(best, longest)
+        # At 2 Hz against a 1s-granular display, two identical readings in a row
+        # are expected; a long run of them is the bug.
+        assert best <= 3, f"footer held the same text {best} heartbeats running: {seen}"
+
+    def test_healthy_countdown_still_decreases(self, bar):
+        """The fix must not turn a normal cycle into a rising number."""
+        a, clock = self._warm_aggregator()
+        first = None
+        last = None
+        for _ in range(10):                       # 5s, well inside one cycle
+            clock.advance(0.5)
+            bar.show_batch_progress(a.snapshot())
+            last = bar._eta_base_seconds
+            if first is None:
+                first = last
+        assert last < first

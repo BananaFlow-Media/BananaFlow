@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -118,6 +119,10 @@ class DownloadController(QObject):
 
         self._dl_worker:      Optional = None
         self._resume_workers: list     = []
+        # BatchSnapshot.batch_id of the batch the footer is currently showing.
+        # None until the live batch worker emits its first snapshot; see
+        # _on_worker_batch_snapshot.
+        self._batch_snapshot_id: Optional[str] = None
 
         # key (str(id(card))) → TrackCard
         self._key_to_card:   dict = {}
@@ -519,6 +524,14 @@ class DownloadController(QObject):
         batch — same footer/progress/snapshot wiring as a fresh one — not a
         stripped-down side worker."""
         from ui.workers.download_worker import DownloadWorker
+        # Mint this batch's identity HERE, before the worker exists, and hand
+        # the same value to it. The footer then knows which batch it is showing
+        # from the outset instead of adopting whichever snapshot happens to
+        # arrive first — an id learned that way can be captured by a stale or
+        # foreign snapshot that beats the real one, which would then cause every
+        # genuine snapshot to be rejected for the rest of the batch. See
+        # _on_worker_batch_snapshot.
+        self._batch_snapshot_id = uuid.uuid4().hex
         worker = DownloadWorker(
             jobs=jobs,
             preexisting=preexisting_jobs,
@@ -526,6 +539,7 @@ class DownloadController(QObject):
             config=self._cfg,
             db=self._db,
             max_workers=self._cfg.max_parallel_downloads,
+            batch_id=self._batch_snapshot_id,
             parent=self,
         )
         worker.track_progress.connect(self._on_track_progress)
@@ -1097,8 +1111,32 @@ class DownloadController(QObject):
             self.metrics_update.emit(speed, eta)
 
     def _on_worker_batch_snapshot(self, snapshot) -> None:
-        if self._is_current_batch_worker_signal():
-            self.batch_snapshot.emit(snapshot)
+        """Forward a whole-batch snapshot to the footer, if it belongs here.
+
+        The sender check alone is not enough. It has to stay permissive —
+        ``sender() is None`` for direct programmatic calls, and a resume worker
+        is accepted while ``_dl_worker is None`` — so nothing structural stops a
+        single-track resume, which runs its own orchestrator with its own 1-job
+        aggregator, from repainting the whole-batch footer as "0 of 1". That
+        only fails to happen today because resume_track() does not connect this
+        signal, which is a convention rather than a guarantee.
+
+        So the batch is identified explicitly. _build_batch_worker mints an id
+        and hands the same value to the worker, which passes it down to the
+        aggregator that stamps every snapshot with it. The comparison is
+        therefore against an identity this controller chose in advance, not one
+        inferred from traffic: a stale or foreign snapshot cannot define what
+        "the current batch" means simply by arriving first.
+
+        No live batch means no id, and nothing may repaint the footer.
+        """
+        if not self._is_current_batch_worker_signal():
+            return
+        if self._batch_snapshot_id is None:
+            return
+        if (getattr(snapshot, "batch_id", "") or "") != self._batch_snapshot_id:
+            return
+        self.batch_snapshot.emit(snapshot)
 
     def _on_worker_job_count_changed(self, completed: int, total: int) -> None:
         if self._is_current_batch_worker_signal():

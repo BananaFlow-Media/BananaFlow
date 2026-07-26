@@ -142,12 +142,18 @@ class DownloadWorker(QThread):
         db:          Optional[HistoryDB] = None,
         max_workers: int = 3,
         preexisting: Optional[list[tuple[str, str]]] = None,
+        batch_id:    Optional[str] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._jobs   = jobs
         self._preexisting = preexisting or []
         self._cfg    = config
+        # Identity the owner will use to recognise this batch's snapshots. The
+        # owner mints it before starting the thread, so it can never be left
+        # inferring which batch it is showing from whichever signal arrives
+        # first. None for workers nobody is filtering (single-track resume).
+        self._batch_id = batch_id
         self._orch   = DownloadOrchestrator(
             engine=engine,
             callbacks=_SignalAdapter(self),
@@ -220,6 +226,7 @@ class DownloadWorker(QThread):
             delay_range = self._cfg.download_delay_range
             self._orch.run_batch(
                 self._jobs, delay_range=delay_range, preexisting=self._preexisting,
+                batch_id=self._batch_id,
             )
         except Exception as exc:            # noqa: BLE001 - must not escape a QThread
             logger.exception("[DownloadWorker] Batch failed with an unhandled error")

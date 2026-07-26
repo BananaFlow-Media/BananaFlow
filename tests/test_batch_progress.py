@@ -130,15 +130,18 @@ class TestHybridUnknownSizes:
         a.update("a", downloaded_bytes=40, total_bytes=100)
         assert a.snapshot().progress == pytest.approx(p1)
 
-    def test_total_bytes_estimate_is_marked_as_estimated(self):
+    def test_total_bytes_estimate_still_weights_progress_by_bytes(self):
         a = _agg(["a"])
         a.update("a", downloaded_bytes=100, total_bytes_estimate=1000, speed_bps=100.0)
         snap = a.snapshot()
         assert snap.progress == pytest.approx(0.1)
         assert snap.byte_weighted is True
-        assert snap.eta_is_estimate is True
+        # An estimated total is replaced by the real one without disturbing
+        # byte-weighting.
         a.update("a", downloaded_bytes=100, total_bytes=1000, speed_bps=100.0)
-        assert a.snapshot().eta_is_estimate is False
+        snap = a.snapshot()
+        assert snap.progress == pytest.approx(0.1)
+        assert snap.byte_weighted is True
 
 
 # ── Bounds ──────────────────────────────────────────────────────────────────
@@ -213,63 +216,75 @@ class TestStateCounts:
 # ── ETA ─────────────────────────────────────────────────────────────────────
 
 class TestETA:
-    def test_eta_from_remaining_bytes_and_speed(self):
-        a = _agg(["a"])
-        # 100 bytes total, 20 done, 40 B/s => remaining 80 / 40 = 2s
-        a.update("a", downloaded_bytes=20, total_bytes=100, speed_bps=40.0)
-        snap = a.snapshot()
-        assert snap.eta_seconds == pytest.approx(2.0, abs=1e-6)
-        assert snap.eta_is_estimate is False  # only remaining job is known-size
+    """The ETA extrapolates measured throughput. See test_batch_eta_model.py
+    for the estimator's own exhaustive coverage; these are the contract-level
+    properties every consumer relies on."""
+
+    def test_eta_from_measured_completion_rate(self):
+        clock = FakeClock()
+        a = _agg([f"k{i}" for i in range(10)], clock=clock)
+        # Two completions, 10s apart, anchored at batch start => 10s per track.
+        clock.advance(10.0)
+        a.complete("k0")
+        clock.advance(10.0)
+        a.complete("k1")
+        # 8 outstanding × 10s, minus 0s elapsed into the current cycle.
+        assert a.snapshot().eta_seconds == pytest.approx(80.0, abs=1e-6)
 
     def test_eta_is_not_the_latest_per_track_eta(self):
-        a = _agg(["a", "b"])
-        # Two active jobs; the last one to report has a tiny per-track ETA,
-        # but the batch has lots of bytes left => batch ETA must be larger.
-        a.update("a", downloaded_bytes=0,   total_bytes=1_000_000, speed_bps=1000.0, eta_seconds=1000.0)
-        a.update("b", downloaded_bytes=999, total_bytes=1_000,     speed_bps=1000.0, eta_seconds=1.0)
+        clock = FakeClock()
+        a = _agg([f"k{i}" for i in range(40)], clock=clock)
+        clock.advance(10.0)
+        a.complete("k0")
+        clock.advance(10.0)
+        a.complete("k1")
+        # A track reports a 1-second per-track ETA of its own. The batch still
+        # has 38 tracks to get through and must say so.
+        a.update("k2", downloaded_bytes=999, total_bytes=1000,
+                 speed_bps=1000.0, eta_seconds=1.0)
         snap = a.snapshot()
-        # remaining ≈ 1_000_000 + 1 bytes over 2000 B/s ≈ 500s — not 1s.
+        assert snap.eta_seconds is not None
         assert snap.eta_seconds > 100.0
 
     def test_eta_calculating_when_no_data(self):
         a = _agg(["a", "b"])   # queued, nothing known
         assert a.snapshot().eta_seconds is None
 
-    def test_eta_estimate_flag_when_unknown_sizes_present(self):
-        a = _agg(["a", "b"])
-        a.update("a", downloaded_bytes=50, total_bytes=100, speed_bps=50.0)
-        a.update("b", fraction=0.0, speed_bps=50.0)   # unknown size
+    def test_eta_is_always_flagged_an_estimate(self):
+        clock = FakeClock()
+        a = _agg(["a", "b", "c"], clock=clock)
+        clock.advance(5.0)
+        a.complete("a")
+        clock.advance(5.0)
+        a.complete("b")
         snap = a.snapshot()
         assert snap.eta_seconds is not None
+        # Extrapolating a measured rate is never more than a projection, even
+        # when every remaining byte total happens to be known.
         assert snap.eta_is_estimate is True
 
     def test_eta_never_negative(self):
-        a = _agg(["a"])
-        a.update("a", downloaded_bytes=150, total_bytes=100, speed_bps=10.0)
-        assert a.snapshot().eta_seconds >= 0.0
-
-    def test_eta_duration_fallback_between_conservative_jobs(self):
         clock = FakeClock()
         a = _agg(["a", "b"], clock=clock)
-        # a runs 10s then completes; b is queued with no bytes and speed 0
-        a.update("a", fraction=0.5, speed_bps=100.0)
         clock.advance(10.0)
         a.complete("a")
-        # speed now 0 (cooldown), b still queued — duration history kicks in
-        snap = a.snapshot()
-        assert snap.eta_seconds is not None
-        assert snap.eta_is_estimate is True
+        clock.advance(10.0)
+        a.complete("b")
+        eta = a.snapshot().eta_seconds
+        assert eta is None or eta >= 0.0
 
-    def test_eta_includes_configured_start_stagger_for_unsubmitted_jobs(self):
-        a = BatchProgressAggregator(speed_smoothing=1.0)
-        a.reset(["a", "b", "c"], stagger_delay_range=(2.0, 4.0))
-        a.mark_submitted("a")
-        a.update("a", downloaded_bytes=50, total_bytes=100, speed_bps=50.0)
+    def test_eta_survives_a_cooldown_with_no_active_job(self):
+        clock = FakeClock()
+        a = _agg(["a", "b", "c"], clock=clock)
+        clock.advance(10.0)
+        a.complete("a")
+        clock.advance(10.0)
+        a.complete("b")
+        # Conservative-mode cooldown: nothing active, aggregate speed is zero.
+        clock.advance(5.0)
         snap = a.snapshot()
-        # Network ETA: (50 + 100 + 100) / 50 = 5s.
-        # Start-stagger ETA: b and c are not submitted yet, avg 3s each = 6s.
-        assert snap.eta_seconds == pytest.approx(11.0, abs=1e-6)
-        assert snap.eta_is_estimate is True
+        assert snap.speed_bps == 0.0
+        assert snap.eta_seconds is not None
 
 
 # ── Cancellation / pause preserve progress ──────────────────────────────────
