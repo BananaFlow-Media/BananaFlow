@@ -141,10 +141,20 @@ class TestParallelBurstArrivals:
     """
 
     @staticmethod
-    def _burst_batch(total=59, waves=2, workers=3, wave_s=10.0):
+    def _burst_batch(total=59, waves=3, workers=3, wave_s=10.0):
+        """`workers` jobs transfer concurrently, then finish together.
+
+        The jobs are marked active before they complete, as a real parallel
+        batch does. That is what tells the aggregator the batch runs three at a
+        time rather than one, which in turn tells it that the opening three
+        completions are the pipeline filling up rather than three cycles of
+        steady-state throughput.
+        """
         a, clock = _agg(_keys(total))
         done = 0
         for _ in range(waves):
+            for w in range(workers):
+                a.update(f"k{done + w}", fraction=0.5, speed_bps=1000.0)
             clock.advance(wave_s)
             for _ in range(workers):
                 a.complete(f"k{done}")
@@ -163,6 +173,24 @@ class TestParallelBurstArrivals:
         assert eta > 100.0
         assert eta == pytest.approx((59 - done) * (10.0 / 3.0), abs=1e-6)
 
+    def test_startup_before_the_first_wave_is_not_charged_per_track(self):
+        """A slow opening - plugin warm-up, the first match, the first extractor
+        call - must not be divided across the tracks that follow it."""
+        a, clock = _agg(_keys(30))
+        for w in range(3):
+            a.update(f"k{w}", fraction=0.5, speed_bps=1000.0)
+        clock.advance(40.0)                 # 30s of one-off startup + 10s of work
+        for i in range(3):
+            a.complete(f"k{i}")
+        for wave in range(1, 3):
+            for w in range(3):
+                a.update(f"k{wave * 3 + w}", fraction=0.5, speed_bps=1000.0)
+            clock.advance(10.0)
+            for i in range(wave * 3, wave * 3 + 3):
+                a.complete(f"k{i}")
+        # Steady state is 3 tracks per 10s. The 30s of startup must be excluded.
+        assert a._throughput_cycle_locked() == pytest.approx(10.0 / 3.0, abs=1e-6)
+
     def test_eta_is_not_inflated_by_the_worker_count(self):
         """Aggregate throughput, not one worker's service time: 53 tracks at
         3-per-10s is ~177s, not 53 × 10s."""
@@ -170,16 +198,40 @@ class TestParallelBurstArrivals:
         eta = a.snapshot().eta_seconds
         assert eta < (59 - done) * 10.0 / 2.0
 
-    def test_warm_up_is_satisfied_by_a_single_simultaneous_burst(self):
-        """Three completions landing on the same instant are three completions,
-        not zero intervals — the rule counts completions."""
+    def test_a_parallel_batch_waits_for_a_second_wave(self):
+        """The opening wave of a parallel batch is the pipeline filling up, not
+        a measurement of it: the time before it contains everything the batch
+        pays once, and it produced `workers` completions rather than one. So a
+        three-worker batch needs two waves before it can quote a rate, where a
+        serialized one needs two completions. Deliberately slower, and honest -
+        measuring the first wave alone charges a whole service time to each of
+        three completions and trebles the estimate."""
         a, clock = _agg(_keys(20))
+        for w in range(3):
+            a.update(f"k{w}", fraction=0.5, speed_bps=1000.0)
         clock.advance(10.0)
         for i in range(3):
             a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is None       # one wave proves nothing
+
+        for w in range(3, 6):
+            a.update(f"k{w}", fraction=0.5, speed_bps=1000.0)
+        clock.advance(10.0)
+        for i in range(3, 6):
+            a.complete(f"k{i}")
         snap = a.snapshot()
         assert snap.eta_seconds is not None
-        assert snap.eta_seconds == pytest.approx(17 * (10.0 / 3.0), abs=1e-6)
+        assert snap.eta_seconds == pytest.approx(14 * (10.0 / 3.0), abs=1e-6)
+
+    def test_a_serialized_batch_still_quotes_after_two_completions(self):
+        """One job in flight means the first completion ends the startup, so
+        the second one already measures steady state."""
+        a, clock = _agg(_keys(20))
+        for i in range(2):
+            a.update(f"k{i}", fraction=0.5, speed_bps=1000.0)
+            clock.advance(10.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is not None
 
 
 class TestGateWaitIsNotMultiplied:

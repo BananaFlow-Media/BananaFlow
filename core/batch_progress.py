@@ -43,6 +43,17 @@ batch actually achieved — three workers finishing a job each per 10 s
 yield a 3.33 s cycle, a serialized gate yields ~10 s — so one formula
 covers both regimes with no worker-count term anywhere.
 
+The anchor is an observed completion, never the batch's start.  Everything
+a batch pays once — plugin warm-up, the first Spotify match, the first
+extractor call, the opening stagger — lands inside the interval before the
+first completion.  Anchoring at batch start divides that one-off cost
+across however few completions have happened, which on a real 18-track
+batch opened the estimate at roughly double the truth and then visibly
+collapsed as the window rolled past it.  How many opening completions
+belong to that startup depends on how many jobs the batch actually runs at
+once (``_peak_active``): one under the conservative gate, ``w`` in
+parallel.  Those are skipped and whole waves are measured from there.
+
 Three estimators were tried and rejected before this one:
 
 * *remaining_bytes / aggregate_speed + modelled overhead*.  Divided
@@ -305,6 +316,14 @@ class BatchProgressAggregator:
         self._batch_start: float = self._time()
         self._completion_times: List[float] = []
         self._window_anchor: float = self._batch_start
+        self._window_full: bool = False
+        # Highest number of jobs seen transferring at once. This is the batch's
+        # real concurrency, not its configured limit: the conservative YouTube
+        # gate holds every job but one at the gate rather than in ACTIVE, so a
+        # serialized batch measures 1 even with max_workers=3. It decides how
+        # many opening completions count as the pipeline filling up rather than
+        # as steady-state throughput - see _throughput_cycle_locked.
+        self._peak_active: int = 0
         self._last_cycle: Optional[float] = None
         self._last_cycle_at: Optional[float] = None
 
@@ -344,6 +363,8 @@ class BatchProgressAggregator:
             self._batch_start = self._time()
             self._completion_times = []
             self._window_anchor = self._batch_start
+            self._window_full = False
+            self._peak_active = 0
             self._last_cycle = None
             self._last_cycle_at = None
             if keys:
@@ -453,6 +474,7 @@ class BatchProgressAggregator:
         """
         self._completion_times.append(self._time())
         while len(self._completion_times) > _THROUGHPUT_WINDOW:
+            self._window_full = True
             # The evicted completion becomes the window's new anchor, so the
             # span stays a real elapsed measurement rather than silently losing
             # the time that produced the completions still in the window.
@@ -603,6 +625,9 @@ class BatchProgressAggregator:
         This is a display metric only — the ETA is derived from measured
         throughput and does not consult it.
         """
+        active = sum(1 for j in self._jobs.values() if j.state == JobState.ACTIVE)
+        if active > self._peak_active:
+            self._peak_active = active
         raw = sum(j.speed_bps for j in self._jobs.values() if j.state == JobState.ACTIVE)
         now = self._time()
         # speed_smoothing=1.0 is the documented "no smoothing" setting used by
@@ -733,15 +758,46 @@ class BatchProgressAggregator:
         span by the 6 completions in it gives 3.33 s — the batch's real
         wall-time cost per track, parallelism already baked in.
         """
-        n = len(self._completion_times)
-        if n < _MIN_COMPLETIONS_FOR_ETA:
+        times = self._completion_times
+        if len(times) < _MIN_COMPLETIONS_FOR_ETA:
             return None
 
         now = self._time()
-        anchor = self._window_anchor
-        t_last = self._completion_times[-1]
+        t_last = times[-1]
 
-        span = t_last - anchor
+        if self._window_full:
+            # Past the first window, the anchor is itself a completion that
+            # aged out, so the batch's opening costs are already behind it.
+            anchor, n, span_end = self._window_anchor, len(times), t_last
+        else:
+            # Still measuring the batch's first completions, which is where a
+            # naive anchor at batch start goes wrong: everything paid once at
+            # the beginning — plugin warm-up, the first Spotify match, the
+            # first extractor call, the opening stagger — lands inside the very
+            # first interval and then gets divided across only two or three
+            # completions. On a real 18-track batch that opened the estimate at
+            # roughly double the truth, and it only healed later as the window
+            # rolled past the startup.
+            #
+            # So anchor on an observed completion instead of on batch start.
+            # Which one depends on how many jobs the batch actually runs at
+            # once: with the conservative gate serializing YouTube there is one
+            # in flight, so the first completion ends the startup; with w
+            # running in parallel the first w completions are the startup wave
+            # and the pipeline is only full after them. Counting whole waves
+            # from there keeps the measurement honest either way — a partial
+            # wave would charge one worker's whole service time to a single
+            # completion and treble the estimate.
+            w = max(1, self._peak_active)
+            after = len(times) - w
+            waves = after // w
+            if waves < 1:
+                return None
+            n = waves * w
+            anchor = times[w - 1]
+            span_end = times[w + n - 1]
+
+        span = span_end - anchor
         if span <= 0.0:
             # Every retained completion landed on the same instant — a burst
             # finer than the clock's resolution, or an injected test clock that
