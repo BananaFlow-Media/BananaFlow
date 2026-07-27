@@ -19,17 +19,21 @@ Design
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from utils.security import restrict_path_permissions
+
+logger = logging.getLogger(__name__)
 
 CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
@@ -49,6 +53,106 @@ _JS_RUNTIME_EXE_NAMES = {
 }
 
 _NODE_MIN_MAJOR_VERSION = 22
+
+_POT_FAILURE_THRESHOLD = 2
+_pot_circuit_lock = threading.Lock()
+_pot_failure_count = 0
+_pot_circuit_open = False
+_bgutil_stderr_capture_installed = False
+
+
+def reset_po_token_provider_circuit() -> None:
+    """Re-enable the optional provider for a newly started batch."""
+    global _pot_failure_count, _pot_circuit_open
+    with _pot_circuit_lock:
+        _pot_failure_count = 0
+        _pot_circuit_open = False
+
+
+def po_token_provider_circuit_open() -> bool:
+    with _pot_circuit_lock:
+        return _pot_circuit_open
+
+
+def note_po_token_provider_failure(message: str) -> bool:
+    """Open a per-batch circuit after repeated provider failures.
+
+    The provider is optional: once it has demonstrably failed twice, later
+    yt-dlp instances omit BananaFlow's provider configuration and immediately
+    use yt-dlp's normal fallback path.  The return value tells a caller whether
+    this observation opened the circuit.
+    """
+    global _pot_failure_count, _pot_circuit_open
+    lower = (message or "").lower()
+    if not any(token in lower for token in (
+        "potokenprovidererror",
+        "failed while generating pot",
+        "failed to generate an integrity token",
+        "unable to fetch gvs po token",
+        "po_token_missing",
+    )):
+        return False
+    with _pot_circuit_lock:
+        if _pot_circuit_open:
+            return False
+        _pot_failure_count += 1
+        if _pot_failure_count < _POT_FAILURE_THRESHOLD:
+            return False
+        _pot_circuit_open = True
+    logger.warning(
+        "[yt-dlp][po_token] bgutil provider failed %d times; disabling it for the rest of this batch",
+        _POT_FAILURE_THRESHOLD,
+    )
+    return True
+
+
+def _is_bgutil_script_command(command: object) -> bool:
+    if not isinstance(command, (list, tuple)):
+        return False
+    return any(
+        str(part).endswith(("generate_once.ts", "generate_once.js"))
+        for part in command
+    )
+
+
+def install_bgutil_stderr_capture() -> None:
+    """Capture bgutil child stderr instead of letting it flood the console.
+
+    The third-party provider invokes ``yt_dlp.utils.Popen.run`` without a
+    ``stderr`` argument, which inherits the app console.  Wrap only the two
+    bgutil script commands; all other yt-dlp subprocesses retain their exact
+    upstream behaviour.  Details stay in debug logging and provider failures
+    feed the batch circuit breaker.
+    """
+    global _bgutil_stderr_capture_installed
+    with _pot_circuit_lock:
+        if _bgutil_stderr_capture_installed:
+            return
+        try:
+            from yt_dlp.utils import Popen
+        except Exception:
+            return
+        original_run = Popen.run
+
+        def capturing_run(command, *args, **kwargs):
+            if not _is_bgutil_script_command(command):
+                return original_run(command, *args, **kwargs)
+            kwargs.setdefault("stderr", subprocess.PIPE)
+            stdout, stderr, returncode = original_run(command, *args, **kwargs)
+            failure_message = ""
+            if stderr:
+                text = str(stderr).strip()
+                if text:
+                    logger.debug("[yt-dlp][po_token][bgutil stderr] %s", text)
+                    failure_message = text
+            if returncode and not failure_message:
+                failure_message = "PoTokenProviderError"
+            if failure_message:
+                note_po_token_provider_failure(failure_message)
+            return stdout, stderr, returncode
+
+        Popen.run = staticmethod(capturing_run)
+        _bgutil_stderr_capture_installed = True
 
 _CHROMIUM_LOCAL_STATE_PATHS = {
     "chrome": {
@@ -165,6 +269,7 @@ def build_base_ydl_opts(
     retries:              int            = 10,
     socket_timeout:       int            = 20,
     proxy:                Optional[str]  = None,
+    enable_po_token_provider: bool       = True,
 ) -> dict[str, Any]:
     """
     Return a base yt-dlp options dict with BananaFlow's standard network,
@@ -190,9 +295,11 @@ def build_base_ydl_opts(
     }
 
     # ── Logger (optional) ─────────────────────────────────────────────────────
-    bundled_provider_args = _detect_bundled_pot_provider_args()
-    if bundled_provider_args:
-        opts["extractor_args"] = bundled_provider_args
+    if enable_po_token_provider and not po_token_provider_circuit_open():
+        bundled_provider_args = _detect_bundled_pot_provider_args()
+        if bundled_provider_args:
+            install_bgutil_stderr_capture()
+            opts["extractor_args"] = bundled_provider_args
 
     if logger is not None:
         opts["logger"] = logger
