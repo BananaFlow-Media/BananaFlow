@@ -278,7 +278,11 @@ def find_best_youtube_match(
             quiet=True,
             retries=1,
             socket_timeout=8,
-            enable_po_token_provider=False,
+            # Preserve main's established deep-search behaviour exactly.  The
+            # circuit breaker protects downloads, but omitting the provider
+            # here changes YouTube search results and therefore match choices.
+            # stderr is still captured and repeated diagnostics are coalesced.
+            respect_po_token_circuit=False,
         )
         opts.update({
             "extract_flat": False,
