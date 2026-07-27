@@ -19,17 +19,22 @@ Design
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from utils.security import restrict_path_permissions
+
+logger = logging.getLogger(__name__)
 
 CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
@@ -49,6 +54,184 @@ _JS_RUNTIME_EXE_NAMES = {
 }
 
 _NODE_MIN_MAJOR_VERSION = 22
+
+_POT_FAILURE_THRESHOLD = 2
+_POT_CIRCUIT_COOLDOWN_SECONDS = 300.0
+_pot_circuit_lock = threading.Lock()
+_pot_failure_count = 0
+_pot_circuit_open_until = 0.0
+_pot_attempts_total = 0
+_pot_diagnostic_messages = 0
+_pot_first_diagnostic_logged = False
+_bgutil_stderr_capture_installed = False
+_cookie_diagnostic_messages = 0
+
+
+def reset_po_token_provider_circuit() -> None:
+    """Reset process-wide PO-token telemetry (test/support hook only)."""
+    global _pot_failure_count, _pot_circuit_open_until
+    global _pot_attempts_total, _pot_diagnostic_messages, _pot_first_diagnostic_logged
+    global _cookie_diagnostic_messages
+    with _pot_circuit_lock:
+        _pot_failure_count = 0
+        _pot_circuit_open_until = 0.0
+        _pot_attempts_total = 0
+        _pot_diagnostic_messages = 0
+        _pot_first_diagnostic_logged = False
+        _cookie_diagnostic_messages = 0
+
+
+def _circuit_open_locked(now: float) -> bool:
+    global _pot_failure_count, _pot_circuit_open_until
+    if _pot_circuit_open_until and now >= _pot_circuit_open_until:
+        _pot_failure_count = 0
+        _pot_circuit_open_until = 0.0
+    return _pot_circuit_open_until > now
+
+
+def po_token_provider_circuit_open() -> bool:
+    with _pot_circuit_lock:
+        return _circuit_open_locked(time.monotonic())
+
+
+def note_po_token_provider_attempt_failure() -> bool:
+    """Record one failed bgutil process invocation and maybe open its breaker.
+
+    This is deliberately the sole authoritative failure counter. yt-dlp can
+    rephrase one subprocess failure as several warnings/errors, so those
+    messages are diagnostic evidence only and must not spend attempt budget.
+    The breaker is process-wide with a cooldown: concurrent batches cannot
+    reset or accidentally re-enable a provider that has just failed.
+    """
+    global _pot_failure_count, _pot_circuit_open_until, _pot_attempts_total
+    now = time.monotonic()
+    with _pot_circuit_lock:
+        if _circuit_open_locked(now):
+            return False
+        _pot_failure_count += 1
+        _pot_attempts_total += 1
+        if _pot_failure_count < _POT_FAILURE_THRESHOLD:
+            return False
+        _pot_circuit_open_until = now + _POT_CIRCUIT_COOLDOWN_SECONDS
+    logger.warning(
+        "[yt-dlp][po_token] bgutil provider failed %d actual process attempts; disabling it for %.0fs",
+        _POT_FAILURE_THRESHOLD, _POT_CIRCUIT_COOLDOWN_SECONDS,
+    )
+    return True
+
+
+def note_po_token_provider_failure(message: str) -> bool:
+    """Compatibility wrapper for explicit callers that observed an attempt."""
+    lower = (message or "").lower()
+    if not any(token in lower for token in (
+        "potokenprovidererror", "failed while generating pot",
+        "failed to generate an integrity token", "unable to fetch gvs po token",
+        "po_token_missing",
+    )):
+        return False
+    return note_po_token_provider_attempt_failure()
+
+
+def note_po_token_provider_diagnostic(message: str) -> bool:
+    """Count a yt-dlp PO-token message; return True only for the first one."""
+    global _pot_diagnostic_messages, _pot_first_diagnostic_logged
+    lower = (message or "").lower()
+    if not any(token in lower for token in (
+        "potokenprovidererror", "failed while generating pot",
+        "failed to generate an integrity token", "unable to fetch gvs po token",
+        "po_token_missing", "po token",
+    )):
+        return False
+    with _pot_circuit_lock:
+        _pot_diagnostic_messages += 1
+        first = not _pot_first_diagnostic_logged
+        _pot_first_diagnostic_logged = True
+        return first
+
+
+def po_token_provider_metrics() -> dict[str, object]:
+    """A monotonic telemetry snapshot for batch summaries and diagnostics."""
+    with _pot_circuit_lock:
+        now = time.monotonic()
+        return {
+            "attempts": _pot_attempts_total,
+            "diagnostics": _pot_diagnostic_messages,
+            "circuit_open": _circuit_open_locked(now),
+            "cooldown_remaining": max(0.0, _pot_circuit_open_until - now),
+        }
+
+
+def note_cookie_diagnostic(message: str) -> bool:
+    """Record an expired/invalid-cookie diagnostic without echoing its prose.
+
+    yt-dlp can emit this once per request and the preflight validator can emit
+    the same result once per job.  The batch owner reports one actionable
+    summary at completion; detailed copies remain available only at debug.
+    Returns whether *message* belongs to this coalesced category.
+    """
+    global _cookie_diagnostic_messages
+    if not re.search(
+        r"cookies?.*(no longer valid|expired|invalid)|"
+        r"could not copy .*cookie database|failed to decrypt with dpapi",
+        message or "",
+        re.I,
+    ):
+        return False
+    with _pot_circuit_lock:
+        _cookie_diagnostic_messages += 1
+    return True
+
+
+def cookie_diagnostic_metrics() -> dict[str, int]:
+    """Return a monotonic count for batch-scoped cookie-warning summaries."""
+    with _pot_circuit_lock:
+        return {"diagnostics": _cookie_diagnostic_messages}
+
+
+def _is_bgutil_script_command(command: object) -> bool:
+    if not isinstance(command, (list, tuple)):
+        return False
+    return any(
+        str(part).endswith(("generate_once.ts", "generate_once.js"))
+        for part in command
+    )
+
+
+def install_bgutil_stderr_capture() -> None:
+    """Capture bgutil child stderr instead of letting it flood the console.
+
+    The third-party provider invokes ``yt_dlp.utils.Popen.run`` without a
+    ``stderr`` argument, which inherits the app console.  Wrap only the two
+    bgutil script commands; all other yt-dlp subprocesses retain their exact
+    upstream behaviour. Details stay in debug logging. A non-zero bgutil
+    process exit is the one authoritative circuit-breaker event; yt-dlp's
+    related messages are merely coalesced diagnostics.
+    """
+    global _bgutil_stderr_capture_installed
+    with _pot_circuit_lock:
+        if _bgutil_stderr_capture_installed:
+            return
+        try:
+            from yt_dlp.utils import Popen
+        except Exception:
+            return
+        original_run = Popen.run
+
+        def capturing_run(command, *args, **kwargs):
+            if not _is_bgutil_script_command(command):
+                return original_run(command, *args, **kwargs)
+            kwargs.setdefault("stderr", subprocess.PIPE)
+            stdout, stderr, returncode = original_run(command, *args, **kwargs)
+            if stderr:
+                text = str(stderr).strip()
+                if text:
+                    logger.debug("[yt-dlp][po_token][bgutil stderr] %s", text)
+            if returncode:
+                note_po_token_provider_attempt_failure()
+            return stdout, stderr, returncode
+
+        Popen.run = staticmethod(capturing_run)
+        _bgutil_stderr_capture_installed = True
 
 _CHROMIUM_LOCAL_STATE_PATHS = {
     "chrome": {
@@ -165,6 +348,8 @@ def build_base_ydl_opts(
     retries:              int            = 10,
     socket_timeout:       int            = 20,
     proxy:                Optional[str]  = None,
+    enable_po_token_provider: bool       = True,
+    respect_po_token_circuit: bool       = True,
 ) -> dict[str, Any]:
     """
     Return a base yt-dlp options dict with BananaFlow's standard network,
@@ -190,9 +375,14 @@ def build_base_ydl_opts(
     }
 
     # ── Logger (optional) ─────────────────────────────────────────────────────
-    bundled_provider_args = _detect_bundled_pot_provider_args()
-    if bundled_provider_args:
-        opts["extractor_args"] = bundled_provider_args
+    circuit_allows_provider = (
+        not respect_po_token_circuit or not po_token_provider_circuit_open()
+    )
+    if enable_po_token_provider and circuit_allows_provider:
+        bundled_provider_args = _detect_bundled_pot_provider_args()
+        if bundled_provider_args:
+            install_bgutil_stderr_capture()
+            opts["extractor_args"] = bundled_provider_args
 
     if logger is not None:
         opts["logger"] = logger

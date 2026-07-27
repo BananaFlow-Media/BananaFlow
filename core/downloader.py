@@ -71,7 +71,35 @@ class SilentLogger:
     def info(self, msg: str) -> None:
         pass
 
+    @staticmethod
+    def _is_po_token_diagnostic(msg: str) -> bool:
+        lower = (msg or "").lower()
+        return any(token in lower for token in (
+            "potokenprovidererror", "failed while generating pot",
+            "failed to generate an integrity token", "unable to fetch gvs po token",
+            "po_token_missing", "po token",
+        ))
+
+    @staticmethod
+    def _is_cookie_diagnostic(msg: str) -> bool:
+        return classify_warning(msg) == "cookies_expired_or_invalid"
+
     def warning(self, msg: str) -> None:
+        from utils.yt_dlp_opts import note_po_token_provider_diagnostic
+        if self._is_po_token_diagnostic(msg):
+            if note_po_token_provider_diagnostic(msg):
+                logger.warning(
+                    "[yt-dlp][po_token] provider-related warning observed; "
+                    "further related messages will be summarized: %s", msg,
+                )
+            else:
+                logger.debug("[yt-dlp][po_token] coalesced provider diagnostic: %s", msg)
+            return
+        if self._is_cookie_diagnostic(msg):
+            from utils.yt_dlp_opts import note_cookie_diagnostic
+            note_cookie_diagnostic(msg)
+            logger.debug("[yt-dlp][cookies] coalesced invalid-cookie diagnostic: %s", msg)
+            return
         # Filter technical noise that clutters the console
         if any(x in msg for x in [
             "Signature solving failed",
@@ -97,6 +125,21 @@ class SilentLogger:
             logger.warning(f"[yt-dlp] {msg}")
 
     def error(self, msg: str) -> None:
+        from utils.yt_dlp_opts import note_po_token_provider_diagnostic
+        if self._is_po_token_diagnostic(msg):
+            if note_po_token_provider_diagnostic(msg):
+                logger.error(
+                    "[yt-dlp][po_token] provider-related error observed; "
+                    "further related messages will be summarized: %s", msg,
+                )
+            else:
+                logger.debug("[yt-dlp][po_token] coalesced provider diagnostic: %s", msg)
+            return
+        if self._is_cookie_diagnostic(msg):
+            from utils.yt_dlp_opts import note_cookie_diagnostic
+            note_cookie_diagnostic(msg)
+            logger.debug("[yt-dlp][cookies] coalesced invalid-cookie diagnostic: %s", msg)
+            return
         # Filter some redundancy in error messages
         if "Signature solving failed" in msg and "EJS" in msg:
             return
@@ -1112,7 +1155,9 @@ class DownloadEngine:
         if cookies_file:
             valid, warn_msg = check_cookies_valid(cookies_file)
             if not valid:
-                logger.warning("[Downloader] %s", warn_msg)
+                from utils.yt_dlp_opts import note_cookie_diagnostic
+                note_cookie_diagnostic(warn_msg)
+                logger.debug("[Downloader][cookies] preflight diagnostic coalesced: %s", warn_msg)
 
         opts: dict[str, Any] = _build_base_opts(
             cookies_file=cookies_file or None,

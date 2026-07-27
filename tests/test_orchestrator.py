@@ -107,6 +107,19 @@ def _make_job(key: str, url: str) -> tuple[str, DownloadRequest]:
 
 class TestDownloadOrchestrator:
 
+    def test_warms_plugins_before_starting_workers(self, monkeypatch):
+        from core import download_orchestrator
+        from core.download_orchestrator import DownloadOrchestrator
+
+        warmed = []
+        monkeypatch.setattr(download_orchestrator, "_warm_up_yt_dlp_plugins", lambda: warmed.append(True))
+        result = DownloadOrchestrator(FakeEngine(), FakeCallbacks(), max_workers=1).run_batch([
+            _make_job("a", "http://a"),
+        ])
+
+        assert result.completed == 1
+        assert warmed == [True]
+
     def test_successful_batch(self):
         from core.download_orchestrator import DownloadOrchestrator
         engine = FakeEngine()

@@ -59,6 +59,15 @@ from utils.paths import make_batch_workspace, remove_workspace_tree
 logger = logging.getLogger(__name__)
 
 
+def _warm_up_yt_dlp_plugins() -> None:
+    """Load yt-dlp plugins once before worker pools can race their registry."""
+    try:
+        from core.runtime_components import warm_up_plugins
+        warm_up_plugins()
+    except Exception as exc:  # noqa: BLE001 - optional provider must never block a batch
+        logger.debug("[Orchestrator] yt-dlp plugin warm-up failed: %s", exc)
+
+
 _SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 # How often the batch publishes whole-batch progress. The heartbeat is the only
@@ -442,6 +451,14 @@ class DownloadOrchestrator:
         preexisting = preexisting or []
         total_jobs = len(jobs) + len(preexisting)
 
+        # The optional bgutil provider owns a process-wide cooldown, so a
+        # concurrent resume cannot re-enable a provider a main batch just
+        # proved unhealthy. Keep a monotonic snapshot only for this batch's
+        # end-of-run summary; never reset the shared breaker here.
+        from utils.yt_dlp_opts import cookie_diagnostic_metrics, po_token_provider_metrics
+        po_metrics_start = po_token_provider_metrics()
+        cookie_metrics_start = cookie_diagnostic_metrics()
+
         if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
             logger.debug("[Orchestrator] Empty batch — skipping")
@@ -453,6 +470,12 @@ class DownloadOrchestrator:
                 total=0, completed=0, failed=0, cancelled=False,
                 outcome=BatchOutcome.COMPLETED,
             )
+
+        # This path also serves CLI/headless callers that never ran Spotify
+        # prefetch.  It must happen before either executor is created: yt-dlp
+        # lazily re-executes plugins while loading and concurrent first use can
+        # otherwise print duplicate-provider tracebacks directly to stderr.
+        _warm_up_yt_dlp_plugins()
 
         all_keys = [key for key, _ in jobs] + [key for key, _ in preexisting]
 
@@ -871,6 +894,34 @@ class DownloadOrchestrator:
             self._total, self._completed, self._failed, was_cancelled, outcome.value,
         )
         self._log_phase_summary(time.monotonic() - run_start)
+
+        po_metrics_end = po_token_provider_metrics()
+        cookie_metrics_end = cookie_diagnostic_metrics()
+        attempts = int(po_metrics_end["attempts"]) - int(po_metrics_start["attempts"])
+        diagnostics = int(po_metrics_end["diagnostics"]) - int(po_metrics_start["diagnostics"])
+        if attempts or diagnostics:
+            logger.warning(
+                "[yt-dlp][po_token] batch summary: %d provider process failure(s), "
+                "%d related yt-dlp message(s) coalesced%s",
+                attempts,
+                diagnostics,
+                (
+                    "; provider remains disabled for %.0fs"
+                    % float(po_metrics_end["cooldown_remaining"])
+                    if po_metrics_end["circuit_open"] else ""
+                ),
+            )
+
+        cookie_diagnostics = (
+            int(cookie_metrics_end["diagnostics"])
+            - int(cookie_metrics_start["diagnostics"])
+        )
+        if cookie_diagnostics:
+            logger.warning(
+                "[yt-dlp][cookies] batch summary: %d expired/invalid-cookie "
+                "message(s) coalesced; refresh the browser session before retrying.",
+                cookie_diagnostics,
+            )
 
         return BatchResult(
             total=self._total,
@@ -1510,7 +1561,14 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_error", key, err)
             self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
             self._safe_cb("on_job_count_changed", self._completed + self._failed, self._total) # treat failed as 'done' for progress count
-            logger.warning("[Orchestrator] Track error: %s — %s", key, p.error_message)
+            from utils.yt_dlp_opts import note_cookie_diagnostic
+            if note_cookie_diagnostic(p.error_message or ""):
+                logger.debug(
+                    "[Orchestrator][cookies] coalesced cookie-auth track error: %s",
+                    key,
+                )
+            else:
+                logger.warning("[Orchestrator] Track error: %s — %s", key, p.error_message)
 
         req.on_progress = on_progress
         req.on_finished = on_finished

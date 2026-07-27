@@ -104,3 +104,115 @@ class TestBundledPotProviderArgs:
         opts = yt_dlp_opts.build_base_ydl_opts()
 
         assert "extractor_args" not in opts
+
+    def test_metadata_search_can_explicitly_skip_the_provider(self, monkeypatch):
+        monkeypatch.setattr(
+            yt_dlp_opts,
+            "_detect_bundled_pot_provider_args",
+            lambda: (_ for _ in ()).throw(AssertionError("provider must not be probed")),
+        )
+
+        opts = yt_dlp_opts.build_base_ydl_opts(enable_po_token_provider=False)
+
+        assert "extractor_args" not in opts
+
+
+class TestPoTokenCircuitBreaker:
+
+    def setup_method(self):
+        yt_dlp_opts.reset_po_token_provider_circuit()
+
+    def teardown_method(self):
+        yt_dlp_opts.reset_po_token_provider_circuit()
+
+    def test_opens_after_two_provider_failures(self):
+        assert not yt_dlp_opts.note_po_token_provider_attempt_failure()
+        assert not yt_dlp_opts.po_token_provider_circuit_open()
+        assert yt_dlp_opts.note_po_token_provider_attempt_failure()
+        assert yt_dlp_opts.po_token_provider_circuit_open()
+
+    def test_ignores_unrelated_ytdlp_errors(self):
+        assert not yt_dlp_opts.note_po_token_provider_failure("HTTP Error 403")
+        assert not yt_dlp_opts.po_token_provider_circuit_open()
+
+    def test_open_circuit_omits_provider_configuration(self, monkeypatch):
+        expected = {"youtubepot-bgutilscript": {"server_home": ["C:/provider"]}}
+        monkeypatch.setattr(yt_dlp_opts, "_detect_bundled_pot_provider_args", lambda: expected)
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+
+        opts = yt_dlp_opts.build_base_ydl_opts()
+
+        assert "extractor_args" not in opts
+
+    def test_matcher_can_preserve_provider_after_download_circuit_opens(self, monkeypatch):
+        expected = {"youtubepot-bgutilscript": {"server_home": ["C:/provider"]}}
+        monkeypatch.setattr(yt_dlp_opts, "_detect_bundled_pot_provider_args", lambda: expected)
+        monkeypatch.setattr(yt_dlp_opts, "install_bgutil_stderr_capture", lambda: None)
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+
+        opts = yt_dlp_opts.build_base_ydl_opts(respect_po_token_circuit=False)
+
+        assert opts["extractor_args"] == expected
+
+    def test_bgutil_stderr_is_captured_without_affecting_other_commands(self, monkeypatch):
+        from yt_dlp.utils import Popen
+
+        calls = []
+
+        def fake_run(command, *args, **kwargs):
+            calls.append((command, kwargs))
+            return "stdout", "Failed while generating POT", 1
+
+        monkeypatch.setattr(Popen, "run", staticmethod(fake_run))
+        monkeypatch.setattr(yt_dlp_opts, "_bgutil_stderr_capture_installed", False)
+        yt_dlp_opts.install_bgutil_stderr_capture()
+
+        Popen.run(["deno", "run", "generate_once.ts"])
+        Popen.run(["deno", "run", "generate_once.ts"])
+        Popen.run(["ffmpeg", "-version"])
+
+        assert calls[0][1]["stderr"] is yt_dlp_opts.subprocess.PIPE
+        assert calls[1][1]["stderr"] is yt_dlp_opts.subprocess.PIPE
+        assert "stderr" not in calls[2][1]
+        assert yt_dlp_opts.po_token_provider_circuit_open()
+
+    def test_diagnostics_do_not_spend_provider_attempt_budget(self):
+        yt_dlp_opts.note_po_token_provider_diagnostic("po_token_missing")
+        yt_dlp_opts.note_po_token_provider_diagnostic("PoTokenProviderError")
+
+        metrics = yt_dlp_opts.po_token_provider_metrics()
+        assert metrics["diagnostics"] == 2
+        assert metrics["attempts"] == 0
+        assert not metrics["circuit_open"]
+
+    def test_process_breaker_survives_a_new_orchestrator_batch(self, tmp_path):
+        from core.download_orchestrator import DownloadOrchestrator
+        from core.downloader import DownloadRequest, MediaType
+
+        class Engine:
+            def __init__(self):
+                import threading
+                self._cancel_event = threading.Event()
+
+            def cancel_all(self):
+                self._cancel_event.set()
+
+            def download(self, req):
+                req.on_finished(type("P", (), {
+                    "total_bytes": None, "downloaded_bytes": None,
+                    "total_bytes_estimate": None, "output_path": "",
+                    "warning_message": "",
+                })())
+
+        class Callbacks:
+            def __getattr__(self, _name):
+                return lambda *args, **kwargs: None
+
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+        req = DownloadRequest(url="https://example.com/a", output_dir=str(tmp_path), media_type=MediaType.AUDIO)
+        DownloadOrchestrator(Engine(), Callbacks(), max_workers=1).run_batch([("k", req)])
+
+        assert yt_dlp_opts.note_po_token_provider_attempt_failure()
+        assert yt_dlp_opts.po_token_provider_circuit_open()
