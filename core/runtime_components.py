@@ -63,7 +63,10 @@ Design
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import logging
 import os
 import sys
 import threading
@@ -73,6 +76,9 @@ from typing import Optional
 
 from utils.paths import get_app_data_dir, get_install_dir, is_frozen
 from utils.yt_dlp_opts import _JS_RUNTIME_EXE_NAMES, _JS_RUNTIMES_PREFERENCE
+
+
+logger = logging.getLogger(__name__)
 
 # yt-dlp's official executable-adjacent plugin folder name.
 _PLUGINS_FOLDER_NAME = "yt-dlp-plugins"
@@ -430,9 +436,23 @@ def warm_up_plugins() -> None:
     try:
         from yt_dlp import plugins as ytdlp_plugins
 
+        captured_stderr = io.StringIO()
         with _PLUGIN_REG_LOCK:
-            if not ytdlp_plugins.all_plugins_loaded.value:
-                ytdlp_plugins.load_all_plugins()
+            # Some third-party providers print import exceptions directly to
+            # stderr.  Keep them out of the normal console even if a damaged
+            # environment has already caused a duplicate registration; the
+            # warning below is one actionable summary and the details remain
+            # in debug logging.
+            with contextlib.redirect_stderr(captured_stderr):
+                if not ytdlp_plugins.all_plugins_loaded.value:
+                    ytdlp_plugins.load_all_plugins()
+        details = captured_stderr.getvalue().strip()
+        if details:
+            logger.warning(
+                "[yt-dlp][po_token] plugin warm-up emitted diagnostics; "
+                "details were captured for debug logging."
+            )
+            logger.debug("[yt-dlp][po_token][plugin warm-up stderr] %s", details)
     except Exception:
         pass
 

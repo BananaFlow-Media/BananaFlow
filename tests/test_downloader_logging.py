@@ -70,8 +70,24 @@ class TestSilentLoggerCriticalWarnings:
     def test_critical_warning_not_suppressed(self, caplog, message, category):
         caplog.set_level(logging.WARNING, logger="core.downloader")
         SilentLogger().warning(message)
-        assert message in caplog.text
-        assert category in caplog.text
+        if category == "cookies_expired_or_invalid":
+            from utils.yt_dlp_opts import cookie_diagnostic_metrics
+            assert caplog.text == ""
+            assert cookie_diagnostic_metrics()["diagnostics"] == 1
+        else:
+            assert message in caplog.text
+            assert category in caplog.text
+
+    def test_repeated_cookie_messages_are_coalesced(self, caplog):
+        from utils.yt_dlp_opts import cookie_diagnostic_metrics
+
+        caplog.set_level(logging.WARNING, logger="core.downloader")
+        logger = SilentLogger()
+        logger.warning("WARNING: YouTube account cookies are no longer valid")
+        logger.error("WARNING: YouTube account cookies are no longer valid")
+
+        assert caplog.text == ""
+        assert cookie_diagnostic_metrics()["diagnostics"] == 2
 
     def test_critical_error_not_suppressed(self, caplog):
         caplog.set_level(logging.ERROR, logger="core.downloader")

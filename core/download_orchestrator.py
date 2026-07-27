@@ -59,6 +59,15 @@ from utils.paths import make_batch_workspace, remove_workspace_tree
 logger = logging.getLogger(__name__)
 
 
+def _warm_up_yt_dlp_plugins() -> None:
+    """Load yt-dlp plugins once before worker pools can race their registry."""
+    try:
+        from core.runtime_components import warm_up_plugins
+        warm_up_plugins()
+    except Exception as exc:  # noqa: BLE001 - optional provider must never block a batch
+        logger.debug("[Orchestrator] yt-dlp plugin warm-up failed: %s", exc)
+
+
 _SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 # How often the batch publishes whole-batch progress. The heartbeat is the only
@@ -446,8 +455,9 @@ class DownloadOrchestrator:
         # concurrent resume cannot re-enable a provider a main batch just
         # proved unhealthy. Keep a monotonic snapshot only for this batch's
         # end-of-run summary; never reset the shared breaker here.
-        from utils.yt_dlp_opts import po_token_provider_metrics
+        from utils.yt_dlp_opts import cookie_diagnostic_metrics, po_token_provider_metrics
         po_metrics_start = po_token_provider_metrics()
+        cookie_metrics_start = cookie_diagnostic_metrics()
 
         if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
@@ -460,6 +470,12 @@ class DownloadOrchestrator:
                 total=0, completed=0, failed=0, cancelled=False,
                 outcome=BatchOutcome.COMPLETED,
             )
+
+        # This path also serves CLI/headless callers that never ran Spotify
+        # prefetch.  It must happen before either executor is created: yt-dlp
+        # lazily re-executes plugins while loading and concurrent first use can
+        # otherwise print duplicate-provider tracebacks directly to stderr.
+        _warm_up_yt_dlp_plugins()
 
         all_keys = [key for key, _ in jobs] + [key for key, _ in preexisting]
 
@@ -880,6 +896,7 @@ class DownloadOrchestrator:
         self._log_phase_summary(time.monotonic() - run_start)
 
         po_metrics_end = po_token_provider_metrics()
+        cookie_metrics_end = cookie_diagnostic_metrics()
         attempts = int(po_metrics_end["attempts"]) - int(po_metrics_start["attempts"])
         diagnostics = int(po_metrics_end["diagnostics"]) - int(po_metrics_start["diagnostics"])
         if attempts or diagnostics:
@@ -893,6 +910,17 @@ class DownloadOrchestrator:
                     % float(po_metrics_end["cooldown_remaining"])
                     if po_metrics_end["circuit_open"] else ""
                 ),
+            )
+
+        cookie_diagnostics = (
+            int(cookie_metrics_end["diagnostics"])
+            - int(cookie_metrics_start["diagnostics"])
+        )
+        if cookie_diagnostics:
+            logger.warning(
+                "[yt-dlp][cookies] batch summary: %d expired/invalid-cookie "
+                "message(s) coalesced; refresh the browser session before retrying.",
+                cookie_diagnostics,
             )
 
         return BatchResult(

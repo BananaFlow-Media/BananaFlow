@@ -64,18 +64,21 @@ _pot_attempts_total = 0
 _pot_diagnostic_messages = 0
 _pot_first_diagnostic_logged = False
 _bgutil_stderr_capture_installed = False
+_cookie_diagnostic_messages = 0
 
 
 def reset_po_token_provider_circuit() -> None:
     """Reset process-wide PO-token telemetry (test/support hook only)."""
     global _pot_failure_count, _pot_circuit_open_until
     global _pot_attempts_total, _pot_diagnostic_messages, _pot_first_diagnostic_logged
+    global _cookie_diagnostic_messages
     with _pot_circuit_lock:
         _pot_failure_count = 0
         _pot_circuit_open_until = 0.0
         _pot_attempts_total = 0
         _pot_diagnostic_messages = 0
         _pot_first_diagnostic_logged = False
+        _cookie_diagnostic_messages = 0
 
 
 def _circuit_open_locked(now: float) -> bool:
@@ -156,6 +159,28 @@ def po_token_provider_metrics() -> dict[str, object]:
             "circuit_open": _circuit_open_locked(now),
             "cooldown_remaining": max(0.0, _pot_circuit_open_until - now),
         }
+
+
+def note_cookie_diagnostic(message: str) -> bool:
+    """Record an expired/invalid-cookie diagnostic without echoing its prose.
+
+    yt-dlp can emit this once per request and the preflight validator can emit
+    the same result once per job.  The batch owner reports one actionable
+    summary at completion; detailed copies remain available only at debug.
+    Returns whether *message* belongs to this coalesced category.
+    """
+    global _cookie_diagnostic_messages
+    if not re.search(r"cookies?.*(no longer valid|expired|invalid)", message or "", re.I):
+        return False
+    with _pot_circuit_lock:
+        _cookie_diagnostic_messages += 1
+    return True
+
+
+def cookie_diagnostic_metrics() -> dict[str, int]:
+    """Return a monotonic count for batch-scoped cookie-warning summaries."""
+    with _pot_circuit_lock:
+        return {"diagnostics": _cookie_diagnostic_messages}
 
 
 def _is_bgutil_script_command(command: object) -> bool:
