@@ -69,6 +69,14 @@ _SUBDIR_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 # a repaint.
 _HEARTBEAT_INTERVAL = 0.5
 
+# Spotify resolution is network-bound and may exercise third-party extractors.
+# Keep it deliberately smaller than the download pool, then retain only a
+# bounded look-ahead window of resolved/being-resolved work.  This prevents
+# both the old all-workers-resolving stall and an eager resolution of an entire
+# artist catalog.
+_RESOLVER_MAX_WORKERS = 2
+_RESOLVER_BUFFER_PER_DOWNLOAD_WORKER = 2
+
 
 def _safe_subdir_name(key: str) -> str:
     """Filesystem-safe, collision-safe per-job workspace subdirectory name
@@ -167,6 +175,7 @@ class DownloadOrchestrator:
         # Cancel infrastructure
         self._cancel_events: dict[str, threading.Event] = {}
         self._pool: Optional[ThreadPoolExecutor] = None
+        self._resolver_pool: Optional[ThreadPoolExecutor] = None
         self._pool_lock = threading.Lock()
 
         # Per-job lock + live-request registry backing live_request_snapshot()
@@ -241,11 +250,13 @@ class DownloadOrchestrator:
             ev.set()
         self._engine.cancel_all()
         with self._pool_lock:
-            if self._pool is not None:
+            for pool in (self._pool, self._resolver_pool):
+                if pool is None:
+                    continue
                 try:
-                    self._pool.shutdown(wait=False, cancel_futures=True)
+                    pool.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
-                    self._pool.shutdown(wait=False)
+                    pool.shutdown(wait=False)
 
     def cancel_track(self, key: str) -> None:
         """Cancel a single track by its key."""
@@ -664,10 +675,27 @@ class DownloadOrchestrator:
             max_workers=n_workers,
             thread_name_prefix="dl-pool",
         )
+        lazy_job_count = sum(1 for _, req in jobs if req.url_resolver is not None)
+        resolver_pool: Optional[ThreadPoolExecutor] = None
+        if lazy_job_count:
+            resolver_pool = ThreadPoolExecutor(
+                max_workers=min(_RESOLVER_MAX_WORKERS, n_workers),
+                thread_name_prefix="resolve-pool",
+            )
         with self._pool_lock:
             self._pool = pool
+            self._resolver_pool = resolver_pool
 
         try:
+            if lazy_job_count:
+                # Spotify jobs use two bounded pools: resolvers prepare a
+                # short look-ahead while download workers consume only ready
+                # URLs.  Empty ``jobs`` below intentionally bypasses the
+                # legacy one-pool submit loop for this batch type.
+                self._run_resolver_pipeline(
+                    jobs, pool, resolver_pool, n_workers
+                )
+                jobs = []
             for i, (key, req) in enumerate(jobs):
                 if self._engine._cancel_event.is_set():
                     break
@@ -748,8 +776,11 @@ class DownloadOrchestrator:
             heartbeat_stop.set()
             heartbeat.join(timeout=_HEARTBEAT_INTERVAL * 2)
             pool.shutdown(wait=False)
+            if resolver_pool is not None:
+                resolver_pool.shutdown(wait=False)
             with self._pool_lock:
                 self._pool = None
+                self._resolver_pool = None
 
         # ── Finalisation ──────────────────────────────────────────────────────
         was_cancelled = self._engine._cancel_event.is_set()  # noqa: SLF001
@@ -861,6 +892,111 @@ class DownloadOrchestrator:
         if is_lazy:
             return i >= n_workers
         return i > 0
+
+    def _run_resolver_pipeline(
+        self,
+        jobs: list[tuple[str, DownloadRequest]],
+        download_pool: ThreadPoolExecutor,
+        resolver_pool: Optional[ThreadPoolExecutor],
+        n_workers: int,
+    ) -> None:
+        """Keep a small resolved-work buffer ahead of download workers.
+
+        A Spotify URL resolver is intentionally never executed by the download
+        pool in this path.  At most ``window`` jobs are resolving, resolved, or
+        downloading at once, providing backpressure for artist-sized batches.
+        """
+        assert resolver_pool is not None
+        window = max(n_workers, n_workers * _RESOLVER_BUFFER_PER_DOWNLOAD_WORKER)
+        next_job = 0
+        resolving: dict = {}
+        downloading: dict = {}
+
+        def mark_unhandled(key: str, exc: Exception) -> None:
+            if self._engine._cancel_event.is_set():  # noqa: SLF001
+                self._mark_cancelled(key)
+                return
+            if not self._claim_job_outcome(key, "terminal"):
+                return
+            err = classify_error(exc)
+            with self._progress_lock:
+                self._failed += 1
+            self._aggregator.fail(key)
+            self._safe_cb("on_track_status", key, "error")
+            self._safe_cb("on_track_error", key, err)
+            self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+            self._safe_cb(
+                "on_job_count_changed", self._completed + self._failed, self._total,
+            )
+            logger.error("[Orchestrator] Unhandled exception for %s: %s", key, exc, exc_info=True)
+
+        def fill_window() -> None:
+            nonlocal next_job
+            while (
+                next_job < len(jobs)
+                and len(resolving) + len(downloading) < window
+                and not self._engine._cancel_event.is_set()  # noqa: SLF001
+            ):
+                key, req = jobs[next_job]
+                next_job += 1
+                self._aggregator.mark_submitted(key)
+                if req.url_resolver is None:
+                    future = download_pool.submit(self._download_one, key, req)
+                    downloading[future] = key
+                    continue
+
+                cancel_ev = self._cancel_events[key]
+                conservative_youtube = (
+                    self._youtube_serialize and self._is_conservative_youtube_job(req)
+                )
+                future = resolver_pool.submit(self._resolve_lazy_url, key, req, cancel_ev)
+                resolving[future] = (key, req, cancel_ev, conservative_youtube)
+
+        fill_window()
+        while resolving or downloading:
+            pending = set(resolving) | set(downloading)
+            done = {future for future in pending if future.done()}
+            if not done:
+                done, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            if not done:
+                continue
+
+            for future in done:
+                resolver_job = resolving.pop(future, None)
+                if resolver_job is not None:
+                    key, req, cancel_ev, conservative_youtube = resolver_job
+                    try:
+                        cancelled = future.result()
+                    except CancelledError:
+                        self._mark_cancelled(key)
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        mark_unhandled(key, exc)
+                        continue
+                    if (
+                        not cancelled
+                        and not cancel_ev.is_set()
+                        and not self._engine._cancel_event.is_set()  # noqa: SLF001
+                    ):
+                        download_future = download_pool.submit(
+                            self._download_resolved_one,
+                            key,
+                            req,
+                            cancel_ev,
+                            conservative_youtube,
+                        )
+                        downloading[download_future] = key
+                    continue
+
+                key = downloading.pop(future)
+                try:
+                    future.result()
+                except CancelledError:
+                    self._mark_cancelled(key)
+                except Exception as exc:  # noqa: BLE001
+                    mark_unhandled(key, exc)
+
+            fill_window()
 
     # ── Batch workspace ────────────────────────────────────────────────────────
 
@@ -1090,6 +1226,25 @@ class DownloadOrchestrator:
         # Resolve the lazy URL now, BEFORE acquiring the gate, so matching runs
         # in parallel across workers and only the downloads serialize.
         if self._resolve_lazy_url(key, req, cancel_ev):
+            return
+
+        self._download_resolved_one(key, req, cancel_ev, conservative_youtube)
+
+    def _download_resolved_one(
+        self,
+        key: str,
+        req: DownloadRequest,
+        cancel_ev: threading.Event,
+        conservative_youtube: bool,
+    ) -> None:
+        """Download a request whose optional Spotify resolver already ran.
+
+        The bounded pipeline calls this from the download pool after a separate
+        resolver pool has made the URL ready.  Keeping the transfer/gate logic
+        here also preserves the one-pool behaviour for non-pipelined callers.
+        """
+        if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+            self._mark_cancelled(key)
             return
 
         if conservative_youtube:
