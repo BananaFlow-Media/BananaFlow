@@ -226,6 +226,8 @@ class _PhaseCallbacks:
     def on_track_progress(self, key, fraction):
         self.positions.append(fraction)
 
+    def on_track_first_byte(self, key): pass
+
     def on_track_phase(self, key, phase, remaining_seconds):
         self.phases.append(phase)
 
@@ -286,6 +288,16 @@ class TestOrchestratorEmitsPhases:
         cb = _PhaseCallbacks()
         _run(_PhaseEngine(start_delay=0.6), cb)
         assert cb.positions, "no progress reached the card at all"
+
+    def test_heartbeat_refreshes_an_opaque_starting_phase(self, monkeypatch):
+        """A silent engine-start interval must produce more than its entry tick."""
+        import core.download_orchestrator as mod
+
+        monkeypatch.setattr(mod, "_HEARTBEAT_INTERVAL", 0.02)
+        cb = _PhaseCallbacks()
+        _run(_PhaseEngine(start_delay=0.09, bytes_delay=0.0, tail_delay=0.0), cb)
+        assert len(cb.positions) >= 3
+        assert len(set(cb.positions)) >= 2
 
     def test_card_position_is_not_the_raw_byte_fraction(self):
         """The engine pins its own fraction at 0.95 for the whole tail. The

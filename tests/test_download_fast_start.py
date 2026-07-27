@@ -268,6 +268,30 @@ class _ProgressEngine:
             )
 
 
+class _WeightedOnlyEngine(_ProgressEngine):
+    """Reports phase/weighted progress before transfer bytes arrive."""
+
+    def __init__(self, after_weighted_progress) -> None:
+        super().__init__()
+        self._after_weighted_progress = after_weighted_progress
+
+    def download(self, req: DownloadRequest) -> None:
+        if req.on_progress:
+            req.on_progress(DownloadProgress(
+                status=DownloadStatus.DOWNLOADING, url=req.url,
+                downloaded_bytes=0, total_bytes=2048, fraction=0.2,
+            ))
+            self._after_weighted_progress()
+            req.on_progress(DownloadProgress(
+                status=DownloadStatus.DOWNLOADING, url=req.url,
+                downloaded_bytes=1024, total_bytes=2048, fraction=0.5,
+            ))
+        if req.on_finished:
+            req.on_finished(
+                DownloadProgress(status=DownloadStatus.FINISHED, url=req.url, output_path="/tmp/o.mp3")
+            )
+
+
 class TestGateStarvationMetric:
     def test_gate_idle_recorded_when_matches_lag(self, monkeypatch):
         # Drop the cooldown so the only thing that can delay the next acquire is
@@ -309,13 +333,35 @@ class TestGateStarvationMetric:
 
 
 class TestFirstByteMetric:
-    def test_first_byte_wait_recorded_on_first_nonzero_progress(self):
+    def test_first_byte_wait_recorded_on_first_downloaded_byte(self):
         engine = _ProgressEngine()
         orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
         orch.run_batch([("k0", _req("https://example.com/a"))])
         total, count = orch._phase_times.get("first_byte_wait", (0.0, 0.0))  # noqa: SLF001
         assert count == 1
         assert total >= 0.0
+
+    def test_weighted_progress_without_bytes_is_not_a_first_byte(self):
+        class Callbacks(_NullCallbacks):
+            def __init__(self):
+                self.first_bytes: list[str] = []
+
+            def on_track_first_byte(self, key):
+                self.first_bytes.append(key)
+
+        callbacks = Callbacks()
+        seen_after_weighted_progress: list[list[str]] = []
+        orch = DownloadOrchestrator(
+            engine=_WeightedOnlyEngine(
+                lambda: seen_after_weighted_progress.append(callbacks.first_bytes.copy())
+            ),
+            callbacks=callbacks,
+            max_workers=1,
+        )
+        orch.run_batch([("k0", _req("https://example.com/a"))])
+        assert seen_after_weighted_progress == [[]]
+        assert callbacks.first_bytes == ["k0"]
+        assert orch._phase_times["first_byte_wait"][1] == 1  # noqa: SLF001
 
     def test_no_first_byte_wait_without_progress(self):
         # An engine that never reports progress records no first-byte phase.

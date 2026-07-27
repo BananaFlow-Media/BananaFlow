@@ -61,6 +61,9 @@ class _SignalAdapter:
     def on_track_progress(self, key: str, fraction: float) -> None:
         self._w.track_progress.emit(key, fraction)
 
+    def on_track_first_byte(self, key: str) -> None:
+        self._w.track_first_byte.emit(key)
+
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None:
         self._w.track_speed.emit(key, speed_bps, eta_seconds)
 
@@ -119,9 +122,10 @@ class DownloadWorker(QThread):
     parent      : Optional Qt parent.
     """
 
-    # ── Signals (public API unchanged) ────────────────────────────────────────
+    # ── Signals ───────────────────────────────────────────────────────────────
 
     track_progress   = Signal(str, float)
+    track_first_byte = Signal(str)
     track_speed      = Signal(str, float, float)
     track_status     = Signal(str, str)
     track_phase      = Signal(str, str, object)   # key, phase, secs|None
