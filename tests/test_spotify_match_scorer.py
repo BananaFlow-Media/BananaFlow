@@ -6,6 +6,9 @@ Tests only the pure scoring functions — no yt-dlp or network.
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from core.spotify_match_scorer import (
@@ -129,6 +132,85 @@ class TestScoreCandidate:
         )
         # Good title/artist but duration kills it
         assert total < 70.0
+
+
+class TestFlatYoutubeSearch:
+    def _find_with_entries(self, monkeypatch, entries):
+        """Run the matcher against a yt-dlp stand-in and retain its options."""
+        captured = {}
+
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                captured.update(opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, query, download):
+                captured["query"] = query
+                captured["download"] = download
+                return {"entries": entries}
+
+        monkeypatch.setitem(
+            sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        )
+        from core.spotify_match_scorer import find_best_youtube_match
+
+        result = find_best_youtube_match(
+            title="Sample Song", artist="Sample Artist", duration_sec=180
+        )
+        return result, captured
+
+    def test_searches_flat_results_with_the_fields_needed_for_scoring(self, monkeypatch):
+        result, captured = self._find_with_entries(monkeypatch, [{
+            "id": "good-id",
+            "url": "good-id",
+            "title": "Sample Artist - Sample Song (Official Audio)",
+            "channel": "Sample Artist - Topic",
+            "duration": 180,
+        }])
+
+        assert captured["extract_flat"] is True
+        assert captured["skip_download"] is True
+        assert captured["download"] is False
+        assert result is not None
+        assert result.duration_sec == 180
+        assert result.url == "https://www.youtube.com/watch?v=good-id"
+
+    def test_flat_duration_preserves_the_better_match_choice(self, monkeypatch):
+        result, _ = self._find_with_entries(monkeypatch, [
+            {
+                "id": "wrong-duration",
+                "url": "https://www.youtube.com/watch?v=wrong-duration",
+                "title": "Sample Artist - Sample Song (Official Audio)",
+                "channel": "Sample Artist Official",
+                "duration": 420,
+            },
+            {
+                "id": "right-duration",
+                "url": "https://www.youtube.com/watch?v=right-duration",
+                "title": "Sample Artist - Sample Song (Lyrics)",
+                "channel": "Sample Artist - Topic",
+                "duration": 180,
+            },
+        ])
+
+        assert result is not None
+        assert result.url.endswith("right-duration")
+
+    def test_missing_flat_duration_is_scored_conservatively(self, monkeypatch):
+        result, _ = self._find_with_entries(monkeypatch, [{
+            "id": "no-duration",
+            "title": "Sample Artist - Sample Song",
+            "uploader": "Sample Artist",
+        }])
+
+        assert result is not None
+        assert result.duration_sec is None
+        assert result.breakdown["duration"] == 9.0
 
 
 class TestResolveToYtmUrl:
