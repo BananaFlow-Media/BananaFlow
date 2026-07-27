@@ -610,7 +610,10 @@ class DownloadController(QObject):
                 _td, cookies_file=_cookies,
                 cancel_check=lambda: ev is not None and ev.is_set(),
             )
-            return _clean(resolved)
+            cleaned = _clean(resolved)
+            if not cleaned:
+                raise RuntimeError("No confident YouTube match found for this Spotify track")
+            return cleaned
         return _resolve
 
     @staticmethod

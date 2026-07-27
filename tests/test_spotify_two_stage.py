@@ -159,7 +159,7 @@ class TestOrchestratorLazyResolve:
         assert engine.downloaded_urls == []
         assert called["n"] == 0
 
-    def test_resolver_exception_does_not_sink_the_batch(self):
+    def test_resolver_exception_fails_the_track_without_downloading_placeholder(self):
         engine = _FakeEngine()
         orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
 
@@ -169,9 +169,10 @@ class TestOrchestratorLazyResolve:
         req = _req("placeholder")
         req.url_resolver = bad_resolver
 
-        # Should not raise; the job proceeds with whatever url it had.
+        # The batch remains alive, but an unresolved Spotify match must never
+        # turn into a download of the placeholder URL.
         orch.run_batch([("k1", req)])
-        assert engine.downloaded_urls == ["placeholder"]
+        assert engine.downloaded_urls == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -430,5 +431,5 @@ class TestResolveCancel:
         url = scraper._resolve_to_ytm_url(
             "Song", "Artist", 200, cancel_check=lambda: True
         )
-        assert url.startswith("ytsearch1:")
+        assert url == ""
         assert called["fallback"] == 0  # cancelled before the heavy fallback
