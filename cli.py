@@ -93,6 +93,10 @@ class TerminalCallbacks:
         bar = "█" * filled + "░" * (bar_w - filled)
         print(f"\r  [{bar}] {pct:>3}%", end="", flush=True, file=sys.stderr)
 
+    def on_track_first_byte(self, key: str) -> None:
+        """CLI has no separate first-byte display; satisfy the callback contract."""
+        pass
+
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None:
         # Live per-track speed/ETA drives the Qt UI's per-card display.
         # on_metrics() below is this class's speed/eta *string* hook, but
