@@ -89,6 +89,19 @@ class TestSilentLoggerCriticalWarnings:
         assert caplog.text == ""
         assert cookie_diagnostic_metrics()["diagnostics"] == 2
 
+    @pytest.mark.parametrize("message", [
+        "ERROR: Could not copy Chrome cookie database",
+        "ERROR: Failed to decrypt with DPAPI",
+    ])
+    def test_browser_cookie_access_messages_are_coalesced(self, caplog, message):
+        from utils.yt_dlp_opts import cookie_diagnostic_metrics
+
+        caplog.set_level(logging.ERROR, logger="core.downloader")
+        SilentLogger().error(message)
+
+        assert caplog.text == ""
+        assert cookie_diagnostic_metrics()["diagnostics"] == 1
+
     def test_critical_error_not_suppressed(self, caplog):
         caplog.set_level(logging.ERROR, logger="core.downloader")
         SilentLogger().error("WARNING: Unable to fetch GVS PO Token")

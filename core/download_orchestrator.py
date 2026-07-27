@@ -1561,7 +1561,14 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_error", key, err)
             self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
             self._safe_cb("on_job_count_changed", self._completed + self._failed, self._total) # treat failed as 'done' for progress count
-            logger.warning("[Orchestrator] Track error: %s — %s", key, p.error_message)
+            from utils.yt_dlp_opts import note_cookie_diagnostic
+            if note_cookie_diagnostic(p.error_message or ""):
+                logger.debug(
+                    "[Orchestrator][cookies] coalesced cookie-auth track error: %s",
+                    key,
+                )
+            else:
+                logger.warning("[Orchestrator] Track error: %s — %s", key, p.error_message)
 
         req.on_progress = on_progress
         req.on_finished = on_finished

@@ -33,7 +33,14 @@ NETWORK_TRANSIENT          = "network_transient"
 # bot" lands on rate_limited_or_forbidden rather than account_required.
 _PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"po[ _]?token", re.I), PO_TOKEN_MISSING),
-    (re.compile(r"cookies?.*(no longer valid|expired|invalid)", re.I), COOKIES_EXPIRED_OR_INVALID),
+    (
+        re.compile(
+            r"cookies?.*(no longer valid|expired|invalid)|"
+            r"could not copy .*cookie database|failed to decrypt with dpapi",
+            re.I,
+        ),
+        COOKIES_EXPIRED_OR_INVALID,
+    ),
     (re.compile(r"no supported javascript runtime", re.I), JS_RUNTIME_MISSING),
     (
         re.compile(

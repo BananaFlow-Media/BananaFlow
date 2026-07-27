@@ -170,7 +170,12 @@ def note_cookie_diagnostic(message: str) -> bool:
     Returns whether *message* belongs to this coalesced category.
     """
     global _cookie_diagnostic_messages
-    if not re.search(r"cookies?.*(no longer valid|expired|invalid)", message or "", re.I):
+    if not re.search(
+        r"cookies?.*(no longer valid|expired|invalid)|"
+        r"could not copy .*cookie database|failed to decrypt with dpapi",
+        message or "",
+        re.I,
+    ):
         return False
     with _pot_circuit_lock:
         _cookie_diagnostic_messages += 1
