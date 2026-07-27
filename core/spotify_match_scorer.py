@@ -387,25 +387,15 @@ def find_best_youtube_match(
 
     for index in sorted(validate_indices):
         flat_entry, flat_result = candidates[index]
+        deep_opts = dict(opts)
+        deep_opts.update({
+            "extract_flat": False,
+            "skip_download": True,
+            "ignoreerrors": True,
+        })
         try:
-            # The flat-search cookie copy has been released above.  Deep
-            # validation must therefore obtain its own short-lived copy rather
-            # than retaining a now-deleted cookiefile path in ``opts``.
-            with temp_cookies_copy(cookies_file) as deep_cf:
-                deep_opts = build_base_ydl_opts(
-                    cookies_file=deep_cf,
-                    logger=SilentLogger(),
-                    quiet=True,
-                    retries=1,
-                    socket_timeout=8,
-                )
-                deep_opts.update({
-                    "extract_flat": False,
-                    "skip_download": True,
-                    "ignoreerrors": True,
-                })
-                with yt_dlp.YoutubeDL(deep_opts) as ydl:
-                    deep_info = ydl.extract_info(flat_result.url, download=False)
+            with yt_dlp.YoutubeDL(deep_opts) as ydl:
+                deep_info = ydl.extract_info(flat_result.url, download=False)
         except Exception as exc:  # noqa: BLE001 - retain the flat candidate
             logger.debug("[MatchScorer] Deep validation failed for %s: %s", flat_result.url, exc)
             continue
