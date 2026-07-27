@@ -10,9 +10,10 @@ DownloadWorker's only job is:
   2. Call orchestrator.run_batch() inside QThread.run().
   3. Expose cancel() / cancel_track() / shutdown() for the UI.
 
-Signal summary  (unchanged from v3)
+Signal summary
 ------------------------------------
 track_progress(str, float)    Per-track progress fraction.
+track_first_byte(str)         First callback with downloaded_bytes > 0.
 track_status(str, str)        Per-track status string.
 track_finished(str, str)      (key, output_path) on success.
 overall_progress(float)       Batch-level 0.0–1.0.
@@ -60,6 +61,9 @@ class _SignalAdapter:
 
     def on_track_progress(self, key: str, fraction: float) -> None:
         self._w.track_progress.emit(key, fraction)
+
+    def on_track_first_byte(self, key: str) -> None:
+        self._w.track_first_byte.emit(key)
 
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None:
         self._w.track_speed.emit(key, speed_bps, eta_seconds)
@@ -119,9 +123,10 @@ class DownloadWorker(QThread):
     parent      : Optional Qt parent.
     """
 
-    # ── Signals (public API unchanged) ────────────────────────────────────────
+    # ── Signals ───────────────────────────────────────────────────────────────
 
     track_progress   = Signal(str, float)
+    track_first_byte = Signal(str)
     track_speed      = Signal(str, float, float)
     track_status     = Signal(str, str)
     track_phase      = Signal(str, str, object)   # key, phase, secs|None

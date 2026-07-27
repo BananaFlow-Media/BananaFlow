@@ -388,7 +388,7 @@ class TestControllerBindsTheIdItMints:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
                 for name in (
-                    "track_progress", "track_speed", "track_status", "track_phase",
+                    "track_progress", "track_first_byte", "track_speed", "track_status", "track_phase",
                     "track_finished", "track_preexisting", "overall_progress",
                     "metrics", "batch_snapshot", "job_count_changed",
                     "job_error", "all_finished", "track_thumbnail",
@@ -403,7 +403,7 @@ class TestControllerBindsTheIdItMints:
         ctrl._db = None
         ctrl._cfg = type("C", (), {"max_parallel_downloads": 3})()
         for name in (
-            "_on_track_progress", "_on_track_speed", "_on_track_status",
+            "_on_track_progress", "_on_track_first_byte", "_on_track_speed", "_on_track_status",
             "_on_track_finished", "_on_track_preexisting",
             "_on_worker_overall_progress", "_on_worker_metrics",
             "_on_worker_batch_snapshot", "_on_worker_job_count_changed",
@@ -415,6 +415,74 @@ class TestControllerBindsTheIdItMints:
 
         assert ctrl._batch_snapshot_id
         assert captured["batch_id"] == ctrl._batch_snapshot_id
+
+    def test_weighted_track_progress_cannot_be_logged_as_a_real_byte(self, monkeypatch):
+        import ui.controllers.download_controller as controller_mod
+        from ui.controllers.download_controller import DownloadController
+
+        ctrl = DownloadController.__new__(DownloadController)
+        ctrl._is_active_worker_signal = lambda: True
+        ctrl._first_byte_logged = False
+        ctrl._batch_click_ts = 10.0
+        ctrl._card_progress = {}
+        ctrl._key_to_card = {}
+        monkeypatch.setattr(controller_mod.time, "monotonic", lambda: 12.0)
+
+        DownloadController._on_track_progress(ctrl, "k0", 0.2)
+        assert not ctrl._first_byte_logged
+
+        DownloadController._on_track_first_byte(ctrl, "k0")
+        assert ctrl._first_byte_logged
+
+    def test_single_track_resume_uses_its_own_first_byte_clock(self, monkeypatch, caplog):
+        import logging
+        import ui.controllers.download_controller as controller_mod
+        from ui.controllers.download_controller import DownloadController
+
+        ctrl = DownloadController.__new__(DownloadController)
+        ctrl._is_active_worker_signal = lambda: True
+        ctrl._first_byte_logged = False
+        ctrl._batch_click_ts = 10.0
+        ctrl._resume_click_ts = {"resume": 100.0}
+        ctrl._resume_engine_started = set()
+        ctrl._key_to_card = {}
+        monkeypatch.setattr(controller_mod.time, "monotonic", lambda: 102.0)
+
+        with caplog.at_level(logging.INFO):
+            DownloadController._on_track_status(ctrl, "resume", "starting")
+            DownloadController._on_track_first_byte(ctrl, "resume")
+
+        assert not ctrl._first_byte_logged
+        assert "[timing][resume] first engine start" in caplog.text
+        assert "[timing][resume] first real byte" in caplog.text
+        assert "after click" not in caplog.text
+
+    def test_weighted_track_progress_does_not_change_the_card_phase(self):
+        from ui.controllers.download_controller import DownloadController
+
+        class Card:
+            _status = "matching"
+
+            def __init__(self):
+                self.progress: list[float] = []
+                self.statuses: list[str] = []
+
+            def set_progress(self, fraction):
+                self.progress.append(fraction)
+
+            def set_status(self, status):
+                self.statuses.append(status)
+
+        card = Card()
+        ctrl = DownloadController.__new__(DownloadController)
+        ctrl._is_active_worker_signal = lambda: True
+        ctrl._card_progress = {}
+        ctrl._key_to_card = {"k0": card}
+
+        DownloadController._on_track_progress(ctrl, "k0", 0.2)
+
+        assert card.progress == [0.2]
+        assert card.statuses == []
 
 
 # ------------------------------------------------------------------------------

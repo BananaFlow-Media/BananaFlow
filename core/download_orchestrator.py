@@ -103,6 +103,7 @@ class OrchestratorCallbacks(Protocol):
     """
 
     def on_track_progress(self, key: str, fraction: float) -> None: ...
+    def on_track_first_byte(self, key: str) -> None: ...
     def on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None: ...
     def on_track_status(self, key: str, status: str) -> None: ...
     def on_track_phase(
@@ -605,6 +606,24 @@ class DownloadOrchestrator:
         def _heartbeat() -> None:
             while not heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
                 try:
+                    # These stages have no engine callbacks of their own.  Tick
+                    # their phase-weighted position so an active card does not
+                    # look frozen while matching, waiting, starting, or
+                    # post-processing.  Do not tick DOWNLOADING here: its
+                    # position must continue to reflect real byte progress.
+                    with self._phase_state_lock:
+                        opaque_keys = [
+                            key
+                            for key, (phase, _) in self._job_phase.items()
+                            if phase in (
+                                TrackPhase.MATCHING,
+                                TrackPhase.WAITING,
+                                TrackPhase.STARTING,
+                                TrackPhase.PROCESSING,
+                            )
+                        ]
+                    for key in opaque_keys:
+                        self._emit_track_position(key)
                     snapshot = self._aggregator.snapshot()
                     self._safe_cb("on_overall_progress", snapshot.progress)
                     self._safe_cb("on_batch_snapshot", snapshot)
@@ -1153,14 +1172,13 @@ class DownloadOrchestrator:
         logger.debug("[Orchestrator] Starting %s", key)
 
         # "downloading" is emitted here, before any byte arrives. Time the gap
-        # to the first non-zero progress separately so the honest "download
-        # actually started" moment (first byte) is distinguished from the
-        # engine-start status.
+        # to the first downloaded byte separately so the honest "download
+        # actually started" moment is distinguished from engine-start status.
         engine_start_ts = time.monotonic()
         first_byte_seen = [False]
 
         def on_progress(p: DownloadProgress) -> None:
-            if not first_byte_seen[0] and ((p.downloaded_bytes or 0) > 0 or (p.fraction or 0) > 0):
+            if not first_byte_seen[0] and (p.downloaded_bytes or 0) > 0:
                 first_byte_seen[0] = True
                 first_byte_wait = time.monotonic() - engine_start_ts
                 self._record_phase("first_byte_wait", first_byte_wait)
@@ -1168,6 +1186,7 @@ class DownloadOrchestrator:
                     "[timing][track] %s first_byte_wait=%.2fs (engine start -> first byte)",
                     key, first_byte_wait,
                 )
+                self._safe_cb("on_track_first_byte", key)
                 self._enter_phase(key, TrackPhase.DOWNLOADING)
 
             # The engine pins its own fraction at 0.95 and keeps that value for

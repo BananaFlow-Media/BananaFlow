@@ -3,8 +3,10 @@ name: Tests
 on:
   push:
     branches: [main, dev]
+  # Stacked PRs also need platform coverage. Restricting this to PRs that
+  # target main left intermediate and cumulative heads without the Python/OS
+  # matrix precisely when their concurrency changes needed it most.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read

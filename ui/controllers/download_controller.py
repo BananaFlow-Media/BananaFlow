@@ -146,11 +146,16 @@ class DownloadController(QObject):
 
         # Fast-start timing: wall-clock of the last Download click and one-shot
         # flags for the two headline latencies logged per batch — the engine
-        # starting (status "downloading") and the first byte actually arriving
-        # (first non-zero progress). Diagnostics only — never affects flow.
+        # starting (status "starting") and the first actual downloaded byte
+        # arriving. Diagnostics only — never affects flow.
         self._batch_click_ts: Optional[float] = None
         self._engine_start_logged: bool = False
         self._first_byte_logged: bool = False
+        # A single-track resume is a separate user action, not part of the
+        # previous batch's click-to-first-byte measurement.  Keep its timing
+        # keyed by request so a late byte cannot be attributed to that batch.
+        self._resume_click_ts: dict[str, float] = {}
+        self._resume_engine_started: set[str] = set()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -492,7 +497,7 @@ class DownloadController(QObject):
         self._engine._cancel_event.clear()  # noqa: SLF001
 
         # Fast-start diagnostics: how long from the click to a built job queue,
-        # and (later, on the first "downloading" status) to the first download
+        # and (later, on the first "starting" status) to the first download
         # actually starting. See _on_track_status.
         self._batch_click_ts = t_click
         self._engine_start_logged = False
@@ -543,6 +548,8 @@ class DownloadController(QObject):
             parent=self,
         )
         worker.track_progress.connect(self._on_track_progress)
+        if hasattr(worker, "track_first_byte"):
+            worker.track_first_byte.connect(self._on_track_first_byte)
         worker.track_speed.connect(self._on_track_speed)
         worker.track_status.connect(self._on_track_status)
         worker.track_phase.connect(self._on_track_phase)
@@ -968,6 +975,8 @@ class DownloadController(QObject):
 
         card.set_status("queued")
         card.set_progress(0.0)
+        self._resume_click_ts[key] = time.monotonic()
+        self._resume_engine_started.discard(key)
 
         self._key_to_card[key] = card
         resume_worker = DownloadWorker(
@@ -980,6 +989,8 @@ class DownloadController(QObject):
         )
         self._resume_workers.append(resume_worker)
         resume_worker.track_progress.connect(self._on_track_progress)
+        if hasattr(resume_worker, "track_first_byte"):
+            resume_worker.track_first_byte.connect(self._on_track_first_byte)
         resume_worker.track_speed.connect(self._on_track_speed)
         resume_worker.track_status.connect(self._on_track_status)
         resume_worker.track_phase.connect(self._on_track_phase)
@@ -999,12 +1010,19 @@ class DownloadController(QObject):
             # its docstring) would see those stale entries as still active
             # and stop reporting completion for every resume after the
             # first one.
-            lambda _outcome=None, w=resume_worker: (
-                self._resume_workers.remove(w) if w in self._resume_workers else None
-            )
+            lambda _outcome=None, w=resume_worker, k=key: self._finish_resume_worker(k, w)
         )
+        # Persist only after the worker has been submitted.  A crash before
+        # this point must leave the paused record and its workspace restorable.
         resume_worker.start()
         self._release_paused_record(resume_worker)
+
+    def _finish_resume_worker(self, key: str, worker) -> None:
+        """Release one resume worker and any unfinished timing state."""
+        if worker in self._resume_workers:
+            self._resume_workers.remove(worker)
+        self._resume_click_ts.pop(key, None)
+        self._resume_engine_started.discard(key)
 
     def resume_all(self) -> None:
         """Continue a globally-paused batch: re-submit every snapshotted
@@ -1162,20 +1180,6 @@ class DownloadController(QObject):
     def _on_track_progress(self, key: str, fraction: float) -> None:
         if not self._is_active_worker_signal():
             return
-        # First non-zero progress anywhere in the batch = the first byte, the
-        # honest "download actually started" moment. Checked BEFORE the UI
-        # throttle below so a tiny first tick is never swallowed. This is the
-        # headline click->first-download latency the fast-start work targets.
-        if (
-            fraction > 0.0
-            and not self._first_byte_logged
-            and self._batch_click_ts is not None
-        ):
-            self._first_byte_logged = True
-            logger.info(
-                "[timing][click] first byte (download started): %.3fs after click",
-                time.monotonic() - self._batch_click_ts,
-            )
         prev = self._card_progress.get(key, 0.0)
         if fraction - prev < 0.01 and fraction < 1.0:
             return
@@ -1183,8 +1187,25 @@ class DownloadController(QObject):
         card = self._key_to_card.get(key)
         if card:
             card.set_progress(fraction)
-            if card._status != "downloading":  # noqa: SLF001
-                card.set_status("downloading")
+
+    def _on_track_first_byte(self, key: str) -> None:
+        """Record the first *real* transfer byte once per clicked batch."""
+        if not self._is_active_worker_signal():
+            return
+        resume_click = getattr(self, "_resume_click_ts", {}).pop(key, None)
+        if resume_click is not None:
+            logger.info(
+                "[timing][resume] first real byte (downloaded_bytes > 0): %.3fs after resume",
+                time.monotonic() - resume_click,
+            )
+            return
+        if self._first_byte_logged or self._batch_click_ts is None:
+            return
+        self._first_byte_logged = True
+        logger.info(
+            "[timing][click] first real byte (downloaded_bytes > 0): %.3fs after click",
+            time.monotonic() - self._batch_click_ts,
+        )
 
     def _on_track_speed(self, key: str, speed_bps: float, eta_seconds: float) -> None:
         if not self._is_active_worker_signal():
@@ -1196,18 +1217,27 @@ class DownloadController(QObject):
     def _on_track_status(self, key: str, status: str) -> None:
         if not self._is_active_worker_signal():
             return
-        # First track to reach "downloading" = the engine started (URL resolved,
-        # gate acquired, about to hand off to yt-dlp) — but NOT yet the first
-        # byte (extract_info still runs). Logged separately from first-byte so
-        # the two costs are visible; the first-byte line is the true headline.
+        # "starting" means the URL was resolved and the orchestrator is about
+        # to hand the job to yt-dlp. It intentionally precedes the first byte.
+        resume_click = getattr(self, "_resume_click_ts", {}).get(key)
         if (
-            status == "downloading"
+            status == "starting"
+            and resume_click is not None
+            and key not in getattr(self, "_resume_engine_started", set())
+        ):
+            self._resume_engine_started.add(key)
+            logger.info(
+                "[timing][resume] first engine start (starting): %.3fs after resume",
+                time.monotonic() - resume_click,
+            )
+        elif (
+            status == "starting"
             and not self._engine_start_logged
             and self._batch_click_ts is not None
         ):
             self._engine_start_logged = True
             logger.info(
-                "[timing][click] first engine start (downloading): %.3fs after click",
+                "[timing][click] first engine start (starting): %.3fs after click",
                 time.monotonic() - self._batch_click_ts,
             )
         card = self._key_to_card.get(key)
