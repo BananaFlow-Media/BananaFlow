@@ -442,11 +442,12 @@ class DownloadOrchestrator:
         preexisting = preexisting or []
         total_jobs = len(jobs) + len(preexisting)
 
-        # The optional bgutil provider is allowed a fresh, bounded attempt
-        # budget for each user batch. Repeated failures within this batch open
-        # its circuit and leave later downloads on yt-dlp's regular fallback.
-        from utils.yt_dlp_opts import reset_po_token_provider_circuit
-        reset_po_token_provider_circuit()
+        # The optional bgutil provider owns a process-wide cooldown, so a
+        # concurrent resume cannot re-enable a provider a main batch just
+        # proved unhealthy. Keep a monotonic snapshot only for this batch's
+        # end-of-run summary; never reset the shared breaker here.
+        from utils.yt_dlp_opts import po_token_provider_metrics
+        po_metrics_start = po_token_provider_metrics()
 
         if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
@@ -877,6 +878,22 @@ class DownloadOrchestrator:
             self._total, self._completed, self._failed, was_cancelled, outcome.value,
         )
         self._log_phase_summary(time.monotonic() - run_start)
+
+        po_metrics_end = po_token_provider_metrics()
+        attempts = int(po_metrics_end["attempts"]) - int(po_metrics_start["attempts"])
+        diagnostics = int(po_metrics_end["diagnostics"]) - int(po_metrics_start["diagnostics"])
+        if attempts or diagnostics:
+            logger.warning(
+                "[yt-dlp][po_token] batch summary: %d provider process failure(s), "
+                "%d related yt-dlp message(s) coalesced%s",
+                attempts,
+                diagnostics,
+                (
+                    "; provider remains disabled for %.0fs"
+                    % float(po_metrics_end["cooldown_remaining"])
+                    if po_metrics_end["circuit_open"] else ""
+                ),
+            )
 
         return BatchResult(
             total=self._total,
