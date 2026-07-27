@@ -45,6 +45,25 @@ DEFAULT_PREFETCH_LIMIT = 8
 # Concurrency for the pre-resolve pass. Matches the stage-1 resolve fan-out;
 # the searches are network-bound and independent.
 _PREFETCH_WORKERS = 3
+_prefetched_matches_lock = threading.Lock()
+_prefetched_match_keys: set[str] = set()
+
+
+def _prefetch_key(track: dict) -> str:
+    return str(track.get("spotify_id") or track.get("spotify_url") or "")
+
+
+def mark_prefetched_match(track: dict) -> None:
+    """Remember this session's prefetch hits for ETA provenance only."""
+    key = _prefetch_key(track)
+    if key:
+        with _prefetched_matches_lock:
+            _prefetched_match_keys.add(key)
+
+
+def was_prefetched_match(spotify_key: str) -> bool:
+    with _prefetched_matches_lock:
+        return spotify_key in _prefetched_match_keys
 
 
 class MatchPrefetcher:
@@ -159,6 +178,7 @@ class MatchPrefetcher:
             except Exception as exc:  # noqa: BLE001 - a bad match must not sink prefetch
                 logger.debug("[prefetch] resolve failed for %r: %s", title, exc)
                 return
+            mark_prefetched_match(td)
             logger.debug(
                 "[timing][prefetch] resolved %r in %.2fs",
                 title, time.monotonic() - started,

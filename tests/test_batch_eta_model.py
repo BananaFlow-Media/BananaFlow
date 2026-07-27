@@ -89,14 +89,42 @@ class TestWarmUp:
         path, so they cannot establish the remaining batch's rate."""
         a, clock = _agg(_keys(12))
         for i in range(3):
-            a.mark_resolution_source(f"k{i}", "cache")
+            a.mark_resolution_source(f"k{i}", "prefetched")
             clock.advance(0.1)
             a.complete(f"k{i}")
         assert a.snapshot().eta_seconds is None
 
-        for i in range(3, 6):
+        for i in range(3, 12):
             a.mark_resolution_source(f"k{i}", "live")
+        for i in range(3, 6):
             clock.advance(10.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is not None
+
+    def test_all_cache_batch_uses_cache_cohort_instead_of_calculating_forever(self):
+        a, clock = _agg(_keys(10))
+        for i in range(10):
+            a.mark_resolution_source(f"k{i}", "cache")
+        for i in range(3):
+            clock.advance(5.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is not None
+
+    def test_cache_dominant_mixture_uses_its_own_completion_rate(self):
+        a, clock = _agg(_keys(10))
+        for i in range(8):
+            a.mark_resolution_source(f"k{i}", "cache")
+        for i in range(8, 10):
+            a.mark_resolution_source(f"k{i}", "live")
+        for i in range(3):
+            clock.advance(5.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is not None
+
+    def test_direct_batch_keeps_using_direct_cohort(self):
+        a, clock = _agg(_keys(10))
+        for i in range(3):
+            clock.advance(5.0)
             a.complete(f"k{i}")
         assert a.snapshot().eta_seconds is not None
 

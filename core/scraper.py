@@ -274,7 +274,11 @@ def resolve_track_to_youtube(
 
     cached = cache.get(spotify_key, MATCH_ALGO_VERSION)
     if cached:
-        td["_match_source"] = "cache"
+        try:
+            from core.match_prefetcher import was_prefetched_match
+            td["_match_source"] = "prefetched" if was_prefetched_match(spotify_key) else "cache"
+        except Exception:  # noqa: BLE001 - provenance must never block a cache hit
+            td["_match_source"] = "cache"
         return cached
 
     url = _resolve_to_ytm_url(
@@ -290,6 +294,33 @@ def resolve_track_to_youtube(
     if url and not url.startswith("ytsearch"):
         cache.put(spotify_key, url, None, MATCH_ALGO_VERSION, key_kind=key_kind)
     return url
+
+
+def track_match_source_hint(td: Dict) -> str:
+    """Return the expected resolver cohort without performing a network match.
+
+    A SQLite hit is cheap to inspect while constructing the download queue and
+    lets ETA distinguish a persistent cache batch from live work before the
+    resolver pool begins. The resolver still performs its own lookup and may
+    refine this hint if the cache changes concurrently.
+    """
+    from core.match_cache import get_match_cache
+    from core.spotify_match_scorer import MATCH_ALGO_VERSION
+
+    spotify_key, _key_kind = _spotify_cache_key(td)
+    if not spotify_key:
+        return "live"
+    cache = get_match_cache()
+    cached = cache.get(spotify_key, MATCH_ALGO_VERSION)
+    if not cached:
+        return "live"
+    try:
+        from core.match_prefetcher import was_prefetched_match
+        if was_prefetched_match(spotify_key):
+            return "prefetched"
+    except Exception:  # noqa: BLE001 - provenance must never block a download
+        pass
+    return "cache"
 
 
 def _sync_playwright_for(feature: str):

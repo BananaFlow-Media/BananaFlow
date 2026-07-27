@@ -688,6 +688,10 @@ class DownloadOrchestrator:
             self._job_locks[key] = threading.Lock()
             self._active_requests[key] = req
             self._aggregator.register(key)
+            if req.url_resolver is not None:
+                self._aggregator.mark_resolution_source(
+                    key, getattr(req.url_resolver, "resolve_source", "live")
+                )
 
         pool = ThreadPoolExecutor(
             max_workers=n_workers,
