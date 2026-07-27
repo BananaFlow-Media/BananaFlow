@@ -84,6 +84,22 @@ class TestWarmUp:
             a.complete(f"k{i}")
         assert a.snapshot().eta_seconds == pytest.approx(70.0, abs=1e-6)
 
+    def test_cache_completion_burst_does_not_publish_an_eta(self):
+        """Prefetched/cache hits finish quickly but skipped the live resolve
+        path, so they cannot establish the remaining batch's rate."""
+        a, clock = _agg(_keys(12))
+        for i in range(3):
+            a.mark_resolution_source(f"k{i}", "cache")
+            clock.advance(0.1)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is None
+
+        for i in range(3, 6):
+            a.mark_resolution_source(f"k{i}", "live")
+            clock.advance(10.0)
+            a.complete(f"k{i}")
+        assert a.snapshot().eta_seconds is not None
+
     def test_downloading_bytes_alone_does_not_produce_an_eta(self):
         """Byte totals used to be enough to publish a number. They are not
         evidence about how long the batch takes — the post-processing tail, the

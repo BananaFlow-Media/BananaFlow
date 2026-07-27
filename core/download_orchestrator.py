@@ -1277,6 +1277,9 @@ class DownloadOrchestrator:
             resolved = ""
         resolver_wait = time.monotonic() - resolve_start
         self._record_phase("resolver_wait", resolver_wait)
+        self._aggregator.mark_resolution_source(
+            key, getattr(resolver, "resolve_source", "live")
+        )
         logger.debug("[timing][track] %s resolver_wait=%.2fs", key, resolver_wait)
         if lock is not None:
             with lock:

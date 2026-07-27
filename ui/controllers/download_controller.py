@@ -610,6 +610,7 @@ class DownloadController(QObject):
                 _td, cookies_file=_cookies,
                 cancel_check=lambda: ev is not None and ev.is_set(),
             )
+            _resolve.resolve_source = _td.get("_match_source", "live")
             return _clean(resolved)
         return _resolve
 

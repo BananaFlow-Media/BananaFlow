@@ -274,6 +274,7 @@ def resolve_track_to_youtube(
 
     cached = cache.get(spotify_key, MATCH_ALGO_VERSION)
     if cached:
+        td["_match_source"] = "cache"
         return cached
 
     url = _resolve_to_ytm_url(
@@ -283,6 +284,7 @@ def resolve_track_to_youtube(
         cookies_file=cookies_file,
         cancel_check=cancel_check,
     )
+    td["_match_source"] = "live"
 
     # Cache only confident matches — never the ytsearch* last-resort sentinel.
     if url and not url.startswith("ytsearch"):

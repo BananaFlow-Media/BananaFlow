@@ -80,8 +80,10 @@ absorbs the YouTube cooldown, Spotify match resolution, gate starvation,
 ffmpeg conversion, tagging, retry backoff and the cross-volume copy
 automatically — none of it needs to be modelled per-phase.
 
-Until the batch has produced three counted completions the ETA is ``None``
-and the UI shows "calculating…" rather than a number it cannot justify.
+Until the batch has produced three representative completions the ETA is
+``None`` and the UI shows "calculating…" rather than a number it cannot
+justify. Cache/prefetch hits are excluded: they are successful downloads but
+did not pay this batch's live matching cost.
 Two completions give a single interval, and a rate from one interval is a
 coin flip — see ``_MIN_COMPLETIONS_FOR_ETA``.
 The value is always labelled an estimate — see ``eta_is_estimate``.
@@ -205,6 +207,10 @@ class JobProgress:
     # BatchProgressAggregator._eta_locked for how this adds a mandatory,
     # non-overlappable wait on top of the network-transfer estimate.
     serialized:       bool            = False
+    # ``cache`` completions may be prefetch hits that resolved before the user
+    # clicked Download. They are real successes but not representative evidence
+    # for a batch-throughput ETA.
+    resolve_source:    str             = "direct"
 
     @property
     def known_size(self) -> bool:
@@ -446,6 +452,12 @@ class BatchProgressAggregator:
             job = self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
             job.serialized = True
 
+    def mark_resolution_source(self, key: str, source: str) -> None:
+        """Attach cache/live provenance before this job enters download."""
+        with self._lock:
+            job = self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
+            job.resolve_source = source or "live"
+
     # ── Mutators (called from pool threads) ───────────────────────────────────
 
     def update(
@@ -484,7 +496,7 @@ class BatchProgressAggregator:
             job.eta_seconds = eta_seconds
             self._recompute_speed_locked()
 
-    def _record_completion_locked(self) -> None:
+    def _record_completion_locked(self, job: JobProgress) -> None:
         """Add one tick to the throughput window (see the module docstring).
 
         Only transitions that consumed a real pipeline cycle belong here.
@@ -493,6 +505,8 @@ class BatchProgressAggregator:
         instant and drive the measured rate to nonsense. CANCELLED is excluded
         because a mass-cancel produces the same degenerate burst.
         """
+        if job.resolve_source in {"cache", "prefetched"}:
+            return
         self._completion_times.append(self._time())
         while len(self._completion_times) > _THROUGHPUT_WINDOW:
             self._window_full = True
@@ -515,7 +529,7 @@ class BatchProgressAggregator:
             job.eta_seconds = None
             job.ended_at = self._time()
             if not already_terminal:
-                self._record_completion_locked()
+                self._record_completion_locked(job)
             if final_bytes is not None and final_bytes > 0:
                 job.downloaded_bytes = int(final_bytes)
                 job.total_bytes = int(final_bytes)
@@ -580,7 +594,7 @@ class BatchProgressAggregator:
             # them. They consumed no pipeline time and must not be measured as
             # though they had.
             if state == JobState.FAILED and job.submitted:
-                self._record_completion_locked()
+                self._record_completion_locked(job)
             self._recompute_speed_locked()
 
     def cancel_outstanding(self) -> list[str]:
