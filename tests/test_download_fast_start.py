@@ -175,9 +175,10 @@ class _OrderEngine:
     """Fake engine that records each download in a shared event log so the
     resolve/download interleaving is observable."""
 
-    def __init__(self, log: list) -> None:
+    def __init__(self, log: list, hold_s: float = 0.0) -> None:
         self._cancel_event = threading.Event()
         self._log = log
+        self._hold_s = hold_s
 
     def cancel_all(self) -> None:
         self._cancel_event.set()
@@ -185,6 +186,8 @@ class _OrderEngine:
     def download(self, req: DownloadRequest) -> None:
         i = int(req.url.rsplit("VID", 1)[-1])
         self._log.append(("download", i))
+        if self._hold_s:
+            time.sleep(self._hold_s)
         if req.on_finished:
             req.on_finished(
                 DownloadProgress(
@@ -194,15 +197,15 @@ class _OrderEngine:
 
 
 class TestLazyResolvePipelining:
-    def test_first_download_precedes_later_resolves(self, monkeypatch):
-        # Drop the conservative cooldown so the test is fast; the serial pool
-        # (max_workers=1) is what makes the interleaving deterministic.
+    def test_downloads_consume_a_bounded_resolver_lookahead(self, monkeypatch):
+        # Drop the conservative cooldown so the test is fast; one download
+        # worker makes the bounded resolver look-ahead deterministic.
         monkeypatch.setattr(
             DownloadOrchestrator, "_youtube_cooldown", lambda self, ev, key: None
         )
 
         log: list[tuple[str, int]] = []
-        engine = _OrderEngine(log)
+        engine = _OrderEngine(log, hold_s=0.05)
         orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
 
         def make_job(i):
@@ -218,12 +221,46 @@ class TestLazyResolvePipelining:
         n = 4
         orch.run_batch([make_job(i) for i in range(n)])
 
-        # Each track is resolved immediately before its own download — the URL
-        # is resolved the instant before it downloads, never all upfront.
-        assert log == [phase for i in range(n) for phase in (("resolve", i), ("download", i))]
-        # The crisp property: the FIRST download happens before the SECOND
-        # track is even matched — no whole-catalog pre-match gate.
-        assert log.index(("download", 0)) < log.index(("resolve", 1))
+        # Every transfer consumes a URL prepared by the resolver pool.
+        assert {i for phase, i in log if phase == "resolve"} == set(range(n))
+        assert {i for phase, i in log if phase == "download"} == set(range(n))
+        for i in range(n):
+            assert log.index(("resolve", i)) < log.index(("download", i))
+        # The bounded look-ahead starts a real transfer before the third track
+        # is resolved, so the whole catalog is never pre-matched upfront.
+        assert log.index(("download", 0)) < log.index(("resolve", 2))
+
+    def test_cancel_stops_the_pipeline_before_more_tracks_are_resolved(self):
+        started = threading.Event()
+        release = threading.Event()
+        resolved: list[int] = []
+        engine = _OrderEngine([])
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
+
+        def make_job(i):
+            req = _req(f"placeholder://{i}")
+
+            def resolver(ev, _i=i):
+                resolved.append(_i)
+                started.set()
+                release.wait(timeout=2)
+                return f"https://www.youtube.com/watch?v=VID{_i}"
+
+            req.url_resolver = resolver
+            return f"k{i}", req
+
+        thread = threading.Thread(
+            target=orch.run_batch, args=([make_job(i) for i in range(6)],)
+        )
+        thread.start()
+        assert started.wait(timeout=2)
+        orch.cancel()
+        release.set()
+        thread.join(timeout=3)
+
+        assert not thread.is_alive()
+        assert resolved == [0]
+        assert engine._log == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
