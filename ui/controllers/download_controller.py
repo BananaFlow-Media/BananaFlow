@@ -1012,6 +1012,10 @@ class DownloadController(QObject):
             # first one.
             lambda _outcome=None, w=resume_worker, k=key: self._finish_resume_worker(k, w)
         )
+        # Persist only after the worker has been submitted.  A crash before
+        # this point must leave the paused record and its workspace restorable.
+        resume_worker.start()
+        self._release_paused_record(resume_worker)
 
     def _finish_resume_worker(self, key: str, worker) -> None:
         """Release one resume worker and any unfinished timing state."""
@@ -1019,8 +1023,6 @@ class DownloadController(QObject):
             self._resume_workers.remove(worker)
         self._resume_click_ts.pop(key, None)
         self._resume_engine_started.discard(key)
-        resume_worker.start()
-        self._release_paused_record(resume_worker)
 
     def resume_all(self) -> None:
         """Continue a globally-paused batch: re-submit every snapshotted
