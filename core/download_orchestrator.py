@@ -228,6 +228,14 @@ class DownloadOrchestrator:
         self._youtube_gate = threading.Semaphore(CONSERVATIVE_MAX_PARALLEL_YOUTUBE)
         self._youtube_serialize = False
 
+        # The normal user-configured download delay belongs immediately before
+        # a real engine start, not before URL resolution.  Pipeline workers use
+        # this reservation clock to avoid a Fast-mode request burst while still
+        # allowing the resolver pool to stay ahead.
+        self._stagger_lock = threading.Lock()
+        self._next_pipeline_start_at: Optional[float] = None
+        self._pipeline_delay_range: Optional[Tuple[float, float]] = None
+
         # Per-phase timing accounting (diagnostics only — never affects flow).
         # Split so we can see where a batch spends its wall-clock time and
         # decide later whether the conservative gate/cooldown policy itself is
@@ -467,6 +475,9 @@ class DownloadOrchestrator:
         self._completed = 0
         self._failed    = 0
         stagger_delay_range = tuple(delay_range) if delay_range else None
+        with self._stagger_lock:
+            self._next_pipeline_start_at = None
+            self._pipeline_delay_range = stagger_delay_range
         # batch_id, when the caller supplies one, is the identity it will use
         # to recognise this batch's snapshots. See DownloadController.
         self._aggregator.reset(
@@ -700,13 +711,10 @@ class DownloadOrchestrator:
                 if self._engine._cancel_event.is_set():
                     break
                     
-                # Stagger the starts so the batch does not hit the server as a
-                # burst. Lazy (Spotify two-stage) jobs skip the stagger for the
-                # opening pool-fill so their matches resolve in parallel and
-                # pipeline behind the conservative gate; regular downloads keep
-                # the original per-job stagger (see _should_stagger).
-                is_lazy = getattr(req, "url_resolver", None) is not None
-                if delay_range and self._should_stagger(i, n_workers, is_lazy):
+                # This legacy loop only runs batches without lazy resolvers.
+                # Pipeline jobs apply the same delay at their actual engine
+                # start in _wait_for_pipeline_stagger instead.
+                if delay_range and self._should_stagger(i):
                     sleep_time = random.uniform(*delay_range)
                     logger.debug(f"[Orchestrator] Staggering start: sleeping {sleep_time:.2f}s")
                     sleep_start = time.time()
@@ -875,23 +883,54 @@ class DownloadOrchestrator:
     # ── Stagger / timing helpers ──────────────────────────────────────────────
 
     @staticmethod
-    def _should_stagger(i: int, n_workers: int, is_lazy: bool) -> bool:
+    def _should_stagger(i: int) -> bool:
         """Whether job ``i`` gets the inter-start stagger sleep.
 
-        Lazy (Spotify two-stage) jobs carry a ``url_resolver``: their opening
-        wave (the first ``n_workers`` jobs) is submitted WITHOUT stagger so
-        their matches resolve in parallel — the actual downloads still serialize
-        behind the conservative gate, so there is no request burst. Only lazy
-        jobs beyond the opening wave are staggered.
-
-        Regular jobs (direct URLs, no resolver) keep the original burst-
-        politeness behaviour — every job after the first is staggered — because
-        for them the opening wave IS a burst of real downloads (e.g. fast mode
-        or non-YouTube, where no gate serializes them).
+        This helper is now only used by the legacy direct-only submission loop.
+        A batch containing Spotify resolvers uses _run_resolver_pipeline, where
+        starts are staggered after resolution and directly before the engine.
         """
-        if is_lazy:
-            return i >= n_workers
         return i > 0
+
+    def _wait_for_pipeline_stagger(
+        self,
+        key: str,
+        cancel_ev: threading.Event,
+        conservative_youtube: bool,
+    ) -> bool:
+        """Wait for the user-configured Fast-mode inter-start delay.
+
+        Reserving slots under a small lock makes parallel download workers
+        honor one shared cadence. Conservative YouTube jobs deliberately skip
+        this gate because their serialized gate and cooldown are the configured
+        reliability mechanism; applying both would double-delay them.
+        """
+        delay_range = self._pipeline_delay_range
+        if not delay_range or conservative_youtube:
+            return not (cancel_ev.is_set() or self._engine._cancel_event.is_set())  # noqa: SLF001
+        with self._stagger_lock:
+            now = time.monotonic()
+            if self._next_pipeline_start_at is None:
+                start_at = now
+            else:
+                start_at = max(now, self._next_pipeline_start_at)
+            self._next_pipeline_start_at = start_at + random.uniform(*delay_range)
+
+        waited = 0.0
+        while True:
+            remaining = start_at - time.monotonic()
+            if remaining <= 0:
+                break
+            if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+                self._record_phase("stagger_wait", waited)
+                return False
+            chunk = min(0.2, remaining)
+            time.sleep(chunk)
+            waited += chunk
+        self._record_phase("stagger_wait", waited)
+        if waited:
+            logger.debug("[timing][track] %s stagger_wait=%.2fs", key, waited)
+        return not (cancel_ev.is_set() or self._engine._cancel_event.is_set())  # noqa: SLF001
 
     def _run_resolver_pipeline(
         self,
@@ -941,7 +980,14 @@ class DownloadOrchestrator:
                 next_job += 1
                 self._aggregator.mark_submitted(key)
                 if req.url_resolver is None:
-                    future = download_pool.submit(self._download_one, key, req)
+                    cancel_ev = self._cancel_events[key]
+                    conservative_youtube = (
+                        self._youtube_serialize and self._is_conservative_youtube_job(req)
+                    )
+                    future = download_pool.submit(
+                        self._download_pipeline_ready_one,
+                        key, req, cancel_ev, conservative_youtube,
+                    )
                     downloading[future] = key
                     continue
 
@@ -979,7 +1025,7 @@ class DownloadOrchestrator:
                         and not self._engine._cancel_event.is_set()  # noqa: SLF001
                     ):
                         download_future = download_pool.submit(
-                            self._download_resolved_one,
+                            self._download_pipeline_ready_one,
                             key,
                             req,
                             cancel_ev,
@@ -997,6 +1043,19 @@ class DownloadOrchestrator:
                     mark_unhandled(key, exc)
 
             fill_window()
+
+    def _download_pipeline_ready_one(
+        self,
+        key: str,
+        req: DownloadRequest,
+        cancel_ev: threading.Event,
+        conservative_youtube: bool,
+    ) -> None:
+        """Apply the real-start stagger, then consume one ready URL."""
+        if not self._wait_for_pipeline_stagger(key, cancel_ev, conservative_youtube):
+            self._mark_cancelled(key)
+            return
+        self._download_resolved_one(key, req, cancel_ev, conservative_youtube)
 
     # ── Batch workspace ────────────────────────────────────────────────────────
 
