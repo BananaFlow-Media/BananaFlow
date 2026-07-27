@@ -80,10 +80,12 @@ absorbs the YouTube cooldown, Spotify match resolution, gate starvation,
 ffmpeg conversion, tagging, retry backoff and the cross-volume copy
 automatically — none of it needs to be modelled per-phase.
 
-Until the batch has produced three representative completions the ETA is
-``None`` and the UI shows "calculating…" rather than a number it cannot
-justify. Cache/prefetch hits are excluded: they are successful downloads but
-did not pay this batch's live matching cost.
+Until the remaining work's dominant source cohort has produced three
+representative completions the ETA is ``None`` and the UI shows
+"calculating…" rather than a number it cannot justify. Cohorts are tracked as
+``live``, ``cache``, ``prefetched`` and ``direct``: an opening prefetch burst
+cannot establish the rate for a live-resolve remainder, while an all-cache or
+all-direct batch still receives an ETA from its own real completion cadence.
 Two completions give a single interval, and a rate from one interval is a
 coin flip — see ``_MIN_COMPLETIONS_FOR_ETA``.
 The value is always labelled an estimate — see ``eta_is_estimate``.
@@ -207,9 +209,8 @@ class JobProgress:
     # BatchProgressAggregator._eta_locked for how this adds a mandatory,
     # non-overlappable wait on top of the network-transfer estimate.
     serialized:       bool            = False
-    # ``cache`` completions may be prefetch hits that resolved before the user
-    # clicked Download. They are real successes but not representative evidence
-    # for a batch-throughput ETA.
+    # Provenance is known before the resolver starts and refined after it
+    # returns. ETA selects a representative cohort from this field.
     resolve_source:    str             = "direct"
 
     @property
@@ -335,15 +336,14 @@ class BatchProgressAggregator:
         self._progress_floor: float = 0.0
         self._floor_uses_estimates: bool = False
         self._batch_id: str = uuid.uuid4().hex
-        # Throughput window. ``_batch_start`` anchors the very first span, so
-        # two completions are enough to express a rate. ``_window_anchor`` moves
-        # forward to whichever completion falls out of the window, keeping the
-        # span a real elapsed measurement without ever touching per-interval
-        # gaps (see _throughput_cycle_locked for why gaps are the wrong unit).
+        # Each source cohort has an independent bounded throughput window. A
+        # prefetch/cache opening burst must not become evidence for a live
+        # resolver remainder, yet an all-cache batch must not be stuck on
+        # "calculating…" forever.
         self._batch_start: float = self._time()
-        self._completion_times: List[float] = []
-        self._window_anchor: float = self._batch_start
-        self._window_full: bool = False
+        self._completion_times: Dict[str, List[float]] = {}
+        self._window_anchor: Dict[str, float] = {}
+        self._window_full: set[str] = set()
         # Highest number of jobs seen transferring at once. This is the batch's
         # real concurrency, not its configured limit: the conservative YouTube
         # gate holds every job but one at the gate rather than in ACTIVE, so a
@@ -388,9 +388,9 @@ class BatchProgressAggregator:
             self._floor_uses_estimates = False
             self._batch_id = batch_id or uuid.uuid4().hex
             self._batch_start = self._time()
-            self._completion_times = []
-            self._window_anchor = self._batch_start
-            self._window_full = False
+            self._completion_times = {}
+            self._window_anchor = {}
+            self._window_full = set()
             self._peak_active = 0
             self._last_cycle = None
             self._last_cycle_at = None
@@ -453,7 +453,7 @@ class BatchProgressAggregator:
             job.serialized = True
 
     def mark_resolution_source(self, key: str, source: str) -> None:
-        """Attach cache/live provenance before this job enters download."""
+        """Attach live/cache/prefetch/direct provenance before download."""
         with self._lock:
             job = self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
             job.resolve_source = source or "live"
@@ -505,15 +505,15 @@ class BatchProgressAggregator:
         instant and drive the measured rate to nonsense. CANCELLED is excluded
         because a mass-cancel produces the same degenerate burst.
         """
-        if job.resolve_source in {"cache", "prefetched"}:
-            return
-        self._completion_times.append(self._time())
-        while len(self._completion_times) > _THROUGHPUT_WINDOW:
-            self._window_full = True
+        source = job.resolve_source or "live"
+        times = self._completion_times.setdefault(source, [])
+        times.append(self._time())
+        while len(times) > _THROUGHPUT_WINDOW:
+            self._window_full.add(source)
             # The evicted completion becomes the window's new anchor, so the
             # span stays a real elapsed measurement rather than silently losing
             # the time that produced the completions still in the window.
-            self._window_anchor = self._completion_times.pop(0)
+            self._window_anchor[source] = times.pop(0)
 
     def complete(self, key: str, final_bytes: Optional[int] = None) -> None:
         """Mark a job finished successfully; it counts at its full size."""
@@ -781,7 +781,20 @@ class BatchProgressAggregator:
             self._floor_uses_estimates = uses_estimates
         return raw, byte_weighted
 
-    def _throughput_cycle_locked(self) -> Optional[float]:
+    def _eta_source_locked(self, outstanding: list[JobProgress]) -> Optional[str]:
+        """Choose the source cohort that best represents work still pending."""
+        if not outstanding:
+            return None
+        counts: Dict[str, int] = {}
+        for job in outstanding:
+            source = job.resolve_source or "live"
+            counts[source] = counts.get(source, 0) + 1
+        # Break ties toward live work: it is the expensive path whose rate a
+        # cache/prefetch burst would otherwise understate.
+        priority = {"live": 3, "direct": 2, "cache": 1, "prefetched": 0}
+        return max(counts, key=lambda source: (counts[source], priority.get(source, 0)))
+
+    def _throughput_cycle_locked(self, source: Optional[str] = None) -> Optional[float]:
         """
         Measured wall-seconds per completion, or ``None`` while warming up.
 
@@ -793,17 +806,25 @@ class BatchProgressAggregator:
         span by the 6 completions in it gives 3.33 s — the batch's real
         wall-time cost per track, parallelism already baked in.
         """
-        times = self._completion_times
+        if source is None:
+            outstanding = [
+                job for job in self._jobs.values()
+                if job.state not in _TERMINAL and job.state != JobState.PAUSED
+            ]
+            source = self._eta_source_locked(outstanding)
+        if source is None:
+            return None
+        times = self._completion_times.get(source, [])
         if len(times) < _MIN_COMPLETIONS_FOR_ETA:
             return None
 
         now = self._time()
         t_last = times[-1]
 
-        if self._window_full:
+        if source in self._window_full:
             # Past the first window, the anchor is itself a completion that
             # aged out, so the batch's opening costs are already behind it.
-            anchor, n, span_end = self._window_anchor, len(times), t_last
+            anchor, n, span_end = self._window_anchor[source], len(times), t_last
         else:
             # Still measuring the batch's first completions, which is where a
             # naive anchor at batch start goes wrong: everything paid once at
@@ -952,7 +973,8 @@ class BatchProgressAggregator:
             self._last_cycle_at = None
             return None, False
 
-        measured = self._throughput_cycle_locked()
+        source = self._eta_source_locked(outstanding)
+        measured = self._throughput_cycle_locked(source)
         if measured is None:
             # Fewer than two completions: nothing has been measured yet and any
             # number would be a guess dressed up as knowledge. The UI shows
@@ -961,7 +983,8 @@ class BatchProgressAggregator:
 
         now = self._time()
         cycle = self._smooth_cycle_locked(measured, now)
-        stall = now - self._completion_times[-1]
+        assert source is not None
+        stall = now - self._completion_times[source][-1]
         eta = max(0.0, len(outstanding) * cycle - min(stall, cycle))
 
         floor = self._slowest_active_byte_time_locked()

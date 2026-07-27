@@ -603,6 +603,10 @@ class DownloadController(QObject):
         can be -- see core.download_request_codec's had_pending_resolver
         flag and _card_to_dict's spotify_id/spotify_key_kind/duration_sec
         fields."""
+        from core.scraper import track_match_source_hint
+
+        source_hint = track_match_source_hint(td)
+
         def _resolve(ev, _td=td, _cookies=cookies):
             from core.scraper import resolve_track_to_youtube
             from utils.url_cleaner import clean_youtube_url as _clean
@@ -612,6 +616,7 @@ class DownloadController(QObject):
             )
             _resolve.resolve_source = _td.get("_match_source", "live")
             return _clean(resolved)
+        _resolve.resolve_source = source_hint
         return _resolve
 
     @staticmethod
