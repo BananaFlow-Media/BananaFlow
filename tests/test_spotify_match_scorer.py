@@ -212,6 +212,88 @@ class TestFlatYoutubeSearch:
         assert result.duration_sec is None
         assert result.breakdown["duration"] == 9.0
 
+    def test_deep_validation_repairs_missing_duration_before_accepting(self, monkeypatch):
+        calls = []
+        flat = [
+            {
+                "id": "flat-winner", "title": "Sample Artist - Sample Song",
+                "channel": "Sample Artist Official",
+            },
+            {
+                "id": "flat-runner-up", "title": "Sample Artist - Sample Song",
+                "channel": "Sample Artist - Topic",
+            },
+        ]
+        deep = {
+            "https://www.youtube.com/watch?v=flat-winner": {
+                "id": "flat-winner", "title": "Sample Artist - Sample Song",
+                "channel": "Sample Artist Official", "duration": 420,
+            },
+            "https://www.youtube.com/watch?v=flat-runner-up": {
+                "id": "flat-runner-up", "title": "Sample Artist - Sample Song",
+                "channel": "Sample Artist - Topic", "duration": 180,
+            },
+        }
+
+        class FakeYoutubeDL:
+            def __init__(self, _opts):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, query, download):
+                calls.append(query)
+                return {"entries": flat} if query.startswith("ytsearch") else deep[query]
+
+        monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+        from core.spotify_match_scorer import find_best_youtube_match
+
+        result = find_best_youtube_match(
+            title="Sample Song", artist="Sample Artist", duration_sec=180
+        )
+
+        assert result is not None
+        assert result.url.endswith("flat-runner-up")
+        assert calls[0] == "ytsearch5:Sample Artist Sample Song audio"
+        assert set(calls[1:]) == {
+            "https://www.youtube.com/watch?v=flat-winner",
+            "https://www.youtube.com/watch?v=flat-runner-up",
+        }
+
+    def test_decisive_flat_result_does_not_trigger_deep_extraction(self, monkeypatch):
+        calls = []
+
+        class FakeYoutubeDL:
+            def __init__(self, _opts):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, query, download):
+                calls.append(query)
+                return {"entries": [{
+                    "id": "certain", "title": "Sample Artist - Sample Song",
+                    "channel": "Sample Artist - Topic", "duration": 180,
+                }]}
+
+        monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+        from core.spotify_match_scorer import find_best_youtube_match
+
+        result = find_best_youtube_match(
+            title="Sample Song", artist="Sample Artist", duration_sec=180
+        )
+
+        assert result is not None
+        assert calls == ["ytsearch5:Sample Artist Sample Song audio"]
+
 
 class TestResolveToYtmUrl:
     @pytest.fixture
