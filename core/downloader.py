@@ -72,6 +72,8 @@ class SilentLogger:
         pass
 
     def warning(self, msg: str) -> None:
+        from utils.yt_dlp_opts import note_po_token_provider_failure
+        note_po_token_provider_failure(msg)
         # Filter technical noise that clutters the console
         if any(x in msg for x in [
             "Signature solving failed",
@@ -97,6 +99,8 @@ class SilentLogger:
             logger.warning(f"[yt-dlp] {msg}")
 
     def error(self, msg: str) -> None:
+        from utils.yt_dlp_opts import note_po_token_provider_failure
+        note_po_token_provider_failure(msg)
         # Filter some redundancy in error messages
         if "Signature solving failed" in msg and "EJS" in msg:
             return

@@ -35,6 +35,22 @@ STILL_FILTERED_NOISE = [
 
 class TestSilentLoggerCriticalWarnings:
 
+    def test_repeated_provider_failures_open_the_circuit(self):
+        from utils.yt_dlp_opts import (
+            po_token_provider_circuit_open,
+            reset_po_token_provider_circuit,
+        )
+
+        reset_po_token_provider_circuit()
+        try:
+            logger = SilentLogger()
+            logger.warning("Failed while generating POT")
+            assert not po_token_provider_circuit_open()
+            logger.error("PoTokenProviderError")
+            assert po_token_provider_circuit_open()
+        finally:
+            reset_po_token_provider_circuit()
+
     @pytest.mark.parametrize("message, category", CRITICAL_MESSAGES)
     def test_critical_warning_not_suppressed(self, caplog, message, category):
         caplog.set_level(logging.WARNING, logger="core.downloader")
