@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # thresholds, or candidate-selection logic below change, so previously cached
 # matches produced by the old algorithm are transparently treated as misses
 # and recomputed instead of served stale.
-MATCH_ALGO_VERSION = 2
+MATCH_ALGO_VERSION = 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -245,11 +245,8 @@ def find_best_youtube_match(
     """
     Search YouTube for multiple candidates and return the best-scoring one.
 
-    Uses yt-dlp's ``ytsearchN:`` prefix to fetch N *flat* results, then
-    scores each and returns the highest.  YouTube search cards already carry
-    the title, channel, duration, id, and URL needed by this scorer.  Avoiding
-    a deep extraction for every candidate prevents each resolver from running
-    the JavaScript/PO-token path five times before a download even starts.
+    Uses yt-dlp's ``ytsearchN:`` prefix to fetch N results, then scores
+    each and returns the highest.
 
     Parameters
     ----------
@@ -283,10 +280,7 @@ def find_best_youtube_match(
             socket_timeout=8,
         )
         opts.update({
-            # A search result is sufficient for matching: the YoutubeTab
-            # extractor supplies id, URL, title, duration, channel and
-            # uploader without resolving every candidate's watch page.
-            "extract_flat": True,
+            "extract_flat": False,
             "skip_download": True,
             "no_warnings": True,
             "extractor_retries": 1,
@@ -324,14 +318,11 @@ def find_best_youtube_match(
             except (TypeError, ValueError):
                 pass
 
-        yt_url = entry.get("webpage_url") or entry.get("url") or ""
-        # Flat extractors normally return a canonical watch URL, but an
-        # extractor may expose an opaque URL token.  The stable video id is
-        # enough to form a portable URL and is safer than passing that token to
-        # the download engine.
-        if not yt_url.startswith(("http://", "https://")):
-            video_id = entry.get("id")
-            yt_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
+        yt_url = (
+            entry.get("webpage_url")
+            or entry.get("url")
+            or (f"https://www.youtube.com/watch?v={entry['id']}" if entry.get("id") else "")
+        )
         if not yt_url:
             continue
 
