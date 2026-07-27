@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # thresholds, or candidate-selection logic below change, so previously cached
 # matches produced by the old algorithm are transparently treated as misses
 # and recomputed instead of served stale.
-MATCH_ALGO_VERSION = 3
+MATCH_ALGO_VERSION = 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -245,12 +245,8 @@ def find_best_youtube_match(
     """
     Search YouTube for multiple candidates and return the best-scoring one.
 
-    Uses yt-dlp's ``ytsearchN:`` prefix to fetch N *flat* results, scores
-    them, then deep-validates only an ambiguous leading candidate (or the top
-    two when they are close).  Search cards normally carry the title, channel,
-    duration, id, and URL needed by this scorer; selective validation retains
-    that fast path without accepting a weak flat result merely because its
-    missing metadata earned partial credit.
+    Uses yt-dlp's ``ytsearchN:`` prefix to fetch N results, then scores
+    each and returns the highest.
 
     Parameters
     ----------
@@ -282,13 +278,14 @@ def find_best_youtube_match(
             quiet=True,
             retries=1,
             socket_timeout=8,
-            enable_po_token_provider=False,
+            # Preserve main's established deep-search behaviour exactly.  The
+            # circuit breaker protects downloads, but omitting the provider
+            # here changes YouTube search results and therefore match choices.
+            # stderr is still captured and repeated diagnostics are coalesced.
+            respect_po_token_circuit=False,
         )
         opts.update({
-            # A search result is sufficient for matching: the YoutubeTab
-            # extractor supplies id, URL, title, duration, channel and
-            # uploader without resolving every candidate's watch page.
-            "extract_flat": True,
+            "extract_flat": False,
             "skip_download": True,
             "no_warnings": True,
             "extractor_retries": 1,
@@ -311,11 +308,11 @@ def find_best_youtube_match(
         logger.debug("[MatchScorer] No YouTube results for: %s - %s", artist, title)
         return None
 
-    candidates: list[tuple[dict, MatchResult]] = []
+    best: Optional[MatchResult] = None
 
-    def scored(entry: dict, *, fallback_url: str = "") -> Optional[MatchResult]:
+    for entry in entries:
         if not entry:
-            return None
+            continue
         yt_title   = entry.get("title") or ""
         yt_channel = entry.get("channel") or entry.get("uploader") or ""
         yt_dur     = None
@@ -326,16 +323,13 @@ def find_best_youtube_match(
             except (TypeError, ValueError):
                 pass
 
-        yt_url = entry.get("webpage_url") or entry.get("url") or fallback_url
-        # Flat extractors normally return a canonical watch URL, but an
-        # extractor may expose an opaque URL token.  The stable video id is
-        # enough to form a portable URL and is safer than passing that token to
-        # the download engine.
-        if not yt_url.startswith(("http://", "https://")):
-            video_id = entry.get("id")
-            yt_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
+        yt_url = (
+            entry.get("webpage_url")
+            or entry.get("url")
+            or (f"https://www.youtube.com/watch?v={entry['id']}" if entry.get("id") else "")
+        )
         if not yt_url:
-            return None
+            continue
 
         total, breakdown = score_candidate(
             title, artist, duration_sec,
@@ -348,76 +342,19 @@ def find_best_youtube_match(
             total, confidence, yt_title[:50], yt_channel[:20], yt_dur,
         )
 
-        return MatchResult(
-            url=yt_url,
-            youtube_title=yt_title,
-            channel=yt_channel,
-            duration_sec=yt_dur,
-            score=total,
-            confidence=confidence,
-            breakdown=breakdown,
-        )
+        if best is None or total > best.score:
+            best = MatchResult(
+                url=yt_url,
+                youtube_title=yt_title,
+                channel=yt_channel,
+                duration_sec=yt_dur,
+                score=total,
+                confidence=confidence,
+                breakdown=breakdown,
+            )
 
-    for entry in entries:
-        result = scored(entry)
-        if result is not None:
-            candidates.append((entry, result))
-
-    if not candidates:
+    if best is None:
         return None
-
-    candidates.sort(key=lambda item: item[1].score, reverse=True)
-    best = candidates[0][1]
-
-    # Flat results are the ordinary path.  Deep extraction is deliberately
-    # limited to the cases where the flat ranking lacks decisive evidence:
-    # absent duration/channel, a score near the acceptance boundary, or two
-    # close leaders.  Validate both close leaders because validating only the
-    # current winner cannot reveal that the runner-up has the better real
-    # duration/channel data.
-    validate_indices = {0}
-    if (
-        best.duration_sec is not None
-        and best.channel
-        and best.confidence >= min_confidence + 0.10
-        and (len(candidates) == 1 or best.score - candidates[1][1].score > 8.0)
-    ):
-        validate_indices.clear()
-    if len(candidates) > 1 and best.score - candidates[1][1].score <= 8.0:
-        validate_indices.add(1)
-
-    for index in sorted(validate_indices):
-        flat_entry, flat_result = candidates[index]
-        try:
-            # The flat-search cookie copy has been released above.  Deep
-            # validation must therefore obtain its own short-lived copy rather
-            # than retaining a now-deleted cookiefile path in ``opts``.
-            with temp_cookies_copy(cookies_file) as deep_cf:
-                deep_opts = build_base_ydl_opts(
-                    cookies_file=deep_cf,
-                    logger=SilentLogger(),
-                    quiet=True,
-                    retries=1,
-                    socket_timeout=8,
-                )
-                deep_opts.update({
-                    "extract_flat": False,
-                    "skip_download": True,
-                    "ignoreerrors": True,
-                })
-                with yt_dlp.YoutubeDL(deep_opts) as ydl:
-                    deep_info = ydl.extract_info(flat_result.url, download=False)
-        except Exception as exc:  # noqa: BLE001 - retain the flat candidate
-            logger.debug("[MatchScorer] Deep validation failed for %s: %s", flat_result.url, exc)
-            continue
-        if not isinstance(deep_info, dict) or not deep_info.get("id"):
-            continue
-        refined = scored(deep_info, fallback_url=flat_result.url)
-        if refined is not None:
-            candidates[index] = (flat_entry, refined)
-
-    candidates.sort(key=lambda item: item[1].score, reverse=True)
-    best = candidates[0][1]
 
     if best.confidence < min_confidence:
         logger.debug(

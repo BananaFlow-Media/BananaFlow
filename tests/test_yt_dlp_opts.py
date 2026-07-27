@@ -145,6 +145,17 @@ class TestPoTokenCircuitBreaker:
 
         assert "extractor_args" not in opts
 
+    def test_matcher_can_preserve_provider_after_download_circuit_opens(self, monkeypatch):
+        expected = {"youtubepot-bgutilscript": {"server_home": ["C:/provider"]}}
+        monkeypatch.setattr(yt_dlp_opts, "_detect_bundled_pot_provider_args", lambda: expected)
+        monkeypatch.setattr(yt_dlp_opts, "install_bgutil_stderr_capture", lambda: None)
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+        yt_dlp_opts.note_po_token_provider_attempt_failure()
+
+        opts = yt_dlp_opts.build_base_ydl_opts(respect_po_token_circuit=False)
+
+        assert opts["extractor_args"] == expected
+
     def test_bgutil_stderr_is_captured_without_affecting_other_commands(self, monkeypatch):
         from yt_dlp.utils import Popen
 

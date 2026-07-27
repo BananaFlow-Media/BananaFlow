@@ -319,6 +319,7 @@ def build_base_ydl_opts(
     socket_timeout:       int            = 20,
     proxy:                Optional[str]  = None,
     enable_po_token_provider: bool       = True,
+    respect_po_token_circuit: bool       = True,
 ) -> dict[str, Any]:
     """
     Return a base yt-dlp options dict with BananaFlow's standard network,
@@ -344,7 +345,10 @@ def build_base_ydl_opts(
     }
 
     # ── Logger (optional) ─────────────────────────────────────────────────────
-    if enable_po_token_provider and not po_token_provider_circuit_open():
+    circuit_allows_provider = (
+        not respect_po_token_circuit or not po_token_provider_circuit_open()
+    )
+    if enable_po_token_provider and circuit_allows_provider:
         bundled_provider_args = _detect_bundled_pot_provider_args()
         if bundled_provider_args:
             install_bgutil_stderr_capture()
