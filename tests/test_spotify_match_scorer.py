@@ -133,40 +133,9 @@ class TestScoreCandidate:
         # Good title/artist but duration kills it
         assert total < 70.0
 
-    def test_duration_cannot_outweigh_missing_artist_evidence(self):
-        cover_score, cover = score_candidate(
-            "באת לי פתאום - 2020", "קרן פלס", 192,
-            "באת לי פתאום קאבר", "חפצי פרג", 194,
-        )
-        artist_score, artist = score_candidate(
-            "באת לי פתאום - 2020", "קרן פלס", 192,
-            "קרן פלס ורוני אלטר - באת לי פתאום", "קרן פלס", 202,
-        )
-
-        assert cover["artist"] == 0.0
-        assert cover["unexpected_versions"] == ["cover"]
-        assert artist["artist"] >= 16.0
-        assert artist_score > cover_score
-
-    @pytest.mark.parametrize("source_title, candidate_title", [
-        ("Song (Cover)", "Sample Artist - Song (Cover)"),
-        ("Song - Live", "Sample Artist - Song (Live)"),
-        ("Song (Remix)", "Sample Artist - Song (Remix)"),
-    ])
-    def test_requested_version_is_not_penalized(self, source_title, candidate_title):
-        _score, breakdown = score_candidate(
-            source_title, "Sample Artist", 180,
-            candidate_title, "Sample Artist - Topic", 180,
-        )
-        assert breakdown["version_penalty"] == 0.0
-        assert breakdown["unexpected_versions"] == []
-        assert breakdown["missing_versions"] == []
-
 
 class TestFlatYoutubeSearch:
-    def _find_with_entries(
-        self, monkeypatch, entries, *, title="Sample Song", artist="Sample Artist", duration=180,
-    ):
+    def _find_with_entries(self, monkeypatch, entries):
         """Run the matcher against a yt-dlp stand-in and retain its options."""
         captured = {}
 
@@ -191,7 +160,7 @@ class TestFlatYoutubeSearch:
         from core.spotify_match_scorer import find_best_youtube_match
 
         result = find_best_youtube_match(
-            title=title, artist=artist, duration_sec=duration
+            title="Sample Song", artist="Sample Artist", duration_sec=180
         )
         return result, captured
 
@@ -223,7 +192,7 @@ class TestFlatYoutubeSearch:
             {
                 "id": "right-duration",
                 "url": "https://www.youtube.com/watch?v=right-duration",
-                "title": "Sample Artist - Sample Song (Official Audio)",
+                "title": "Sample Artist - Sample Song (Lyrics)",
                 "channel": "Sample Artist - Topic",
                 "duration": 180,
             },
@@ -325,31 +294,6 @@ class TestFlatYoutubeSearch:
         assert result is not None
         assert calls == ["ytsearch5:Sample Artist Sample Song audio"]
 
-    def test_rejects_cover_without_source_artist_and_selects_artist_recording(self, monkeypatch):
-        source_title = "\u05d1\u05d0\u05ea \u05dc\u05d9 \u05e4\u05ea\u05d0\u05d5\u05dd - 2020"
-        source_artist = "\u05e7\u05e8\u05df \u05e4\u05dc\u05e1"
-        result, _ = self._find_with_entries(monkeypatch, [
-            {
-                "id": "cover", "title": "באת לי פתאום קאבר",
-                "channel": "חפצי פרג", "duration": 194,
-            },
-            {
-                "id": "keren", "title": "קרן פלס ורוני אלטר - באת לי פתאום",
-                "channel": "קרן פלס", "duration": 202,
-            },
-        ], title=source_title, artist=source_artist, duration=192)
-
-        assert result is not None
-        assert result.url.endswith("keren")
-
-    def test_returns_no_match_when_flat_and_deep_lack_artist_evidence(self, monkeypatch):
-        result, _ = self._find_with_entries(monkeypatch, [{
-            "id": "wrong-artist", "title": "Sample Song",
-            "channel": "Other Artist", "duration": 180,
-        }])
-
-        assert result is None
-
 
 class TestResolveToYtmUrl:
     @pytest.fixture
@@ -401,9 +345,9 @@ class TestResolveToYtmUrl:
         assert url == "https://www.youtube.com/watch?v=fallback_vid"
         assert called_fallback == [True]
 
-    def test_resolve_no_safe_match_returns_empty(self, mock_ytmusic, monkeypatch):
+    def test_resolve_last_resort(self, mock_ytmusic, monkeypatch):
         from core.scraper import _resolve_to_ytm_url
         monkeypatch.setattr("core.spotify_match_scorer.find_best_youtube_match", lambda *a, **k: None)
 
         url = _resolve_to_ytm_url("Nonexistent Song", "Nonexistent Artist", 224)
-        assert url == ""
+        assert "ytsearch1" in url

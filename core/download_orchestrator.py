@@ -1012,9 +1012,7 @@ class DownloadOrchestrator:
         happens in parallel across workers while only the downloads themselves
         serialize. Returns True if the job was cancelled (caller should abort).
         The track stays visually "queued" during the match — no matching/YouTube
-        wording is surfaced. A resolver that cannot establish a safe URL fails
-        this job instead of handing its placeholder or blind ytsearch query to
-        the download engine.
+        wording is surfaced. A bad/failed match never sinks the job.
         """
         if req.url_resolver is None:
             return False
@@ -1056,14 +1054,9 @@ class DownloadOrchestrator:
         resolve_start = time.monotonic()
         try:
             resolved = resolver(cancel_ev)
-        except Exception:
-            # Do not leave pause/resume bookkeeping in its mid-resolve state
-            # before the worker future reports the controlled failure.
-            if lock is not None:
-                with lock:
-                    self._resolving_keys.discard(key)
-                    self._pending_resolver_requests.pop(key, None)
-            raise
+        except Exception as exc:  # noqa: BLE001 - a bad match must not sink the job
+            logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
+            resolved = ""
         resolver_wait = time.monotonic() - resolve_start
         self._record_phase("resolver_wait", resolver_wait)
         logger.debug("[timing][track] %s resolver_wait=%.2fs", key, resolver_wait)

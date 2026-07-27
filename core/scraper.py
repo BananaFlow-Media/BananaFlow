@@ -101,9 +101,9 @@ def _resolve_to_ytm_url(
     """
     Resolve a track to a YouTube Music URL via ytmusicapi search.
 
-    Uses duration-based and text-similarity confidence scoring to pick the best
-    safe match. A weak candidate is not converted into a blind ``ytsearch``
-    request, because that could download a different artist's recording.
+    Uses duration-based and text-similarity confidence scoring to pick the best match.
+    Falls back to a general YouTube search if YTM confidence is low, and finally
+    to a plain ytsearch1: query as a last resort.
 
     ``cancel_check`` (if given) is polled between the cheap YTM search and the
     heavier yt-dlp fallback so a cancel doesn't let an already-doomed second
@@ -115,7 +115,7 @@ def _resolve_to_ytm_url(
 
     try:
         from ytmusicapi import YTMusic
-        from core.spotify_match_scorer import MatchResult, _is_safe_candidate, score_candidate
+        from core.spotify_match_scorer import score_candidate
 
         yt = YTMusic()
         results = yt.search(query, filter="songs", limit=5)
@@ -160,11 +160,11 @@ def _resolve_to_ytm_url(
 
                 if score > best_ytm_score:
                     best_ytm_score = score
-                    best_ytm_candidate = (vid, score, yt_title, yt_channel, yt_dur)
+                    best_ytm_candidate = (vid, score)
                     best_ytm_breakdown = breakdown
 
             if best_ytm_candidate:
-                vid, score, best_ytm_title, best_ytm_channel, best_ytm_dur = best_ytm_candidate
+                vid, score = best_ytm_candidate
                 confidence = score / 100.0
                 if artist and best_ytm_breakdown.get("artist", 0.0) == 0.0:
                     confidence = min(confidence, 0.50)
@@ -172,26 +172,17 @@ def _resolve_to_ytm_url(
                     "[Scraper] Best YTM candidate: %s (score=%.1f, confidence=%.2f)",
                     vid, score, confidence
                 )
-                ytm_result = MatchResult(
-                    url=f"https://music.youtube.com/watch?v={vid}",
-                    youtube_title=best_ytm_title,
-                    channel=best_ytm_channel,
-                    duration_sec=best_ytm_dur or None,
-                    score=score,
-                    confidence=confidence,
-                    breakdown=best_ytm_breakdown,
-                )
-                if confidence >= 0.65 and _is_safe_candidate(artist, ytm_result):
+                if confidence >= 0.65:
                     return f"https://music.youtube.com/watch?v={vid}"
 
     except Exception as exc:
         logger.debug("[Scraper] ytmusicapi search or scoring failed: %s", exc)
 
     # A cancel between the cheap YTM search and the heavier yt-dlp fallback
-    # avoids another network call. The orchestrator observes the same cancel
-    # event before it could submit a download.
+    # returns the last-resort placeholder immediately rather than firing
+    # another network call the user has already abandoned.
     if cancel_check and cancel_check():
-        return ""
+        return f"ytsearch1:{query} audio"
 
     # ── Fallback 1: General YouTube Search ──
     try:
@@ -201,10 +192,7 @@ def _resolve_to_ytm_url(
             title=title,
             artist=artist,
             duration_sec=spotify_dur,
-            # A full artist hit plus an intent-compatible title is sufficient
-            # evidence at 0.50. The scorer safety gate independently rejects
-            # candidates without that identity evidence.
-            min_confidence=0.50,
+            min_confidence=0.55,
             cookies_file=cookies_file,
         )
         if yt_match:
@@ -216,10 +204,21 @@ def _resolve_to_ytm_url(
     except Exception as exc:
         logger.debug("[Scraper] General YouTube fallback search failed: %s", exc)
 
-    # A low-confidence YTM candidate is intentionally not used: the scorer
-    # could not establish its artist/version identity.
-    logger.info("[Scraper] No safe match found for '%s'.", query)
-    return ""
+    # ── Fallback 2: Best YTM candidate (even if low confidence) ──
+    if best_ytm_candidate:
+        vid, score = best_ytm_candidate
+        if score >= 35.0:
+            logger.debug(
+                "[Scraper] Falling back to low confidence YTM candidate: %s (score=%.1f)",
+                vid, score
+            )
+            return f"https://music.youtube.com/watch?v={vid}"
+
+    # ── Fallback 3: Last Resort ytsearch1 ──
+    # Routine — every track always resolves to *something* playable via this
+    # last-resort search; nothing here is actionable by the user.
+    logger.debug("[Scraper] No confident match found for '%s'. Using last resort ytsearch1.", query)
+    return f"ytsearch1:{query} audio"
 
 
 def _spotify_id_from_url(url: str) -> str:

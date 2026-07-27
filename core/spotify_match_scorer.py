@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # thresholds, or candidate-selection logic below change, so previously cached
 # matches produced by the old algorithm are transparently treated as misses
 # and recomputed instead of served stale.
-MATCH_ALGO_VERSION = 4
+MATCH_ALGO_VERSION = 3
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -93,22 +93,6 @@ _BRANDED_CHANNEL_RE = re.compile(r"vevo", re.I)
 _TOPIC_RE           = re.compile(r" - topic$", re.I)
 _OFFICIAL_RE        = re.compile(r"official", re.I)
 
-# The recording/version is part of the work selected in Spotify.  These
-# markers deliberately stay outside _normalize(): a lyrics suffix is harmless
-# for title similarity but material when choosing a recording.
-_VERSION_MARKERS = {
-    "cover": re.compile(r"\bcover\b|קאבר", re.I),
-    "live": re.compile(r"\blive\b|לייב|הופעה", re.I),
-    "remix": re.compile(r"\bremix\b|\brmx\b|רמיקס", re.I),
-    "karaoke": re.compile(r"\bkaraoke\b|קריוקי", re.I),
-    "lyrics": re.compile(r"\blyrics?\b|[\[(]\s*מילים\s*[\])]", re.I),
-}
-
-# _artist_score returns 16 for a full source-artist hit in either title or
-# channel (and 20 for both).  Its 6-point first-word fallback is deliberately
-# not enough evidence for a duration match to choose a recording.
-_MIN_ARTIST_EVIDENCE = 16.0
-
 
 def _normalize(text: str) -> str:
     """Lowercase + strip noise patterns for comparison."""
@@ -116,22 +100,6 @@ def _normalize(text: str) -> str:
     for pat in _STRIP_PATTERNS:
         t = pat.sub(" ", t)
     return t.strip()
-
-
-def _version_intent(text: str) -> frozenset[str]:
-    """Return explicit recording/version markers carried by ``text``."""
-    return frozenset(
-        name for name, marker in _VERSION_MARKERS.items() if marker.search(text or "")
-    )
-
-
-def _version_penalty(spotify_title: str, youtube_title: str) -> tuple[float, frozenset[str], frozenset[str]]:
-    """Score agreement between the Spotify and candidate recording intents."""
-    source = _version_intent(spotify_title)
-    candidate = _version_intent(youtube_title)
-    unexpected = candidate - source
-    missing = source - candidate
-    return (32.0 * len(unexpected) + 18.0 * len(missing), unexpected, missing)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -252,37 +220,14 @@ def score_candidate(
     d = _duration_score(spotify_dur, yt_dur)
     a = _artist_score(spotify_artist, yt_title, yt_channel)
     c = _channel_score(yt_channel, spotify_artist)
-    version_penalty, unexpected_versions, missing_versions = _version_penalty(
-        spotify_title, yt_title,
-    )
-    total = max(0.0, t + d + a + c - version_penalty)
+    total = t + d + a + c
     breakdown = {
         "title": t,
         "duration": d,
         "artist": a,
         "channel": c,
-        "version_penalty": version_penalty,
-        "unexpected_versions": sorted(unexpected_versions),
-        "missing_versions": sorted(missing_versions),
     }
     return total, breakdown
-
-
-def _has_minimum_artist_evidence(spotify_artist: str, result: MatchResult) -> bool:
-    """Whether a candidate has identity evidence independent of duration."""
-    return (
-        not spotify_artist.strip()
-        or result.breakdown.get("artist", 0.0) >= _MIN_ARTIST_EVIDENCE
-    )
-
-
-def _is_safe_candidate(spotify_artist: str, result: MatchResult) -> bool:
-    """Whether the flat/deep metadata proves a safe recording choice."""
-    return (
-        _has_minimum_artist_evidence(spotify_artist, result)
-        and not result.breakdown.get("unexpected_versions")
-        and not result.breakdown.get("missing_versions")
-    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -425,15 +370,14 @@ def find_best_youtube_match(
 
     # Flat results are the ordinary path.  Deep extraction is deliberately
     # limited to the cases where the flat ranking lacks decisive evidence:
-    # absent duration/channel, insufficient artist/version evidence, a score
-    # near the acceptance boundary, or two close leaders.  Validate both close
-    # leaders because validating only the current winner cannot reveal that the
-    # runner-up has the better real duration/channel data.
+    # absent duration/channel, a score near the acceptance boundary, or two
+    # close leaders.  Validate both close leaders because validating only the
+    # current winner cannot reveal that the runner-up has the better real
+    # duration/channel data.
     validate_indices = {0}
     if (
         best.duration_sec is not None
         and best.channel
-        and _is_safe_candidate(artist, best)
         and best.confidence >= min_confidence + 0.10
         and (len(candidates) == 1 or best.score - candidates[1][1].score > 8.0)
     ):
@@ -472,16 +416,7 @@ def find_best_youtube_match(
             candidates[index] = (flat_entry, refined)
 
     candidates.sort(key=lambda item: item[1].score, reverse=True)
-    safe_candidates = [
-        result for _, result in candidates if _is_safe_candidate(artist, result)
-    ]
-    if not safe_candidates:
-        logger.info(
-            "[MatchScorer] No safe match for %s - %s (artist/version evidence missing)",
-            artist, title,
-        )
-        return None
-    best = safe_candidates[0]
+    best = candidates[0][1]
 
     if best.confidence < min_confidence:
         logger.debug(
