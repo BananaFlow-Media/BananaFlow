@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -55,55 +56,106 @@ _JS_RUNTIME_EXE_NAMES = {
 _NODE_MIN_MAJOR_VERSION = 22
 
 _POT_FAILURE_THRESHOLD = 2
+_POT_CIRCUIT_COOLDOWN_SECONDS = 300.0
 _pot_circuit_lock = threading.Lock()
 _pot_failure_count = 0
-_pot_circuit_open = False
+_pot_circuit_open_until = 0.0
+_pot_attempts_total = 0
+_pot_diagnostic_messages = 0
+_pot_first_diagnostic_logged = False
 _bgutil_stderr_capture_installed = False
 
 
 def reset_po_token_provider_circuit() -> None:
-    """Re-enable the optional provider for a newly started batch."""
-    global _pot_failure_count, _pot_circuit_open
+    """Reset process-wide PO-token telemetry (test/support hook only)."""
+    global _pot_failure_count, _pot_circuit_open_until
+    global _pot_attempts_total, _pot_diagnostic_messages, _pot_first_diagnostic_logged
     with _pot_circuit_lock:
         _pot_failure_count = 0
-        _pot_circuit_open = False
+        _pot_circuit_open_until = 0.0
+        _pot_attempts_total = 0
+        _pot_diagnostic_messages = 0
+        _pot_first_diagnostic_logged = False
+
+
+def _circuit_open_locked(now: float) -> bool:
+    global _pot_failure_count, _pot_circuit_open_until
+    if _pot_circuit_open_until and now >= _pot_circuit_open_until:
+        _pot_failure_count = 0
+        _pot_circuit_open_until = 0.0
+    return _pot_circuit_open_until > now
 
 
 def po_token_provider_circuit_open() -> bool:
     with _pot_circuit_lock:
-        return _pot_circuit_open
+        return _circuit_open_locked(time.monotonic())
+
+
+def note_po_token_provider_attempt_failure() -> bool:
+    """Record one failed bgutil process invocation and maybe open its breaker.
+
+    This is deliberately the sole authoritative failure counter. yt-dlp can
+    rephrase one subprocess failure as several warnings/errors, so those
+    messages are diagnostic evidence only and must not spend attempt budget.
+    The breaker is process-wide with a cooldown: concurrent batches cannot
+    reset or accidentally re-enable a provider that has just failed.
+    """
+    global _pot_failure_count, _pot_circuit_open_until, _pot_attempts_total
+    now = time.monotonic()
+    with _pot_circuit_lock:
+        if _circuit_open_locked(now):
+            return False
+        _pot_failure_count += 1
+        _pot_attempts_total += 1
+        if _pot_failure_count < _POT_FAILURE_THRESHOLD:
+            return False
+        _pot_circuit_open_until = now + _POT_CIRCUIT_COOLDOWN_SECONDS
+    logger.warning(
+        "[yt-dlp][po_token] bgutil provider failed %d actual process attempts; disabling it for %.0fs",
+        _POT_FAILURE_THRESHOLD, _POT_CIRCUIT_COOLDOWN_SECONDS,
+    )
+    return True
 
 
 def note_po_token_provider_failure(message: str) -> bool:
-    """Open a per-batch circuit after repeated provider failures.
-
-    The provider is optional: once it has demonstrably failed twice, later
-    yt-dlp instances omit BananaFlow's provider configuration and immediately
-    use yt-dlp's normal fallback path.  The return value tells a caller whether
-    this observation opened the circuit.
-    """
-    global _pot_failure_count, _pot_circuit_open
+    """Compatibility wrapper for explicit callers that observed an attempt."""
     lower = (message or "").lower()
     if not any(token in lower for token in (
-        "potokenprovidererror",
-        "failed while generating pot",
-        "failed to generate an integrity token",
-        "unable to fetch gvs po token",
+        "potokenprovidererror", "failed while generating pot",
+        "failed to generate an integrity token", "unable to fetch gvs po token",
         "po_token_missing",
     )):
         return False
+    return note_po_token_provider_attempt_failure()
+
+
+def note_po_token_provider_diagnostic(message: str) -> bool:
+    """Count a yt-dlp PO-token message; return True only for the first one."""
+    global _pot_diagnostic_messages, _pot_first_diagnostic_logged
+    lower = (message or "").lower()
+    if not any(token in lower for token in (
+        "potokenprovidererror", "failed while generating pot",
+        "failed to generate an integrity token", "unable to fetch gvs po token",
+        "po_token_missing", "po token",
+    )):
+        return False
     with _pot_circuit_lock:
-        if _pot_circuit_open:
-            return False
-        _pot_failure_count += 1
-        if _pot_failure_count < _POT_FAILURE_THRESHOLD:
-            return False
-        _pot_circuit_open = True
-    logger.warning(
-        "[yt-dlp][po_token] bgutil provider failed %d times; disabling it for the rest of this batch",
-        _POT_FAILURE_THRESHOLD,
-    )
-    return True
+        _pot_diagnostic_messages += 1
+        first = not _pot_first_diagnostic_logged
+        _pot_first_diagnostic_logged = True
+        return first
+
+
+def po_token_provider_metrics() -> dict[str, object]:
+    """A monotonic telemetry snapshot for batch summaries and diagnostics."""
+    with _pot_circuit_lock:
+        now = time.monotonic()
+        return {
+            "attempts": _pot_attempts_total,
+            "diagnostics": _pot_diagnostic_messages,
+            "circuit_open": _circuit_open_locked(now),
+            "cooldown_remaining": max(0.0, _pot_circuit_open_until - now),
+        }
 
 
 def _is_bgutil_script_command(command: object) -> bool:
@@ -121,8 +173,9 @@ def install_bgutil_stderr_capture() -> None:
     The third-party provider invokes ``yt_dlp.utils.Popen.run`` without a
     ``stderr`` argument, which inherits the app console.  Wrap only the two
     bgutil script commands; all other yt-dlp subprocesses retain their exact
-    upstream behaviour.  Details stay in debug logging and provider failures
-    feed the batch circuit breaker.
+    upstream behaviour. Details stay in debug logging. A non-zero bgutil
+    process exit is the one authoritative circuit-breaker event; yt-dlp's
+    related messages are merely coalesced diagnostics.
     """
     global _bgutil_stderr_capture_installed
     with _pot_circuit_lock:
@@ -139,16 +192,12 @@ def install_bgutil_stderr_capture() -> None:
                 return original_run(command, *args, **kwargs)
             kwargs.setdefault("stderr", subprocess.PIPE)
             stdout, stderr, returncode = original_run(command, *args, **kwargs)
-            failure_message = ""
             if stderr:
                 text = str(stderr).strip()
                 if text:
                     logger.debug("[yt-dlp][po_token][bgutil stderr] %s", text)
-                    failure_message = text
-            if returncode and not failure_message:
-                failure_message = "PoTokenProviderError"
-            if failure_message:
-                note_po_token_provider_failure(failure_message)
+            if returncode:
+                note_po_token_provider_attempt_failure()
             return stdout, stderr, returncode
 
         Popen.run = staticmethod(capturing_run)
