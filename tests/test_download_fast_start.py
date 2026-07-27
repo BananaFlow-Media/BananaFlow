@@ -6,8 +6,8 @@ PR3 tests for the two-stage Spotify *download* fast-start:
 * ``core.match_prefetcher.MatchPrefetcher`` warms plugins once and pre-resolves
   only the leading N tracks (never the whole catalog), via the same resolve
   path (unchanged match quality), and is cancellable.
-* ``DownloadOrchestrator._should_stagger`` skips the inter-start stagger for the
-  opening pool-fill wave and applies it only to later jobs.
+* Spotify pipeline downloads preserve the user's Fast-mode inter-start delay
+  at actual engine starts, while resolver work stays parallel.
 * the orchestrator resolves each track's URL the instant before its own
   download — the first download starts without pre-matching the whole catalog.
 
@@ -124,35 +124,14 @@ class TestMatchPrefetcher:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Opening-wave stagger skip
+# Direct-only legacy stagger
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestShouldStagger:
-    def test_lazy_opening_wave_is_not_staggered_later_jobs_are(self):
-        n_workers = 3
-        # Lazy (url_resolver) jobs: the opening pool-fill fills immediately so
-        # matches resolve in parallel; downloads still serialize at the gate.
-        assert not DownloadOrchestrator._should_stagger(0, n_workers, is_lazy=True)
-        assert not DownloadOrchestrator._should_stagger(1, n_workers, is_lazy=True)
-        assert not DownloadOrchestrator._should_stagger(2, n_workers, is_lazy=True)
-        # Lazy jobs past the opening wave are staggered.
-        assert DownloadOrchestrator._should_stagger(3, n_workers, is_lazy=True)
-        assert DownloadOrchestrator._should_stagger(4, n_workers, is_lazy=True)
-
-    def test_lazy_batch_smaller_than_pool_never_staggers(self):
-        # 2 lazy jobs, 3 workers: both are in the opening wave.
-        assert not DownloadOrchestrator._should_stagger(0, 3, is_lazy=True)
-        assert not DownloadOrchestrator._should_stagger(1, 3, is_lazy=True)
-
-    def test_regular_downloads_keep_original_stagger(self):
-        # Regular (no resolver) jobs keep the pre-existing behaviour: every job
-        # after the first is staggered — the opening wave is a real download
-        # burst for them (fast mode / non-YouTube have no serial gate).
-        n_workers = 3
-        assert not DownloadOrchestrator._should_stagger(0, n_workers, is_lazy=False)
-        assert DownloadOrchestrator._should_stagger(1, n_workers, is_lazy=False)
-        assert DownloadOrchestrator._should_stagger(2, n_workers, is_lazy=False)
-        assert DownloadOrchestrator._should_stagger(5, n_workers, is_lazy=False)
+    def test_direct_only_batch_keeps_original_stagger(self):
+        assert not DownloadOrchestrator._should_stagger(0)
+        assert DownloadOrchestrator._should_stagger(1)
+        assert DownloadOrchestrator._should_stagger(5)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -175,9 +154,10 @@ class _OrderEngine:
     """Fake engine that records each download in a shared event log so the
     resolve/download interleaving is observable."""
 
-    def __init__(self, log: list) -> None:
+    def __init__(self, log: list, hold_s: float = 0.0) -> None:
         self._cancel_event = threading.Event()
         self._log = log
+        self._hold_s = hold_s
 
     def cancel_all(self) -> None:
         self._cancel_event.set()
@@ -185,6 +165,8 @@ class _OrderEngine:
     def download(self, req: DownloadRequest) -> None:
         i = int(req.url.rsplit("VID", 1)[-1])
         self._log.append(("download", i))
+        if self._hold_s:
+            time.sleep(self._hold_s)
         if req.on_finished:
             req.on_finished(
                 DownloadProgress(
@@ -194,15 +176,104 @@ class _OrderEngine:
 
 
 class TestLazyResolvePipelining:
-    def test_first_download_precedes_later_resolves(self, monkeypatch):
-        # Drop the conservative cooldown so the test is fast; the serial pool
-        # (max_workers=1) is what makes the interleaving deterministic.
+    def test_fast_pipeline_staggers_real_engine_starts(self):
+        starts: list[float] = []
+
+        class Engine(_PlainEngine):
+            def download(self, req):
+                starts.append(time.monotonic())
+                super().download(req)
+
+        engine = Engine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=3)
+
+        def make_job(i):
+            req = _req(f"placeholder://{i}")
+            req.youtube_reliability_mode = "fast"
+            req.url_resolver = lambda _ev, _i=i: f"https://www.youtube.com/watch?v=VID{_i}"
+            return f"k{i}", req
+
+        orch.run_batch([make_job(i) for i in range(3)], delay_range=(0.06, 0.06))
+
+        assert len(starts) == 3
+        gaps = [b - a for a, b in zip(starts, starts[1:])]
+        assert all(gap >= 0.04 for gap in gaps)
+
+    def test_mixed_direct_and_lazy_fast_jobs_share_one_start_cadence(self):
+        starts: list[float] = []
+
+        class Engine(_PlainEngine):
+            def download(self, req):
+                starts.append(time.monotonic())
+                super().download(req)
+
+        engine = Engine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=3)
+        direct = _req("https://example.com/direct")
+        direct.youtube_reliability_mode = "fast"
+        lazy = []
+        for i in range(2):
+            req = _req(f"placeholder://{i}")
+            req.youtube_reliability_mode = "fast"
+            req.url_resolver = lambda _ev, _i=i: f"https://www.youtube.com/watch?v=VID{_i}"
+            lazy.append((f"lazy-{i}", req))
+
+        orch.run_batch([("direct", direct), *lazy], delay_range=(0.06, 0.06))
+
+        assert len(starts) == 3
+        assert all(b - a >= 0.04 for a, b in zip(starts, starts[1:]))
+
+    def test_cancel_during_pipeline_stagger_does_not_start_the_reserved_job(self):
+        first_started = threading.Event()
+        downloads: list[str] = []
+
+        class Engine(_PlainEngine):
+            def download(self, req):
+                downloads.append(req.url)
+                first_started.set()
+                super().download(req)
+
+        engine = Engine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=2)
+
+        def make_job(i):
+            req = _req(f"placeholder://{i}")
+            req.youtube_reliability_mode = "fast"
+            req.url_resolver = lambda _ev, _i=i: f"https://www.youtube.com/watch?v=VID{_i}"
+            return f"k{i}", req
+
+        thread = threading.Thread(
+            target=orch.run_batch,
+            args=([make_job(0), make_job(1)],),
+            kwargs={"delay_range": (0.5, 0.5)},
+        )
+        thread.start()
+        assert first_started.wait(timeout=2)
+        orch.cancel()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert len(downloads) == 1
+
+    def test_conservative_pipeline_uses_only_its_existing_gate_and_cooldown(self):
+        engine = _PlainEngine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
+        orch._pipeline_delay_range = (1.0, 1.0)  # noqa: SLF001 - direct gate unit test
+        started = time.monotonic()
+        assert orch._wait_for_pipeline_stagger(  # noqa: SLF001 - direct gate unit test
+            "k", threading.Event(), conservative_youtube=True
+        )
+        assert time.monotonic() - started < 0.1
+
+    def test_downloads_consume_a_bounded_resolver_lookahead(self, monkeypatch):
+        # Drop the conservative cooldown so the test is fast; one download
+        # worker makes the bounded resolver look-ahead deterministic.
         monkeypatch.setattr(
             DownloadOrchestrator, "_youtube_cooldown", lambda self, ev, key: None
         )
 
         log: list[tuple[str, int]] = []
-        engine = _OrderEngine(log)
+        engine = _OrderEngine(log, hold_s=0.05)
         orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
 
         def make_job(i):
@@ -218,12 +289,46 @@ class TestLazyResolvePipelining:
         n = 4
         orch.run_batch([make_job(i) for i in range(n)])
 
-        # Each track is resolved immediately before its own download — the URL
-        # is resolved the instant before it downloads, never all upfront.
-        assert log == [phase for i in range(n) for phase in (("resolve", i), ("download", i))]
-        # The crisp property: the FIRST download happens before the SECOND
-        # track is even matched — no whole-catalog pre-match gate.
-        assert log.index(("download", 0)) < log.index(("resolve", 1))
+        # Every transfer consumes a URL prepared by the resolver pool.
+        assert {i for phase, i in log if phase == "resolve"} == set(range(n))
+        assert {i for phase, i in log if phase == "download"} == set(range(n))
+        for i in range(n):
+            assert log.index(("resolve", i)) < log.index(("download", i))
+        # The bounded look-ahead starts a real transfer before the third track
+        # is resolved, so the whole catalog is never pre-matched upfront.
+        assert log.index(("download", 0)) < log.index(("resolve", 2))
+
+    def test_cancel_stops_the_pipeline_before_more_tracks_are_resolved(self):
+        started = threading.Event()
+        release = threading.Event()
+        resolved: list[int] = []
+        engine = _OrderEngine([])
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
+
+        def make_job(i):
+            req = _req(f"placeholder://{i}")
+
+            def resolver(ev, _i=i):
+                resolved.append(_i)
+                started.set()
+                release.wait(timeout=2)
+                return f"https://www.youtube.com/watch?v=VID{_i}"
+
+            req.url_resolver = resolver
+            return f"k{i}", req
+
+        thread = threading.Thread(
+            target=orch.run_batch, args=([make_job(i) for i in range(6)],)
+        )
+        thread.start()
+        assert started.wait(timeout=2)
+        orch.cancel()
+        release.set()
+        thread.join(timeout=3)
+
+        assert not thread.is_alive()
+        assert resolved == [0]
+        assert engine._log == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
