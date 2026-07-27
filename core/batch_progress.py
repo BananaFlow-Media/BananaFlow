@@ -86,8 +86,9 @@ representative completions the ETA is ``None`` and the UI shows
 ``live``, ``cache``, ``prefetched`` and ``direct``: an opening prefetch burst
 cannot establish the rate for a live-resolve remainder, while an all-cache or
 all-direct batch still receives an ETA from its own real completion cadence.
-Two completions give a single interval, and a rate from one interval is a
-coin flip — see ``_MIN_COMPLETIONS_FOR_ETA``.
+Three completions give two intervals; a rate from one interval is a coin flip.
+When the cohort has run in parallel, the estimator also waits for two full
+completion waves — see ``_MIN_COMPLETIONS_FOR_ETA``.
 The value is always labelled an estimate — see ``eta_is_estimate``.
 
 Limitations are documented on :meth:`snapshot`.
@@ -627,9 +628,11 @@ class BatchProgressAggregator:
           Spotify matches, or a throttling change will show up only once it
           starts affecting real completions. It is always labelled an
           estimate (``eta_is_estimate``).
-        * While fewer than two jobs have completed there is nothing measured
-          to extrapolate from, so ``eta_seconds`` is ``None`` and the UI
-          shows "calculating…" rather than a number derived from one sample.
+        * Until the outstanding work's dominant source cohort has enough
+          representative completions (at least three, and two full waves when
+          it has run in parallel), there is nothing reliable to extrapolate
+          from.  ``eta_seconds`` is then ``None`` and the UI shows
+          "calculating…" rather than a number derived from one sample.
         * In the final drain — when fewer jobs remain than the batch was
           running in parallel — the remaining jobs finish concurrently rather
           than at the measured serial rate, so the estimate runs mildly
@@ -976,9 +979,9 @@ class BatchProgressAggregator:
         source = self._eta_source_locked(outstanding)
         measured = self._throughput_cycle_locked(source)
         if measured is None:
-            # Fewer than two completions: nothing has been measured yet and any
-            # number would be a guess dressed up as knowledge. The UI shows
-            # "calculating…" instead.
+            # The selected cohort has not yet completed the minimum sample
+            # (and, when parallel, two full waves).  Any number would be a
+            # guess dressed up as knowledge, so the UI shows "calculating…".
             return None, True
 
         now = self._time()
