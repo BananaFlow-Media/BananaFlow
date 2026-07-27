@@ -434,6 +434,29 @@ class TestControllerBindsTheIdItMints:
         DownloadController._on_track_first_byte(ctrl, "k0")
         assert ctrl._first_byte_logged
 
+    def test_single_track_resume_uses_its_own_first_byte_clock(self, monkeypatch, caplog):
+        import logging
+        import ui.controllers.download_controller as controller_mod
+        from ui.controllers.download_controller import DownloadController
+
+        ctrl = DownloadController.__new__(DownloadController)
+        ctrl._is_active_worker_signal = lambda: True
+        ctrl._first_byte_logged = False
+        ctrl._batch_click_ts = 10.0
+        ctrl._resume_click_ts = {"resume": 100.0}
+        ctrl._resume_engine_started = set()
+        ctrl._key_to_card = {}
+        monkeypatch.setattr(controller_mod.time, "monotonic", lambda: 102.0)
+
+        with caplog.at_level(logging.INFO):
+            DownloadController._on_track_status(ctrl, "resume", "starting")
+            DownloadController._on_track_first_byte(ctrl, "resume")
+
+        assert not ctrl._first_byte_logged
+        assert "[timing][resume] first engine start" in caplog.text
+        assert "[timing][resume] first real byte" in caplog.text
+        assert "after click" not in caplog.text
+
     def test_weighted_track_progress_does_not_change_the_card_phase(self):
         from ui.controllers.download_controller import DownloadController
 

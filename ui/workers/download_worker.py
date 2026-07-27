@@ -10,9 +10,10 @@ DownloadWorker's only job is:
   2. Call orchestrator.run_batch() inside QThread.run().
   3. Expose cancel() / cancel_track() / shutdown() for the UI.
 
-Signal summary  (unchanged from v3)
+Signal summary
 ------------------------------------
 track_progress(str, float)    Per-track progress fraction.
+track_first_byte(str)         First callback with downloaded_bytes > 0.
 track_status(str, str)        Per-track status string.
 track_finished(str, str)      (key, output_path) on success.
 overall_progress(float)       Batch-level 0.0–1.0.

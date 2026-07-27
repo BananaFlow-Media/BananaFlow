@@ -151,6 +151,11 @@ class DownloadController(QObject):
         self._batch_click_ts: Optional[float] = None
         self._engine_start_logged: bool = False
         self._first_byte_logged: bool = False
+        # A single-track resume is a separate user action, not part of the
+        # previous batch's click-to-first-byte measurement.  Keep its timing
+        # keyed by request so a late byte cannot be attributed to that batch.
+        self._resume_click_ts: dict[str, float] = {}
+        self._resume_engine_started: set[str] = set()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -970,6 +975,8 @@ class DownloadController(QObject):
 
         card.set_status("queued")
         card.set_progress(0.0)
+        self._resume_click_ts[key] = time.monotonic()
+        self._resume_engine_started.discard(key)
 
         self._key_to_card[key] = card
         resume_worker = DownloadWorker(
@@ -1003,10 +1010,15 @@ class DownloadController(QObject):
             # its docstring) would see those stale entries as still active
             # and stop reporting completion for every resume after the
             # first one.
-            lambda _outcome=None, w=resume_worker: (
-                self._resume_workers.remove(w) if w in self._resume_workers else None
-            )
+            lambda _outcome=None, w=resume_worker, k=key: self._finish_resume_worker(k, w)
         )
+
+    def _finish_resume_worker(self, key: str, worker) -> None:
+        """Release one resume worker and any unfinished timing state."""
+        if worker in self._resume_workers:
+            self._resume_workers.remove(worker)
+        self._resume_click_ts.pop(key, None)
+        self._resume_engine_started.discard(key)
         resume_worker.start()
         self._release_paused_record(resume_worker)
 
@@ -1178,6 +1190,13 @@ class DownloadController(QObject):
         """Record the first *real* transfer byte once per clicked batch."""
         if not self._is_active_worker_signal():
             return
+        resume_click = getattr(self, "_resume_click_ts", {}).pop(key, None)
+        if resume_click is not None:
+            logger.info(
+                "[timing][resume] first real byte (downloaded_bytes > 0): %.3fs after resume",
+                time.monotonic() - resume_click,
+            )
+            return
         if self._first_byte_logged or self._batch_click_ts is None:
             return
         self._first_byte_logged = True
@@ -1198,7 +1217,18 @@ class DownloadController(QObject):
             return
         # "starting" means the URL was resolved and the orchestrator is about
         # to hand the job to yt-dlp. It intentionally precedes the first byte.
+        resume_click = getattr(self, "_resume_click_ts", {}).get(key)
         if (
+            status == "starting"
+            and resume_click is not None
+            and key not in getattr(self, "_resume_engine_started", set())
+        ):
+            self._resume_engine_started.add(key)
+            logger.info(
+                "[timing][resume] first engine start (starting): %.3fs after resume",
+                time.monotonic() - resume_click,
+            )
+        elif (
             status == "starting"
             and not self._engine_start_logged
             and self._batch_click_ts is not None
