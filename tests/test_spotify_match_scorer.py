@@ -176,6 +176,7 @@ class TestFlatYoutubeSearch:
         assert captured["extract_flat"] is True
         assert captured["skip_download"] is True
         assert captured["download"] is False
+        assert "extractor_args" not in captured
         assert result is not None
         assert result.duration_sec == 180
         assert result.url == "https://www.youtube.com/watch?v=good-id"

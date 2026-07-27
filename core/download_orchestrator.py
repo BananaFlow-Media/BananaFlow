@@ -442,6 +442,12 @@ class DownloadOrchestrator:
         preexisting = preexisting or []
         total_jobs = len(jobs) + len(preexisting)
 
+        # The optional bgutil provider is allowed a fresh, bounded attempt
+        # budget for each user batch. Repeated failures within this batch open
+        # its circuit and leave later downloads on yt-dlp's regular fallback.
+        from utils.yt_dlp_opts import reset_po_token_provider_circuit
+        reset_po_token_provider_circuit()
+
         if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
             logger.debug("[Orchestrator] Empty batch — skipping")

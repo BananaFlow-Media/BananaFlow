@@ -282,6 +282,7 @@ def find_best_youtube_match(
             quiet=True,
             retries=1,
             socket_timeout=8,
+            enable_po_token_provider=False,
         )
         opts.update({
             # A search result is sufficient for matching: the YoutubeTab
