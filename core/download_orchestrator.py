@@ -204,6 +204,9 @@ class DownloadOrchestrator:
         self._phase_model = TrackPhaseModel()
         self._job_phase: dict[str, tuple[TrackPhase, float]] = {}
         self._phase_state_lock = threading.Lock()
+        # Once Pause claims a job, no later heartbeat/progress callback may
+        # repaint its card as active. Reset for every new orchestrator batch.
+        self._phase_suppressed_keys: set[str] = set()
         # Keys whose Spotify two-stage url_resolver has been consumed but
         # whose resolved URL has not yet been committed to req.url. A
         # snapshot of the LIVE request while a key is in here would have
@@ -218,6 +221,9 @@ class DownloadOrchestrator:
         # the job's own lock, so the two can never both happen for one job.
         # See _claim_job_outcome and live_request_snapshot.
         self._job_outcomes: dict[str, str] = {}
+        # Thread-local diagnostic attribution is keyed by this run identity.
+        # The PO circuit remains process-wide; only summary ownership is scoped.
+        self._diagnostic_scope_id: Optional[str] = None
 
         # Progress accounting. The aggregator owns byte-weighted batch
         # progress, aggregate speed, and the whole-batch ETA (see
@@ -421,6 +427,12 @@ class DownloadOrchestrator:
                 return state, None
             if not self._claim_job_outcome_locked(key, "paused"):
                 return state, None
+            # Stop every future phase/heartbeat repaint before handing control
+            # back to the UI. The current phase is deliberately not learned as
+            # a completed observation because Pause cut it short.
+            with self._phase_state_lock:
+                self._phase_suppressed_keys.add(key)
+                self._job_phase.pop(key, None)
             # snapshot_copy, not dataclasses.replace: replace() rebuilds
             # through __init__ and silently drops the init=False
             # output-path tracker, which is what a job paused in the
@@ -451,14 +463,6 @@ class DownloadOrchestrator:
         preexisting = preexisting or []
         total_jobs = len(jobs) + len(preexisting)
 
-        # The optional bgutil provider owns a process-wide cooldown, so a
-        # concurrent resume cannot re-enable a provider a main batch just
-        # proved unhealthy. Keep a monotonic snapshot only for this batch's
-        # end-of-run summary; never reset the shared breaker here.
-        from utils.yt_dlp_opts import cookie_diagnostic_metrics, po_token_provider_metrics
-        po_metrics_start = po_token_provider_metrics()
-        cookie_metrics_start = cookie_diagnostic_metrics()
-
         if total_jobs == 0:
             # Empty batch is NOT a completed download — never fake 100%.
             logger.debug("[Orchestrator] Empty batch — skipping")
@@ -471,11 +475,23 @@ class DownloadOrchestrator:
                 outcome=BatchOutcome.COMPLETED,
             )
 
+        # Give this run a diagnostic identity before plugin warm-up or any
+        # worker pool exists. Worker tasks inherit it explicitly through
+        # _submit_pool_task, so concurrent batches cannot claim each other's
+        # PO/cookie messages in their end-of-run summaries.
+        from utils.yt_dlp_opts import (
+            diagnostic_scope, diagnostic_scope_metrics, po_token_provider_metrics,
+        )
+        self._diagnostic_scope_id = (
+            f"orchestrator-{id(self)}-{time.monotonic_ns()}"
+        )
+
         # This path also serves CLI/headless callers that never ran Spotify
         # prefetch.  It must happen before either executor is created: yt-dlp
         # lazily re-executes plugins while loading and concurrent first use can
         # otherwise print duplicate-provider tracebacks directly to stderr.
-        _warm_up_yt_dlp_plugins()
+        with diagnostic_scope(self._diagnostic_scope_id):
+            _warm_up_yt_dlp_plugins()
 
         all_keys = [key for key, _ in jobs] + [key for key, _ in preexisting]
 
@@ -518,6 +534,7 @@ class DownloadOrchestrator:
         self._phase_model.reset()
         with self._phase_state_lock:
             self._job_phase.clear()
+            self._phase_suppressed_keys.clear()
         with self._phase_lock:
             self._phase_times.clear()
         with self._gate_lock:
@@ -754,8 +771,11 @@ class DownloadOrchestrator:
                 # itself is staggered.
                 self._aggregator.mark_submitted(key)
 
-                future = pool.submit(self._download_one, key, req)
-                futures[future] = key
+                future = self._submit_pool_task(
+                    pool, key, self._download_one, key, req,
+                )
+                if future is not None:
+                    futures[future] = key
 
             pending = set(futures)
             while pending:
@@ -896,9 +916,11 @@ class DownloadOrchestrator:
         self._log_phase_summary(time.monotonic() - run_start)
 
         po_metrics_end = po_token_provider_metrics()
-        cookie_metrics_end = cookie_diagnostic_metrics()
-        attempts = int(po_metrics_end["attempts"]) - int(po_metrics_start["attempts"])
-        diagnostics = int(po_metrics_end["diagnostics"]) - int(po_metrics_start["diagnostics"])
+        scope_metrics = diagnostic_scope_metrics(
+            self._diagnostic_scope_id, clear=True,
+        )
+        attempts = int(scope_metrics["attempts"])
+        diagnostics = int(scope_metrics["po_diagnostics"])
         if attempts or diagnostics:
             logger.warning(
                 "[yt-dlp][po_token] batch summary: %d provider process failure(s), "
@@ -912,10 +934,7 @@ class DownloadOrchestrator:
                 ),
             )
 
-        cookie_diagnostics = (
-            int(cookie_metrics_end["diagnostics"])
-            - int(cookie_metrics_start["diagnostics"])
-        )
+        cookie_diagnostics = int(scope_metrics["cookie_diagnostics"])
         if cookie_diagnostics:
             logger.warning(
                 "[yt-dlp][cookies] batch summary: %d expired/invalid-cookie "
@@ -923,6 +942,7 @@ class DownloadOrchestrator:
                 cookie_diagnostics,
             )
 
+        self._diagnostic_scope_id = None
         return BatchResult(
             total=self._total,
             completed=self._completed,
@@ -983,6 +1003,39 @@ class DownloadOrchestrator:
             logger.debug("[timing][track] %s stagger_wait=%.2fs", key, waited)
         return not (cancel_ev.is_set() or self._engine._cancel_event.is_set())  # noqa: SLF001
 
+    def _run_in_diagnostic_scope(self, fn, *args):
+        """Execute one pool task with this batch's diagnostic ownership."""
+        scope_id = self._diagnostic_scope_id
+        if not scope_id:
+            return fn(*args)
+        from utils.yt_dlp_opts import diagnostic_scope
+        with diagnostic_scope(scope_id):
+            return fn(*args)
+
+    def _submit_pool_task(self, pool, key: str, fn, *args):
+        """Submit safely across the cancel/shutdown boundary.
+
+        cancel() deliberately shuts executors down immediately. A resolver may
+        finish in the tiny interval between the cancellation check and submit().
+        ThreadPoolExecutor then raises RuntimeError. Treat that specific race as
+        an ordinary cancellation, while preserving unexpected submit failures.
+        """
+        try:
+            return pool.submit(self._run_in_diagnostic_scope, fn, *args)
+        except RuntimeError:
+            cancel_ev = self._cancel_events.get(key)
+            if (
+                self._engine._cancel_event.is_set()  # noqa: SLF001
+                or (cancel_ev is not None and cancel_ev.is_set())
+            ):
+                logger.debug(
+                    "[Orchestrator] Pool closed during cancellation; "
+                    "job %s will not be submitted", key,
+                )
+                self._mark_cancelled(key)
+                return None
+            raise
+
     def _run_resolver_pipeline(
         self,
         jobs: list[tuple[str, DownloadRequest]],
@@ -1035,19 +1088,23 @@ class DownloadOrchestrator:
                     conservative_youtube = (
                         self._youtube_serialize and self._is_conservative_youtube_job(req)
                     )
-                    future = download_pool.submit(
-                        self._download_pipeline_ready_one,
+                    future = self._submit_pool_task(
+                        download_pool, key, self._download_pipeline_ready_one,
                         key, req, cancel_ev, conservative_youtube,
                     )
-                    downloading[future] = key
+                    if future is not None:
+                        downloading[future] = key
                     continue
 
                 cancel_ev = self._cancel_events[key]
                 conservative_youtube = (
                     self._youtube_serialize and self._is_conservative_youtube_job(req)
                 )
-                future = resolver_pool.submit(self._resolve_lazy_url, key, req, cancel_ev)
-                resolving[future] = (key, req, cancel_ev, conservative_youtube)
+                future = self._submit_pool_task(
+                    resolver_pool, key, self._resolve_lazy_url, key, req, cancel_ev,
+                )
+                if future is not None:
+                    resolving[future] = (key, req, cancel_ev, conservative_youtube)
 
         fill_window()
         while resolving or downloading:
@@ -1075,14 +1132,12 @@ class DownloadOrchestrator:
                         and not cancel_ev.is_set()
                         and not self._engine._cancel_event.is_set()  # noqa: SLF001
                     ):
-                        download_future = download_pool.submit(
-                            self._download_pipeline_ready_one,
-                            key,
-                            req,
-                            cancel_ev,
-                            conservative_youtube,
+                        download_future = self._submit_pool_task(
+                            download_pool, key, self._download_pipeline_ready_one,
+                            key, req, cancel_ev, conservative_youtube,
                         )
-                        downloading[download_future] = key
+                        if download_future is not None:
+                            downloading[download_future] = key
                     continue
 
                 key = downloading.pop(future)
@@ -1134,6 +1189,8 @@ class DownloadOrchestrator:
         """Move a job into a phase, tell the UI, and time the phase it left."""
         now = time.monotonic()
         with self._phase_state_lock:
+            if key in self._phase_suppressed_keys:
+                return
             previous = self._job_phase.get(key)
             self._job_phase[key] = (phase, now)
         if previous is not None:
@@ -1169,6 +1226,8 @@ class DownloadOrchestrator:
         is what "how far is this track" means to a person watching it.
         """
         with self._phase_state_lock:
+            if key in self._phase_suppressed_keys:
+                return
             current = self._job_phase.get(key)
         if current is None:
             return

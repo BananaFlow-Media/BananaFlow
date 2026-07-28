@@ -65,6 +65,50 @@ _pot_diagnostic_messages = 0
 _pot_first_diagnostic_logged = False
 _bgutil_stderr_capture_installed = False
 _cookie_diagnostic_messages = 0
+_diagnostic_scope_local = threading.local()
+_diagnostic_scope_counts: dict[str, dict[str, int]] = {}
+
+
+@contextmanager
+def diagnostic_scope(scope_id: Optional[str]) -> Iterator[None]:
+    """Attribute diagnostics emitted on this thread to one batch/run."""
+    previous = getattr(_diagnostic_scope_local, "scope_id", None)
+    _diagnostic_scope_local.scope_id = scope_id
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                del _diagnostic_scope_local.scope_id
+            except AttributeError:
+                pass
+        else:
+            _diagnostic_scope_local.scope_id = previous
+
+
+def _note_diagnostic_scope_locked(metric: str) -> None:
+    scope_id = getattr(_diagnostic_scope_local, "scope_id", None)
+    if not scope_id:
+        return
+    bucket = _diagnostic_scope_counts.setdefault(
+        scope_id,
+        {"attempts": 0, "po_diagnostics": 0, "cookie_diagnostics": 0},
+    )
+    bucket[metric] += 1
+
+
+def diagnostic_scope_metrics(
+    scope_id: Optional[str], *, clear: bool = False,
+) -> dict[str, int]:
+    """Return diagnostics owned by one run, never another concurrent run."""
+    empty = {"attempts": 0, "po_diagnostics": 0, "cookie_diagnostics": 0}
+    if not scope_id:
+        return empty
+    with _pot_circuit_lock:
+        result = dict(_diagnostic_scope_counts.get(scope_id, empty))
+        if clear:
+            _diagnostic_scope_counts.pop(scope_id, None)
+        return result
 
 
 def reset_po_token_provider_circuit() -> None:
@@ -79,6 +123,7 @@ def reset_po_token_provider_circuit() -> None:
         _pot_diagnostic_messages = 0
         _pot_first_diagnostic_logged = False
         _cookie_diagnostic_messages = 0
+        _diagnostic_scope_counts.clear()
 
 
 def _circuit_open_locked(now: float) -> bool:
@@ -110,6 +155,7 @@ def note_po_token_provider_attempt_failure() -> bool:
             return False
         _pot_failure_count += 1
         _pot_attempts_total += 1
+        _note_diagnostic_scope_locked("attempts")
         if _pot_failure_count < _POT_FAILURE_THRESHOLD:
             return False
         _pot_circuit_open_until = now + _POT_CIRCUIT_COOLDOWN_SECONDS
@@ -144,6 +190,7 @@ def note_po_token_provider_diagnostic(message: str) -> bool:
         return False
     with _pot_circuit_lock:
         _pot_diagnostic_messages += 1
+        _note_diagnostic_scope_locked("po_diagnostics")
         first = not _pot_first_diagnostic_logged
         _pot_first_diagnostic_logged = True
         return first
@@ -179,6 +226,7 @@ def note_cookie_diagnostic(message: str) -> bool:
         return False
     with _pot_circuit_lock:
         _cookie_diagnostic_messages += 1
+        _note_diagnostic_scope_locked("cookie_diagnostics")
     return True
 
 
