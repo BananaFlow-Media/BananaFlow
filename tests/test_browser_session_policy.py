@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from core.browser_session import (
@@ -27,9 +30,16 @@ def test_firefox_and_non_windows_chromium_remain_supported():
 
 
 def test_builder_fails_closed_for_windows_chromium(monkeypatch):
-    monkeypatch.setattr("core.browser_session.sys.platform", "win32")
+    host_platform = sys.platform
+    # Replace this module's reference instead of mutating the process-wide
+    # sys.platform object. On Linux/Python 3.12, changing the shared object
+    # makes shutil.which enter a Windows-only branch without _winapi.
+    monkeypatch.setattr(
+        "core.browser_session.sys", SimpleNamespace(platform="win32")
+    )
     with pytest.raises(BrowserCookieAccessError):
         build_base_ydl_opts(cookies_browser="edge", enable_po_token_provider=False)
+    assert sys.platform == host_platform
 
 
 @pytest.mark.parametrize(
