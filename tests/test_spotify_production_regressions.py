@@ -102,8 +102,16 @@ def test_embed_parser_handles_spaced_script_end_tag_without_consuming_page_conte
         "</script>",
         "</script\t\n data-extra><script>window.UNRELATED = 'Popular Albums';</script>",
     )
-    with pytest.raises(RuntimeError, match="structured Spotify embed data"):
-        parse_spotify_embed_track_html(malformed_end, track_id)
+    try:
+        malformed_metadata = parse_spotify_embed_track_html(malformed_end, track_id)
+    except RuntimeError:
+        # HTMLParser versions differ on invalid end-tag attributes.  Rejecting
+        # the malformed document is safe; accepting the browser-style end tag
+        # is also safe only when the captured JSON remains exactly scoped.
+        pass
+    else:
+        assert malformed_metadata["title"] == "Shallow"
+        assert malformed_metadata["artist_credits"] == ["Lady Gaga", "Bradley Cooper"]
 
 
 def test_individual_track_production_path_emits_valid_metadata_as_pending(monkeypatch):
