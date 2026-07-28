@@ -33,7 +33,7 @@ class Engine:
 
     def download(self, req):
         self.urls.append(req.url)
-        if len(self.urls) == 1:
+        if len(self.urls) == 1 and self.first_error is not None:
             req.on_error(DownloadProgress(
                 status=DownloadStatus.ERROR,
                 url=req.url,
@@ -127,8 +127,8 @@ def test_private_video_with_generic_signin_advice_is_still_stale_media():
     )
 
 
-def test_empty_lazy_match_fails_instead_of_using_placeholder(tmp_path):
-    engine = Engine("should never reach engine")
+def test_empty_lazy_match_is_repaired_before_engine_submission(tmp_path):
+    engine = Engine(None)
     callbacks = Callbacks()
     req = _request(tmp_path)
     req.url = "ytsearch1:Artist Song"
@@ -137,6 +137,7 @@ def test_empty_lazy_match_fails_instead_of_using_placeholder(tmp_path):
     result = DownloadOrchestrator(engine, callbacks, max_workers=1).run_batch(
         [("k", req)]
     )
-    assert result.failed == 1
-    assert engine.urls == []
-    assert callbacks.errors[0][1].message_key == "err_safe_match_not_found"
+    assert result.failed == 0
+    assert result.completed == 1
+    assert engine.urls == ["ytsearch1:Artist Song audio"]
+    assert callbacks.errors == []

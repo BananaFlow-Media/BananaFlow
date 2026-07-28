@@ -160,6 +160,22 @@ def test_queue_restart_preserves_artwork_and_source_identity():
     assert restore.items[0].source_url == card.source_url
 
 
+def test_queue_restart_repairs_legacy_valid_spotify_unresolved_card():
+    """A strict miss saved by the broken revision must not stay disabled."""
+    from ui.components.track_card import TrackCard
+
+    card = TrackCard(
+        "השם יעזור", "Odeya", platform="spotify", track_url="",
+        match_status="unresolved", resolution_error="spotify_unresolved_card",
+        spotify_id="1UruS1fpkhIXklaJnttSzA",
+    )
+
+    assert card.match_status == "pending"
+    assert card.resolution_error == ""
+    assert card.is_downloadable()
+    assert card.is_selected()
+
+
 def test_search_results_are_independent_and_channel_imports_are_grouped(tmp_path, monkeypatch):
     from config import AppConfig
     from core.duplicate_detector import VideoInfo

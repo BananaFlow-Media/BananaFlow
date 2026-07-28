@@ -103,13 +103,15 @@ def _resolve_to_ytm_url(
     cookies_file: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     exclude_urls: Optional[set[str]] = None,
+    album: str = "",
 ) -> str:
     """
     Resolve a track to a YouTube Music URL via ytmusicapi search.
 
-    Uses recording-identity gates to pick a safe match. A result that cannot
-    prove artist/title/version intent is rejected instead of being delegated
-    to an unscored ``ytsearch1`` download.
+    Uses recording-identity gates first, then the existing broad search and a
+    ranked reasonable fallback. If discovery yields no usable candidate,
+    valid Spotify metadata remains downloadable through a legacy ``ytsearch1``
+    request; malformed metadata is still rejected before any search.
 
     ``cancel_check`` (if given) is polled between the cheap YTM search and the
     heavier yt-dlp fallback so a cancel doesn't let an already-doomed second
@@ -121,7 +123,9 @@ def _resolve_to_ytm_url(
     artist = ", ".join(artist_credits)
     query = f"{artist} {title}" if artist else title
     excluded = exclude_urls or set()
+    ytm_matches = []
     best_ytm_match = None
+    best_general_match = None
 
     try:
         from ytmusicapi import YTMusic
@@ -174,7 +178,11 @@ def _resolve_to_ytm_url(
                     yt_channel=yt_channel,
                     yt_duration_sec=yt_dur if yt_dur > 0 else None,
                     yt_artists=artist_names,
+                    spotify_album=album,
+                    yt_album=(r.get("album") or {}).get("name", "")
+                    if isinstance(r.get("album"), dict) else "",
                 )
+                ytm_matches.append(match)
                 if match.safe and (
                     best_ytm_match is None
                     or (match.score, match.url) > (best_ytm_match.score, best_ytm_match.url)
@@ -205,25 +213,25 @@ def _resolve_to_ytm_url(
         match_kwargs = dict(
             title=title, artist=artist, duration_sec=spotify_dur,
             min_confidence=0.55, cookies_file=cookies_file,
+            album=album, allow_reasonable_fallback=True,
         )
         if excluded:
             match_kwargs["exclude_urls"] = excluded
         yt_match = find_best_youtube_match(**match_kwargs)
         if yt_match:
-            logger.info(
-                "[Scraper] YTM confidence was low. Found strong general YouTube match: %s (confidence=%.2f)",
-                yt_match.youtube_title, yt_match.confidence
-            )
-            return yt_match.url
+            if yt_match.safe:
+                logger.info(
+                    "[Scraper] YTM confidence was low. Found strong general "
+                    "YouTube match: %s (confidence=%.2f)",
+                    yt_match.youtube_title, yt_match.confidence,
+                )
+                return yt_match.url
+            best_general_match = yt_match
     except Exception as exc:
         logger.debug("[Scraper] General YouTube fallback search failed: %s", exc)
 
-    # The strict YTM threshold is deliberately high.  If it was inconclusive
-    # and the broader general-YouTube path also found nothing, retain the best
-    # *identity-safe* structured YTM candidate at the same 0.55 floor used by
-    # the general fallback.  This preserves useful imperfect matches without
-    # reviving the old unscored ytsearch sentinel or accepting wrong artists,
-    # versions, covers, karaoke, tribute, or fan uploads.
+    # The strict YTM threshold is deliberately high. Retain a lower-confidence
+    # safe YTM result before considering an approximate candidate.
     if best_ytm_match and best_ytm_match.confidence >= 0.55:
         logger.info(
             "[Scraper] General fallback was inconclusive; using the closest "
@@ -232,11 +240,48 @@ def _resolve_to_ytm_url(
         )
         return best_ytm_match.url
 
+    # The broad resolver has already had its opportunity. If it produced no
+    # result, a structured YTM candidate may still be the closest reasonable
+    # recording when only independent artist proof is missing (for example
+    # Latin Spotify credits versus Hebrew YouTube Music credits).
+    try:
+        from core.spotify_match_scorer import _rank, is_reasonable_fallback_match
+        reasonable_candidates = [
+            item for item in _rank([
+                *ytm_matches,
+                *([best_general_match] if best_general_match else []),
+            ])
+            if is_reasonable_fallback_match(item)
+        ]
+        if reasonable_candidates:
+            best = reasonable_candidates[0]
+            logger.info(
+                "[Scraper] Using closest reasonable YouTube candidate: "
+                "%s (ranking_score=%.1f)",
+                best.youtube_title,
+                float(best.breakdown.get("ranking_score", best.score)),
+            )
+            return best.url
+    except Exception as exc:
+        logger.debug("[Scraper] Reasonable YTM ranking failed: %s", exc)
+
+    fallback = spotify_legacy_search_request(title, artist)
     logger.warning(
-        "[Scraper] No identity-safe YouTube match for title=%r artist=%r",
+        "[Scraper] No direct reasonable candidate for title=%r artist=%r; "
+        "delegating to legacy search request",
         title, artist,
     )
-    return ""
+    return fallback
+
+
+def spotify_legacy_search_request(title: str, artist: str) -> str:
+    """Build the final yt-dlp search request for valid Spotify metadata."""
+    from utils.spotify_resolver import validate_spotify_track_metadata
+
+    clean_title, artist_credits = validate_spotify_track_metadata(title, [artist])
+    clean_artist = ", ".join(artist_credits)
+    query = " ".join(part for part in (clean_artist, clean_title, "audio") if part)
+    return f"ytsearch1:{query}"
 
 
 def _spotify_id_from_url(url: str) -> str:
@@ -311,6 +356,7 @@ def resolve_track_to_youtube(
     resolve_kwargs = dict(
         cookies_file=cookies_file,
         cancel_check=cancel_check,
+        album=td.get("album") or td.get("album_name") or "",
     )
     if exclude_urls:
         resolve_kwargs["exclude_urls"] = exclude_urls

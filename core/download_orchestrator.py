@@ -1388,9 +1388,22 @@ class DownloadOrchestrator:
         if resolver_error is not None:
             raise resolver_error
         if not resolved:
-            from core.match_errors import SafeMatchNotFound
-            raise SafeMatchNotFound(
-                "No identity-safe YouTube match was found for this Spotify track"
+            # A valid Spotify identity must never become an empty engine job.
+            # Repair legacy/custom resolvers at the final boundary with the
+            # same validated yt-dlp search request used by the scraper. An
+            # invalid identity still raises SpotifyMetadataInvalid here.
+            from core.scraper import spotify_legacy_search_request
+
+            identity = req.spotify_match_identity or {}
+            resolved = spotify_legacy_search_request(
+                str(identity.get("title") or ""),
+                str(identity.get("artist") or ""),
+            )
+            req.url = resolved
+            logger.warning(
+                "[Orchestrator] Empty Spotify resolver result repaired with "
+                "validated legacy search request for %s",
+                key,
             )
         return False
 

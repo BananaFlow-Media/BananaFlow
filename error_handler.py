@@ -191,12 +191,6 @@ ERROR_TEXTS_EN: dict[str, str] = {
     "err_video_unavailable_detail":
         "This video is private, deleted, or not available in your region.",
 
-    "err_safe_match_not_found_title": "No safe recording match found",
-    "err_safe_match_not_found_detail":
-        "BananaFlow found search results, but none proved the same artist, "
-        "song, duration, and recording version. The track was not downloaded "
-        "to avoid silently substituting a cover, live take, remix, or other version.",
-
     "err_spotify_metadata_invalid_title": "Invalid Spotify track details",
     "err_spotify_metadata_invalid_detail":
         "Spotify returned missing, malformed, or page-polluted track details. "
@@ -303,16 +297,6 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
     (
         re.compile(r"spotify (?:artist credits|track title|structured data)", re.I),
         "err_spotify_metadata_invalid",
-        ErrorSeverity.WARNING,
-        None,
-    ),
-    (
-        re.compile(
-            r"no identity-safe youtube match|no safe recording match|"
-            r"unresolved track has no downloadable media target",
-            re.I,
-        ),
-        "err_safe_match_not_found",
         ErrorSeverity.WARNING,
         None,
     ),

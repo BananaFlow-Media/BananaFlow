@@ -206,6 +206,13 @@ class TrackCard(QFrame):
             plat_str = platform.value
         else:
             plat_str = str(platform).lower()
+        # PR #63 briefly persisted valid Spotify strict misses as permanently
+        # disabled ``unresolved`` cards. They now resume through the broader
+        # fallback contract after restart; genuinely invalid metadata remains
+        # disabled and explicit.
+        if plat_str == "spotify" and self.match_status == "unresolved":
+            self.match_status = "pending"
+            self.resolution_error = ""
         self._platform = plat_str
         self._status   = "queued"
         # Caption state: which stage, its remaining time, and the live rate.
@@ -221,9 +228,9 @@ class TrackCard(QFrame):
 
         self._build(title, artist, duration, plat_str)
         self._apply_shadow()
-        if match_status in ("metadata_invalid", "unresolved"):
-            self.mark_unresolved(
-                t(resolution_error) if resolution_error else t("spotify_unresolved_card")
+        if self.match_status == "metadata_invalid":
+            self.mark_metadata_invalid(
+                t(resolution_error) if resolution_error else t("spotify_metadata_invalid_card")
             )
 
     # ── Build ──────────────────────────────────────────────────────────────────
@@ -406,11 +413,10 @@ class TrackCard(QFrame):
         """Whether ordinary queue construction may submit this card."""
         return self.match_status not in ("metadata_invalid", "unresolved")
 
-    def mark_unresolved(self, message: str = "") -> None:
-        """Make a failed Spotify match visible and impossible to resubmit."""
-        if self.match_status != "metadata_invalid":
-            self.match_status = "unresolved"
-        self.resolution_error = self.resolution_error or "spotify_unresolved_card"
+    def mark_metadata_invalid(self, message: str = "") -> None:
+        """Make malformed Spotify source metadata explicit and non-downloadable."""
+        self.match_status = "metadata_invalid"
+        self.resolution_error = self.resolution_error or "spotify_metadata_invalid_card"
         self._check.setChecked(False)
         self._check.setEnabled(False)
         self.set_status("error")

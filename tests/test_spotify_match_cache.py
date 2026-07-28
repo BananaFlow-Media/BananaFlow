@@ -128,7 +128,10 @@ class TestResolveTrackToYoutube:
 
         calls = {"n": 0}
 
-        def fake_resolve(title, artist, duration_sec, cookies_file=None, cancel_check=None):
+        def fake_resolve(
+            title, artist, duration_sec, cookies_file=None,
+            cancel_check=None, **_kwargs,
+        ):
             calls["n"] += 1
             return "https://music.youtube.com/watch?v=CACHED"
 
@@ -150,7 +153,10 @@ class TestResolveTrackToYoutube:
 
         calls = {"n": 0}
 
-        def fake_resolve(title, artist, duration_sec, cookies_file=None, cancel_check=None):
+        def fake_resolve(
+            title, artist, duration_sec, cookies_file=None,
+            cancel_check=None, **_kwargs,
+        ):
             calls["n"] += 1
             return "ytsearch1:Artist Song audio"
 

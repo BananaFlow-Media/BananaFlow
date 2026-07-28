@@ -2,8 +2,9 @@
 
 The matcher deliberately separates *recording identity* (artist, title,
 duration and version such as live/remix/acoustic) from presentation labels
-such as "official audio" or "lyric video".  A candidate is never accepted on
-score alone: the identity gates in :func:`assess_candidate` must also pass.
+such as "official audio" or "lyric video". Strict matches are never accepted
+on score alone; callers may explicitly request the separately bounded
+best-reasonable path after strict matching is inconclusive.
 
 The network path starts with a flat yt-dlp search.  Decisive results avoid the
 old eager extraction of every result; ambiguous results receive bounded deep
@@ -23,7 +24,7 @@ from typing import Callable, Iterable, Optional
 logger = logging.getLogger(__name__)
 
 # Cache rows made by older matchers are intentionally invisible.
-MATCH_ALGO_VERSION = 4
+MATCH_ALGO_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,11 @@ _VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _BRANDED_CHANNEL_RE = re.compile(r"\bvevo\b", re.I)
 _TOPIC_RE = re.compile(r"\s+-\s+topic$", re.I)
-_OFFICIAL_RE = re.compile(r"\bofficial\b", re.I)
+_OFFICIAL_RE = re.compile(r"\bofficial\b|רשמי", re.I)
+_LOW_QUALITY_FALLBACK_RE = re.compile(
+    r"\b(?:tribute|fan(?:made|[- ]?upload|[- ]?archive)?|karaoke)\b|מחווה",
+    re.I,
+)
 
 
 def _fold(text: str) -> str:
@@ -154,6 +159,23 @@ def _normalize(text: str) -> str:
 
 def _tokens(text: str) -> set[str]:
     return {token for token in _fold(text).split() if token}
+
+
+def _script_families(text: str) -> set[str]:
+    """Return writing-system families used by letters in ``text``."""
+    families: set[str] = set()
+    for char in unicodedata.normalize("NFKC", text or ""):
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, "")
+        for family in (
+            "LATIN", "HEBREW", "ARABIC", "CYRILLIC", "GREEK",
+            "HIRAGANA", "KATAKANA", "HANGUL", "CJK",
+        ):
+            if family in name:
+                families.add(family)
+                break
+    return families
 
 
 def _similarity(left: str, right: str) -> float:
@@ -331,6 +353,8 @@ def assess_candidate(
     *,
     yt_artists: Optional[Iterable[str]] = None,
     channel_is_verified: bool = False,
+    spotify_album: str = "",
+    yt_album: str = "",
 ) -> tuple[float, dict, bool]:
     structured_artists = tuple(item for item in (yt_artists or ()) if item)
     clean_candidate_title = _candidate_title_without_artist(yt_title, spotify_artist)
@@ -353,6 +377,16 @@ def assess_candidate(
         for name in requested_credits.credited
     ]
     channel_artist_evidence = _channel_artist_evidence(spotify_artist, yt_channel)
+    source_artist_scripts = _script_families(spotify_artist)
+    candidate_artist_text = (
+        " ".join(structured_artists) if structured_artists else yt_channel
+    )
+    candidate_artist_scripts = _script_families(candidate_artist_text)
+    cross_script_artist_uncertainty = bool(
+        source_artist_scripts
+        and candidate_artist_scripts
+        and source_artist_scripts.isdisjoint(candidate_artist_scripts)
+    )
     independent_artist_evidence = (
         primary_structured_evidence
         if primary_structured_evidence is not None
@@ -405,9 +439,19 @@ def assess_candidate(
             reasons.append("duration")
 
     safe = not reasons
-    # Unsafe candidates remain rankable for diagnostics/deep-validation
-    # ordering, but receive no confidence boost from presentation/channel.
-    total = title_pts + duration_pts + artist_pts + channel_pts
+    # Album identity is deliberately ranking-only. It can separate two
+    # plausible recordings from a Spotify album without weakening any strict
+    # title/artist/version safety gate.
+    album_similarity = (
+        _similarity(_fold(spotify_album), _fold(yt_album))
+        if spotify_album and yt_album else 0.0
+    )
+    raw_total = title_pts + duration_pts + artist_pts + channel_pts
+    ranking_score = raw_total + album_similarity * 8.0
+    # Unsafe candidates remain rankable for diagnostics/deep-validation.
+    # Keep the public confidence cap, but retain the uncapped ranking signal
+    # so the closest reasonable fallback is not reduced to a field-order tie.
+    total = raw_total
     if not safe:
         total = min(total, 54.0)
     breakdown = {
@@ -429,6 +473,9 @@ def assess_candidate(
             round(value, 4) for value in credited_structured_evidence
         ],
         "channel_artist_evidence": round(channel_artist_evidence, 4),
+        "source_artist_scripts": sorted(source_artist_scripts),
+        "candidate_artist_scripts": sorted(candidate_artist_scripts),
+        "cross_script_artist_uncertainty": cross_script_artist_uncertainty,
         "channel_is_verified": bool(channel_is_verified),
         "artist_proof": (
             "structured" if primary_structured_evidence is not None
@@ -440,6 +487,8 @@ def assess_candidate(
         "source_version_qualifiers": sorted(source_intent.qualifiers),
         "candidate_version_qualifiers": sorted(candidate_intent.qualifiers),
         "duration_delta": duration_delta,
+        "album_similarity": round(album_similarity, 4),
+        "ranking_score": round(ranking_score, 2),
         "reject_reasons": reasons,
     }
     return round(total, 2), breakdown, safe
@@ -475,10 +524,13 @@ def match_from_metadata(
     yt_duration_sec: Optional[int],
     yt_artists: Optional[Iterable[str]] = None,
     channel_is_verified: bool = False,
+    spotify_album: str = "",
+    yt_album: str = "",
 ) -> MatchResult:
     score, breakdown, safe = assess_candidate(
         title, artist, duration_sec, yt_title, yt_channel, yt_duration_sec,
         yt_artists=yt_artists, channel_is_verified=channel_is_verified,
+        spotify_album=spotify_album, yt_album=yt_album,
     )
     evidence = "complete" if (duration_sec is None or yt_duration_sec is not None) else "partial"
     return MatchResult(
@@ -501,7 +553,13 @@ def _entry_url(entry: dict) -> str:
     return raw_url if isinstance(raw_url, str) and raw_url.startswith("http") else ""
 
 
-def _entry_match(entry: dict, title: str, artist: str, duration_sec: Optional[int]) -> Optional[MatchResult]:
+def _entry_match(
+    entry: dict,
+    title: str,
+    artist: str,
+    duration_sec: Optional[int],
+    album: str = "",
+) -> Optional[MatchResult]:
     url = _entry_url(entry)
     if not url:
         return None
@@ -523,6 +581,11 @@ def _entry_match(entry: dict, title: str, artist: str, duration_sec: Optional[in
     raw_artist = entry.get("artist")
     if isinstance(raw_artist, str) and raw_artist.strip():
         structured_artists.append(raw_artist.strip())
+    raw_album = entry.get("album") or ""
+    if isinstance(raw_album, dict):
+        yt_album = raw_album.get("name") or raw_album.get("title") or ""
+    else:
+        yt_album = str(raw_album or "")
     return match_from_metadata(
         url=url, title=title, artist=artist, duration_sec=duration_sec,
         yt_title=entry.get("title") or "",
@@ -530,6 +593,8 @@ def _entry_match(entry: dict, title: str, artist: str, duration_sec: Optional[in
         yt_duration_sec=yt_duration,
         yt_artists=structured_artists or None,
         channel_is_verified=bool(entry.get("channel_is_verified")),
+        spotify_album=album,
+        yt_album=yt_album,
     )
 
 
@@ -538,7 +603,7 @@ def _rank(matches: Iterable[MatchResult]) -> list[MatchResult]:
         matches,
         key=lambda item: (
             not item.safe,
-            -item.score,
+            -float(item.breakdown.get("ranking_score", item.score)),
             item.breakdown.get("duration_delta")
             if item.breakdown.get("duration_delta") is not None else 10**9,
             _fold(item.youtube_title),
@@ -561,7 +626,7 @@ def _search(
     with temp_cookies_copy(cookies_file) as cookie_copy:
         opts = build_base_ydl_opts(
             cookies_file=cookie_copy, logger=SilentLogger(), quiet=True,
-            retries=1, socket_timeout=8, respect_po_token_circuit=False,
+            retries=1, socket_timeout=8, respect_po_token_circuit=True,
         )
         opts.update({
             "extract_flat": extract_flat,
@@ -582,6 +647,7 @@ def _deep_validate_urls(
     artist: str,
     duration_sec: Optional[int],
     cookies_file: Optional[str],
+    album: str = "",
 ) -> list[MatchResult]:
     import yt_dlp
     from utils.logger import SilentLogger
@@ -591,7 +657,7 @@ def _deep_validate_urls(
     with temp_cookies_copy(cookies_file) as cookie_copy:
         opts = build_base_ydl_opts(
             cookies_file=cookie_copy, logger=SilentLogger(), quiet=True,
-            retries=1, socket_timeout=8, respect_po_token_circuit=False,
+            retries=1, socket_timeout=8, respect_po_token_circuit=True,
         )
         opts.update({"skip_download": True, "no_warnings": True, "extractor_retries": 1})
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -601,7 +667,7 @@ def _deep_validate_urls(
                 except Exception as exc:  # one unavailable result must not sink the rest
                     logger.debug("[MatchScorer] deep validation failed for %s: %s", url, exc)
                     continue
-                match = _entry_match(entry, title, artist, duration_sec)
+                match = _entry_match(entry, title, artist, duration_sec, album)
                 if match:
                     validated.append(match)
     return validated
@@ -616,8 +682,10 @@ def find_best_youtube_match(
     min_confidence: float = 0.55,
     exclude_urls: Optional[set[str]] = None,
     path_observer: Optional[Callable[[str], None]] = None,
+    album: str = "",
+    allow_reasonable_fallback: bool = False,
 ) -> Optional[MatchResult]:
-    """Return the best identity-safe candidate, never merely the first hit."""
+    """Return the strict match, or an explicitly requested reasonable fallback."""
     excluded = exclude_urls or set()
     query = f"ytsearch{max(1, min(max_candidates, 10))}:{artist} {title}".strip()
     try:
@@ -628,7 +696,7 @@ def find_best_youtube_match(
 
     flat = _rank(
         match for entry in entries
-        if (match := _entry_match(entry, title, artist, duration_sec)) is not None
+        if (match := _entry_match(entry, title, artist, duration_sec, album)) is not None
         and match.url not in excluded
     )
     safe_flat = [item for item in flat if item.safe and item.confidence >= min_confidence]
@@ -653,7 +721,7 @@ def find_best_youtube_match(
     try:
         deep = _rank(_deep_validate_urls(
             validation_urls, title=title, artist=artist,
-            duration_sec=duration_sec, cookies_file=cookies_file,
+            duration_sec=duration_sec, cookies_file=cookies_file, album=album,
         )) if validation_urls else []
     except Exception as exc:
         logger.debug("[MatchScorer] bounded validation failed: %s", exc)
@@ -675,6 +743,53 @@ def find_best_youtube_match(
         if path_observer:
             path_observer("flat_partial")
         return safe_flat[0]
+    if allow_reasonable_fallback:
+        deep_urls = {item.url for item in deep}
+        candidates = _rank([
+            *deep,
+            *(item for item in flat if item.url not in deep_urls),
+        ])
+        reasonable = [item for item in candidates if is_reasonable_fallback_match(item)]
+        if reasonable:
+            best = reasonable[0]
+            path = "deep_reasonable" if best.url in deep_urls else "flat_reasonable"
+            best.breakdown["resolution_path"] = path
+            if path_observer:
+                path_observer(path)
+            return best
     if path_observer:
         path_observer("conservative_miss")
     return None
+
+
+def is_reasonable_fallback_match(match: MatchResult) -> bool:
+    """Whether an unsafe candidate is still suitable for last-mile ranking.
+
+    Only absent performer proof may be relaxed. Identity, recording version,
+    and duration incompatibilities remain hard rejections, as do obvious
+    karaoke, tribute and fan-upload presentations.
+    """
+    if not match.url or match.safe:
+        return bool(match.url and match.safe)
+    reasons = set(match.breakdown.get("reject_reasons") or ())
+    if not reasons or not reasons.issubset({"artist", "credited_artist", "artist_source"}):
+        return False
+    if float(match.breakdown.get("title_similarity") or 0.0) < 0.68:
+        return False
+    # Missing independent artist proof is relaxable only when there is some
+    # partial name evidence or the source/candidate credits use disjoint
+    # scripts (for example Odeya versus אודיה). A contradictory same-script
+    # performer remains a wrong-artist rejection, not a fallback candidate.
+    primary_evidence = match.breakdown.get("primary_artist_evidence")
+    independent_evidence = (
+        float(primary_evidence)
+        if primary_evidence is not None
+        else float(match.breakdown.get("channel_artist_evidence") or 0.0)
+    )
+    if (
+        independent_evidence < 0.45
+        and not bool(match.breakdown.get("cross_script_artist_uncertainty"))
+    ):
+        return False
+    visible = f"{match.youtube_title} {match.channel}"
+    return not bool(_LOW_QUALITY_FALLBACK_RE.search(visible))

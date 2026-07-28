@@ -1,0 +1,87 @@
+{
+  "album_url": "https://open.spotify.com/album/5tuYABXBjwZ5aUYQHmXzNk",
+  "album_name": "השם יעזור",
+  "spotify_artwork": "https://i.scdn.co/image/ab67616d0000b273c5917e386343b63b1bdac4e3",
+  "tracks": [
+    {
+      "index": 1,
+      "spotify_id": "1UruS1fpkhIXklaJnttSzA",
+      "title": "השם יעזור",
+      "spotify_artist": "Odeya",
+      "duration_sec": 211,
+      "ytm": {"videoId": "s_rJeALSzb8", "title": "השם יעזור", "artists": ["אודיה"], "duration_sec": 212, "album": "השם יעזור"}
+    },
+    {
+      "index": 2,
+      "spotify_id": "7MIg6zwmb0jYX7B7Z3kl9c",
+      "title": "עשר רמות מעליו",
+      "spotify_artist": "Odeya",
+      "duration_sec": 160,
+      "ytm": {"videoId": "XpU2nwR3wA0", "title": "עשר רמות מעליו", "artists": ["אודיה"], "duration_sec": 161, "album": "השם יעזור"}
+    },
+    {
+      "index": 3,
+      "spotify_id": "6O06JhXqGKnz3fGa0v7vyC",
+      "title": "לא תיקח לי את האושר",
+      "spotify_artist": "Odeya",
+      "duration_sec": 211,
+      "ytm": {"videoId": "rIzxG4qF2K4", "title": "לא תיקח לי את האושר", "artists": ["אודיה"], "duration_sec": 212, "album": "השם יעזור"}
+    },
+    {
+      "index": 4,
+      "spotify_id": "523TkqVLoyLcyZMrD0jYBN",
+      "title": "אתה ער",
+      "spotify_artist": "Odeya",
+      "duration_sec": 160,
+      "ytm": {"videoId": "Q4PNojIN8nI", "title": "אתה ער", "artists": ["אודיה"], "duration_sec": 161, "album": "השם יעזור"}
+    },
+    {
+      "index": 5,
+      "spotify_id": "3FU0H5UoZMkz7c4mEfiB7S",
+      "title": "דובאי",
+      "spotify_artist": "Odeya, Gal Adam",
+      "duration_sec": 159,
+      "ytm": {"videoId": "jtu8aIwTZKY", "title": "דובאי (feat. Gal Adam)", "artists": ["אודיה"], "duration_sec": 159, "album": "השם יעזור"}
+    },
+    {
+      "index": 6,
+      "spotify_id": "5WbQ04y4tJHty6WgyRKoHf",
+      "title": "דיזנגוף 99",
+      "spotify_artist": "Odeya",
+      "duration_sec": 192,
+      "ytm": {"videoId": "hYfsbgC1df0", "title": "דיזנגוף 99", "artists": ["אודיה"], "duration_sec": 193, "album": "השם יעזור"}
+    },
+    {
+      "index": 7,
+      "spotify_id": "0uNf6C4XwDnehpHqd8DH4G",
+      "title": "בוקר טוב אהבה שלי",
+      "spotify_artist": "Odeya, Shir Koren",
+      "duration_sec": 200,
+      "ytm": {"videoId": "TNvMR4cobv8", "title": "בוקר טוב אהבה שלי (feat. Shir Koren)", "artists": ["אודיה"], "duration_sec": 201, "album": "השם יעזור"}
+    },
+    {
+      "index": 8,
+      "spotify_id": "66JEjmHsZhMitzs8X4t4Dc",
+      "title": "נדנדה",
+      "spotify_artist": "Odeya",
+      "duration_sec": 188,
+      "ytm": {"videoId": "ehejzjOC3xE", "title": "נדנדה", "artists": ["אודיה"], "duration_sec": 189, "album": "השם יעזור"}
+    },
+    {
+      "index": 9,
+      "spotify_id": "1J8fy3vcV1ogT8RSwID2dr",
+      "title": "לשמור סודות",
+      "spotify_artist": "Odeya",
+      "duration_sec": 122,
+      "ytm": {"videoId": "iDjYYMzGdxk", "title": "לשמור סודות", "artists": ["אודיה"], "duration_sec": 123, "album": "השם יעזור"}
+    },
+    {
+      "index": 10,
+      "spotify_id": "2kkIaUWbNzePwfcfZ7oKsN",
+      "title": "השקיעה האחרונה",
+      "spotify_artist": "Odeya",
+      "duration_sec": 198,
+      "ytm": {"videoId": "HpAlYQeZNZs", "title": "השקיעה האחרונה", "artists": ["אודיה"], "duration_sec": 199, "album": "השם יעזור"}
+    }
+  ]
+}

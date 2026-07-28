@@ -93,7 +93,12 @@ class _Engine:
         from core.downloader import DownloadProgress, DownloadStatus
 
         self.urls.append(request.url)
-        index = int(request.url.rsplit("/", 1)[-1])
+        try:
+            index = int(request.url.rsplit("/", 1)[-1])
+        except ValueError:
+            # yt-dlp search requests are valid engine inputs too. Give them a
+            # deterministic synthetic transport index without changing the URL.
+            index = 100 + len(self.urls)
         total = 20_000 + index * 1_000
         started = time.monotonic()
         for part in range(1, 5):
@@ -184,9 +189,9 @@ def _orchestrator_checks(steps: list[dict], output_dir: Path) -> None:
         f"snapshots={len(callbacks.snapshots)} eta_snapshots={len(eta_snapshots)}",
     )
 
-    # A failed Spotify resolver is terminal before DownloadEngine.  A resolved
-    # peer in the same batch must still finish, proving both mixed-batch
-    # continuation and the empty-URL boundary in packaged production code.
+    # A valid Spotify strict miss must become a legacy search request before
+    # DownloadEngine. A directly resolved peer must finish in the same batch,
+    # proving both mixed-path continuation and the empty-URL boundary.
     mixed_engine = _Engine(output_dir)
     mixed_callbacks = _Callbacks()
     valid = DownloadRequest(
@@ -202,18 +207,20 @@ def _orchestrator_checks(steps: list[dict], output_dir: Path) -> None:
     mixed = DownloadOrchestrator(
         mixed_engine, mixed_callbacks, max_workers=2,
     ).run_batch(
-        [("resolved", valid), ("unresolved", invalid)],
+        [("resolved", valid), ("strict-miss", invalid)],
         delay_range=(0.0, 0.0), batch_id="release-candidate-mixed",
     )
     _step(
-        steps, "mixed_resolved_unresolved_batch",
-        mixed.completed == 1 and mixed.failed == 1,
+        steps, "mixed_resolved_legacy_fallback_batch",
+        mixed.completed == 2 and mixed.failed == 0,
         f"completed={mixed.completed} failed={mixed.failed}",
     )
     _step(
         steps, "no_empty_url_engine_submission",
-        mixed_engine.urls == ["https://trace.invalid/release/9"]
-        and all(mixed_engine.urls),
+        set(mixed_engine.urls) == {
+            "https://trace.invalid/release/9",
+            "ytsearch1:Artist Song audio",
+        } and all(mixed_engine.urls),
         f"engine_urls={len(mixed_engine.urls)}",
     )
 
@@ -314,6 +321,54 @@ def _spotify_production_checks(steps: list[dict], output_dir: Path) -> None:
             fallback_calls == ["general"] and fallback_url.endswith("official1"),
             f"fallback_calls={len(fallback_calls)}",
         )
+
+        # Frozen production-shaped Odeya album results reproduce the release
+        # failure: Spotify credits the artist in Latin characters (Odeya),
+        # while YTMusic credits the same album in Hebrew (אודיה). Every strict
+        # miss must run the broad path and then remain directly downloadable.
+        odeya_tracks = [
+            ("השם יעזור", "Odeya", 211, "s_rJeALSzb8"),
+            ("עשר רמות מעליו", "Odeya", 160, "XpU2nwR3wA0"),
+            ("לא תיקח לי את האושר", "Odeya", 211, "rIzxG4qF2K4"),
+            ("אתה ער", "Odeya", 160, "Q4PNojIN8nI"),
+            ("דובאי", "Odeya, Gal Adam", 159, "jtu8aIwTZKY"),
+            ("דיזנגוף 99", "Odeya", 192, "hYfsbgC1df0"),
+            ("בוקר טוב אהבה שלי", "Odeya, Shir Koren", 200, "TNvMR4cobv8"),
+            ("נדנדה", "Odeya", 188, "ehejzjOC3xE"),
+            ("לשמור סודות", "Odeya", 122, "iDjYYMzGdxk"),
+            ("השקיעה האחרונה", "Odeya", 198, "HpAlYQeZNZs"),
+        ]
+
+        class _OdeyaYTM:
+            def search(self, query, **_kwargs):
+                title, _artist, duration, video_id = next(
+                    item for item in odeya_tracks if item[0] in query
+                )
+                return [{
+                    "videoId": video_id,
+                    "title": title,
+                    "artists": [{"name": "אודיה"}],
+                    "duration_seconds": duration,
+                    "album": {"name": "השם יעזור"},
+                }]
+
+        fallback_calls.clear()
+        ytmusicapi.YTMusic = _OdeyaYTM
+        scorer._search = lambda *_a, **_k: fallback_calls.append("general") or []
+        resolved_odeya = [
+            scraper._resolve_to_ytm_url(
+                title, artist, duration, album="השם יעזור",
+            )
+            for title, artist, duration, _video_id in odeya_tracks
+        ]
+        _step(
+            steps, "spotify_odeya_album_reasonable_fallback",
+            len(fallback_calls) == 10
+            and all(url.startswith("https://music.youtube.com/watch?v=")
+                    for url in resolved_odeya)
+            and len(set(resolved_odeya)) == 10,
+            f"resolved={len(resolved_odeya)} fallback_calls={len(fallback_calls)}",
+        )
     finally:
         ytmusicapi.YTMusic = original_ytmusic
         scorer._search = original_search
@@ -335,7 +390,7 @@ def _spotify_production_checks(steps: list[dict], output_dir: Path) -> None:
     bar = _DownloadBar()
     bar.set_count(0, 1)
     _step(
-        steps, "spotify_unresolved_ui_state",
+        steps, "spotify_malformed_ui_state",
         not card.is_selected() and not card.is_downloadable()
         and not bar._dl_btn.isEnabled(),
     )

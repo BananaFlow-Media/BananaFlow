@@ -257,7 +257,10 @@ class TestResolveToYtmUrl:
         from core.spotify_match_scorer import MatchResult
 
         called_fallback = []
-        def mock_find_best(title, artist, duration_sec, min_confidence=0.55, cookies_file=None):
+        def mock_find_best(
+            title, artist, duration_sec, min_confidence=0.55,
+            cookies_file=None, **_kwargs,
+        ):
             called_fallback.append(True)
             return MatchResult(
                 url="https://www.youtube.com/watch?v=fallback_vid",
@@ -274,9 +277,9 @@ class TestResolveToYtmUrl:
         assert url == "https://www.youtube.com/watch?v=fallback_vid"
         assert called_fallback == [True]
 
-    def test_unproved_result_is_rejected_instead_of_downloading_first_hit(self, mock_ytmusic, monkeypatch):
+    def test_unproved_result_uses_final_legacy_search_request(self, mock_ytmusic, monkeypatch):
         from core.scraper import _resolve_to_ytm_url
         monkeypatch.setattr("core.spotify_match_scorer.find_best_youtube_match", lambda *a, **k: None)
 
         url = _resolve_to_ytm_url("Nonexistent Song", "Nonexistent Artist", 224)
-        assert url == ""
+        assert url == "ytsearch1:Nonexistent Artist Nonexistent Song audio"

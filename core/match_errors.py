@@ -5,10 +5,6 @@ from __future__ import annotations
 import re
 
 
-class SafeMatchNotFound(RuntimeError):
-    """No candidate proved the requested recording identity."""
-
-
 class SpotifyMetadataInvalid(ValueError):
     """Spotify did not provide a trustworthy track title and artist credit set."""
 

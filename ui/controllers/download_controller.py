@@ -42,7 +42,6 @@ from core.quality_presets import (
     default_audio_quality_id_for_codec,
     video_quality_from_id,
 )
-from core.youtube_reliability import is_youtube_url
 from ui.i18n import localized_folder_name, t
 
 logger = logging.getLogger(__name__)
@@ -179,16 +178,18 @@ class DownloadController(QObject):
         downloadable = []
         for card in selected:
             match_status = getattr(card, "match_status", "matched")
+            if (
+                match_status == "unresolved"
+                and str(getattr(card, "platform", "")).lower() == "spotify"
+            ):
+                card.match_status = "pending"
+                card.resolution_error = ""
+                match_status = "pending"
             pending = match_status == "pending"
             has_url = bool((getattr(card, "track_url", "") or "").strip())
             if match_status in ("metadata_invalid", "unresolved") or (not pending and not has_url):
-                if hasattr(card, "mark_unresolved"):
-                    message_key = (
-                        "spotify_metadata_invalid_card"
-                        if match_status == "metadata_invalid"
-                        else "spotify_unresolved_card"
-                    )
-                    card.mark_unresolved(t(message_key))
+                if hasattr(card, "mark_metadata_invalid"):
+                    card.mark_metadata_invalid(t("spotify_metadata_invalid_card"))
                 continue
             downloadable.append(card)
         selected = downloadable
@@ -343,6 +344,7 @@ class DownloadController(QObject):
                     "spotify_id":       getattr(card, "spotify_id", ""),
                     "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
                     "title":            card.title,
+                    "album":            getattr(card, "album", ""),
                     "artist":           card.artist,
                     "duration_sec":     getattr(card, "duration_sec", None),
                 }
@@ -353,6 +355,7 @@ class DownloadController(QObject):
                     "spotify_id":       getattr(card, "spotify_id", ""),
                     "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
                     "title":            card.title,
+                    "album":            getattr(card, "album", ""),
                     "artist":           card.artist,
                     "duration_sec":     getattr(card, "duration_sec", None),
                 }
@@ -1330,18 +1333,11 @@ class DownloadController(QObject):
         if not self._is_active_worker_signal():
             return
         card = self._key_to_card.get(key)
-        track_req = self._active_request_for_key(key)
-        message_key = getattr(err, "message_key", "")
-        resolver_failed = bool(
-            track_req
-            and track_req.spotify_match_identity
-            and not is_youtube_url(track_req.url)
-        )
         if card:
-            if message_key == "err_safe_match_not_found" or resolver_failed:
-                card.mark_unresolved(t("spotify_unresolved_card"))
-            else:
-                card.set_status("error")
+            # Resolver misses are repaired before engine submission. An error
+            # reaching this callback is an ordinary transfer/service failure,
+            # not a permanently invalid Spotify identity.
+            card.set_status("error")
 
         err_msg = str(err)
         if hasattr(err, "error_message"):

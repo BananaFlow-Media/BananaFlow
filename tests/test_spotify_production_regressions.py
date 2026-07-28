@@ -247,7 +247,7 @@ def test_safe_low_confidence_structured_candidate_remains_downloadable(monkeypat
     assert resolved == "https://music.youtube.com/watch?v=safe-low"
 
 
-def test_unresolved_spotify_job_never_reaches_engine_and_does_not_block_resolved_peer(
+def test_valid_spotify_strict_miss_uses_legacy_search_and_does_not_block_peer(
     tmp_path,
 ):
     from core.downloader import DownloadProgress, DownloadRequest, DownloadStatus, MediaType
@@ -300,11 +300,13 @@ def test_unresolved_spotify_job_never_reaches_engine_and_does_not_block_resolved
         [("resolved", resolved), ("unresolved", unresolved)],
         delay_range=(0.0, 0.0),
     )
-    assert result.completed == 1
-    assert result.failed == 1
-    assert engine.urls == ["https://www.youtube.com/watch?v=official1"]
-    assert callbacks.errors[0][0] == "unresolved"
-    assert callbacks.errors[0][1].message_key == "err_safe_match_not_found"
+    assert result.completed == 2
+    assert result.failed == 0
+    assert set(engine.urls) == {
+        "https://www.youtube.com/watch?v=official1",
+        "ytsearch1:Artist Song audio",
+    }
+    assert callbacks.errors == []
 
 
 pytestmark_qt = pytest.mark.skipif(os.name != "nt", reason="Qt queue regression is Windows-only")
