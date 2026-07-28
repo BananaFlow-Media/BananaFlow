@@ -98,6 +98,13 @@ def test_embed_parser_handles_spaced_script_end_tag_without_consuming_page_conte
     assert metadata["title"] == "Shallow"
     assert metadata["artist_credits"] == ["Lady Gaga", "Bradley Cooper"]
 
+    malformed_end = _embed_html(track_id).replace(
+        "</script>",
+        "</script\t\n data-extra><script>window.UNRELATED = 'Popular Albums';</script>",
+    )
+    with pytest.raises(RuntimeError, match="structured Spotify embed data"):
+        parse_spotify_embed_track_html(malformed_end, track_id)
+
 
 def test_individual_track_production_path_emits_valid_metadata_as_pending(monkeypatch):
     track_id = "2VxeLyX666F8uXCJ0dZF8B"

@@ -55,6 +55,7 @@ import time
 import urllib.parse
 import urllib.request
 import logging
+from html.parser import HTMLParser
 from typing import Callable, Optional
 
 from core.match_errors import SpotifyMetadataInvalid
@@ -125,17 +126,42 @@ def validate_spotify_track_metadata(title: str, artists) -> tuple[str, list[str]
     return clean_title, normalise_spotify_artist_credits(artists)
 
 
+class _SpotifyNextDataParser(HTMLParser):
+    """Extract one exactly identified JSON script without regex-parsing HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.payload: Optional[str] = None
+        self._capturing = False
+        self._chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if self.payload is not None or self._capturing or tag.casefold() != "script":
+            return
+        attributes = {str(key).casefold(): value for key, value in attrs}
+        if attributes.get("id") == "__NEXT_DATA__":
+            self._capturing = True
+            self._chunks = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capturing:
+            self._chunks.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._capturing and tag.casefold() == "script":
+            self.payload = "".join(self._chunks)
+            self._capturing = False
+
+
 def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
     """Parse a public Spotify embed response into exact track metadata."""
-    match = re.search(
-        r'<script\b(?=[^>]*\bid=["\']__NEXT_DATA__["\'])[^>]*>(.*?)</script\s*>',
-        html or "",
-        re.DOTALL | re.I,
-    )
-    if not match:
+    parser = _SpotifyNextDataParser()
+    parser.feed(html or "")
+    parser.close()
+    if parser.payload is None:
         raise RuntimeError("Could not find structured Spotify embed data")
     try:
-        data = json.loads(match.group(1))
+        data = json.loads(parser.payload)
         entity = data["props"]["pageProps"]["state"]["data"]["entity"]
     except Exception as exc:
         raise RuntimeError(f"Could not parse structured Spotify embed data: {exc}") from exc
