@@ -49,7 +49,17 @@ def bar(app):
     b.deleteLater()
 
 
-def _snapshot(progress=0.34, done=17, total=50, speed=2_000_000.0, eta=1000.0):
+def _snapshot(
+    progress=0.34,
+    done=17,
+    total=50,
+    speed=2_000_000.0,
+    eta=1000.0,
+    *,
+    eta_lower=None,
+    eta_upper=None,
+    eta_confidence="warming",
+):
     """A real BatchSnapshot with a chosen batch ETA.
 
     `eta` is set on the snapshot directly rather than fed to a job, because the
@@ -67,7 +77,13 @@ def _snapshot(progress=0.34, done=17, total=50, speed=2_000_000.0, eta=1000.0):
         elif i == done:
             a.update(str(i), downloaded_bytes=int(1_000_000 * ((progress * total) - done)),
                      total_bytes=1_000_000, speed_bps=speed)
-    return dataclasses.replace(a.snapshot(), eta_seconds=eta)
+    return dataclasses.replace(
+        a.snapshot(),
+        eta_seconds=eta,
+        eta_lower_seconds=eta_lower,
+        eta_upper_seconds=eta_upper,
+        eta_confidence=eta_confidence,
+    )
 
 
 # ── Idle ────────────────────────────────────────────────────────────────────
@@ -245,6 +261,26 @@ class TestEtaCountdown:
         bar.show_batch_progress(_snapshot(eta=3725.0))
         assert "1:02:05" in bar._eta_lbl.text()
 
+    def test_eta_renders_uncertainty_range(self, bar):
+        bar.show_batch_progress(_snapshot(
+            eta=452.0,
+            eta_lower=390.2,
+            eta_upper=540.1,
+            eta_confidence="low",
+        ))
+        assert "6:30" in bar._eta_lbl.text()
+        assert "9:01" in bar._eta_lbl.text()
+
+    def test_small_batch_renders_honest_lower_bound(self, bar):
+        bar.show_batch_progress(_snapshot(
+            eta=42.0,
+            eta_lower=42.0,
+            eta_upper=None,
+            eta_confidence="lower_bound",
+        ))
+        assert bar._eta_lbl.text().startswith("At least ")
+        assert "0:42" in bar._eta_lbl.text()
+
     def test_calculating_placeholder_when_estimate_unavailable(self, bar):
         from ui.i18n import t
         bar.show_batch_progress(_snapshot(eta=None))
@@ -328,6 +364,19 @@ class TestEtaLabelFitsBothLocales:
                 candidates = [i18n.t("eta_calculating")]
                 candidates += [
                     i18n.t("eta_about_left",
+                           time=isolate_number(seconds_to_str(s)))
+                    for s in self.LONGEST_SECONDS
+                ]
+                candidates += [
+                    i18n.t(
+                        "eta_range_left",
+                        low=isolate_number(seconds_to_str(s)),
+                        high=isolate_number(seconds_to_str(s)),
+                    )
+                    for s in self.LONGEST_SECONDS
+                ]
+                candidates += [
+                    i18n.t("eta_at_least_left",
                            time=isolate_number(seconds_to_str(s)))
                     for s in self.LONGEST_SECONDS
                 ]

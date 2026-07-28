@@ -9,6 +9,7 @@ import pytest
 
 from core.warning_classifier import (
     ACCOUNT_REQUIRED,
+    BROWSER_COOKIE_ACCESS_BLOCKED,
     COOKIES_EXPIRED_OR_INVALID,
     JS_RUNTIME_MISSING,
     NETWORK_TRANSIENT,
@@ -25,8 +26,8 @@ class TestClassifyWarning:
         ("ERROR: [youtube] po_token verification failed", PO_TOKEN_MISSING),
         ("WARNING: YouTube account cookies are no longer valid", COOKIES_EXPIRED_OR_INVALID),
         ("Cookies are expired, please re-export", COOKIES_EXPIRED_OR_INVALID),
-        ("ERROR: Could not copy Chrome cookie database", COOKIES_EXPIRED_OR_INVALID),
-        ("ERROR: Failed to decrypt with DPAPI", COOKIES_EXPIRED_OR_INVALID),
+        ("ERROR: Could not copy Chrome cookie database", BROWSER_COOKIE_ACCESS_BLOCKED),
+        ("ERROR: Failed to decrypt with DPAPI", BROWSER_COOKIE_ACCESS_BLOCKED),
         ("ERROR: No supported JavaScript runtime could be found", JS_RUNTIME_MISSING),
         ("HTTP Error 403: Forbidden", RATE_LIMITED_OR_FORBIDDEN),
         ("HTTP Error 429: Too Many Requests", RATE_LIMITED_OR_FORBIDDEN),

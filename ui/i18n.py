@@ -98,6 +98,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # second instead of rounding to whole minutes. The old per-unit keys
         # (eta_about_sec/min/hr) could not express seconds above a minute.
         "eta_about_left": "About {time} left",
+        "eta_range_left": "About {low}–{high} left",
+        "eta_at_least_left": "At least {time} left",
         "eta_tooltip": "Estimated time remaining for the whole batch",
         "starting_downloads": "Starting {n} download{plural}…",
         "download_progress_count": "Downloading {current} / {total}…",
@@ -436,10 +438,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "browser_cookie_read_failed_title": "Could not read browser cookies",
         "browser_cookie_read_failed_detail": (
-            "The app tried to read cookies from your regular browser, but Windows or the browser blocked access.\n\n"
-            "Browser extensions can read cookies while the browser is open because they run inside the browser. "
-            "A desktop app cannot use that same internal API.\n\n"
-            "Use a cookies export extension, then select the exported cookies.txt file in Settings."
+            "Windows protects and locks your regular browser profile, so BananaFlow will not try to bypass it.\n\n"
+            "Use BananaFlow's separate sign-in browser, or import an exported cookies.txt file. "
+            "You do not need to close, unlock, or weaken your regular browser."
         ),
         "cancel_btn": "Cancel",
         "details_show_btn": "Show details",
@@ -1465,6 +1466,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "phase_processing":  "מסיים…",
         "eta_calculating": "מחשב…",
         "eta_about_left": "בערך {time} נותרו",
+        "eta_range_left": "נותרו בערך {low}–{high}",
+        "eta_at_least_left": "נותרו לפחות {time}",
         "eta_tooltip": "הערכת הזמן הנותר לאצווה כולה",
         "starting_downloads": "מתחיל הורדה של {n} פריטים…",
         "download_progress_count": "מוריד {current} מתוך {total}…",
@@ -1827,10 +1830,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "browser_cookie_read_failed_title": "לא ניתן לקרוא עוגיות מהדפדפן",
         "browser_cookie_read_failed_detail": (
-            "התוכנה ניסתה לקרוא עוגיות מהדפדפן הרגיל שלך, אבל Windows או הדפדפן חסמו את הגישה.\n\n"
-            "תוספי דפדפן יכולים לקרוא עוגיות כשהדפדפן פתוח כי הם רצים בתוך הדפדפן עצמו. "
-            "לתוכנת דסקטופ אין גישה לאותו ממשק פנימי.\n\n"
-            "צריך להשתמש בתוסף ייצוא עוגיות, ואז לבחור בהגדרות את קובץ cookies.txt שיוצא."
+            "Windows מגן ונועל את פרופיל הדפדפן הרגיל, ולכן BananaFlow לא ינסה לעקוף זאת.\n\n"
+            "יש להשתמש בדפדפן ההתחברות הנפרד של BananaFlow, או לייבא קובץ cookies.txt שיוצא. "
+            "אין צורך לסגור, לפתוח נעילה או להחליש את הדפדפן הרגיל."
         ),
         "cancel_btn": "ביטול",
         "details_show_btn": "הצגת פרטים",
@@ -2814,6 +2816,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "קיום או מצב התחברות במצב לא-מקוון; אם החילוץ ייכשל, yt-dlp "
             "ידווח על שגיאה בזמן ההורדה."
         ),
+        "doctor_cookies_browser_windows_unsupported": (
+            "לא ניתן לקרוא בבטחה פרופיל חי של '{browser}' ב-Windows. יש להשתמש "
+            "בדפדפן ההתחברות המבודד של BananaFlow או לייבא cookies.txt; היישום "
+            "לא יעקוף נעילות פרופיל או הצפנת App-Bound."
+        ),
         "doctor_cookies_none": (
             "לא הוגדרו עוגיות. סרטונים ציבוריים ימשיכו לעבוד; סרטונים "
             "מוגבלי גיל, פרטיים או לחברים בלבד ייכשלו ללא עוגיות."
@@ -2897,6 +2904,24 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # ── Error dialogs (keys defined in error_handler.ERROR_TEXTS_EN;
         #    the English side is injected below) ─────────────────────────────────
+        "err_safe_match_not_found_title": "לא נמצאה הקלטה תואמת בבטחה",
+        "err_safe_match_not_found_detail": (
+            "נמצאו תוצאות חיפוש, אך אף אחת לא הוכיחה התאמה של אמן, שיר, "
+            "משך וגרסת הקלטה. ההורדה נעצרה כדי לא להחליף בשקט לגרסת כיסוי, "
+            "הופעה חיה, רמיקס או גרסה אחרת."
+        ),
+        "err_browser_cookie_access_title": "לא ניתן לקרוא עוגיות דפדפן בבטחה",
+        "err_browser_cookie_access_detail": (
+            "Windows מגן ונועל פרופילים חיים של Chrome, Edge ו-Brave. "
+            "BananaFlow לא יעקוף את ההגנות. ניתן לפתוח את עוזר ההתחברות עם "
+            "פרופיל נפרד של BananaFlow, או לייבא קובץ cookies.txt."
+        ),
+        "err_bot_challenge_title": "YouTube ביקש אימות אנושי",
+        "err_bot_challenge_detail": (
+            "YouTube הציג אתגר נגד בוטים. יש לעצור ניסיונות חוזרים ולהמתין לפני "
+            "ניסיון נוסף. אם התוכן דורש חשבון, ניתן להשתמש בעוזר ההתחברות; "
+            "החלפת סרטון לא תפתור את האתגר."
+        ),
         "err_po_token_title": "נדרש PO Token",
         "err_po_token_detail": (
             "YouTube דורש PO Token עבור הסרטון הזה. הפעל את YouTube Doctor "
@@ -2918,8 +2943,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "err_signin_required_detail": (
             "נראה שהסרטון דורש התחברות (מוגבל גיל או דורש חשבון). הגדר "
             "עוגיות YouTube אם יש לך גישה לתוכן.\n\n"
-            "פתרון: ייצא את עוגיות הדפדפן לקובץ cookies.txt והגדר את "
-            "הנתיב בהגדרות ← קובץ עוגיות."
+            "השתמש בעוזר ההתחברות המבודד של BananaFlow, או ייבא קובץ "
+            "cookies.txt בהגדרות. אין צורך בגישה לפרופיל הדפדפן הרגיל."
         ),
         "err_video_unavailable_title": "הסרטון אינו זמין",
         "err_video_unavailable_detail": "הסרטון פרטי, נמחק, או אינו זמין באזור שלך.",

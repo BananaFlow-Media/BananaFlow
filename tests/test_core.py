@@ -387,17 +387,20 @@ class TestYtDlpOptions:
             encoding="utf-8",
         )
 
-        opts = build_base_ydl_opts(cookies_browser="chrome")
-
-        assert opts["cookiesfrombrowser"] == ("chrome", "Profile 2", None, None)
+        if sys.platform == "win32":
+            from core.browser_session import BrowserCookieAccessError
+            with pytest.raises(BrowserCookieAccessError):
+                build_base_ydl_opts(cookies_browser="chrome")
+        else:
+            opts = build_base_ydl_opts(cookies_browser="chrome")
+            assert opts["cookiesfrombrowser"] == ("chrome", "Profile 2", None, None)
 
     def test_browser_cookies_fall_back_without_profile(self, tmp_path, monkeypatch):
         from utils.yt_dlp_opts import build_base_ydl_opts
 
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-        opts = build_base_ydl_opts(cookies_browser="chrome")
-
-        assert opts["cookiesfrombrowser"] == ("chrome", None, None, None)
+        opts = build_base_ydl_opts(cookies_browser="firefox")
+        assert opts["cookiesfrombrowser"] == ("firefox", None, None, None)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -726,12 +729,14 @@ class TestErrorHandler:
     def test_pattern_table_codes_are_known_or_none(self):
         import error_handler
         from core.warning_classifier import (
-            ACCOUNT_REQUIRED, COOKIES_EXPIRED_OR_INVALID, JS_RUNTIME_MISSING,
+            ACCOUNT_REQUIRED, BROWSER_COOKIE_ACCESS_BLOCKED,
+            COOKIES_EXPIRED_OR_INVALID, JS_RUNTIME_MISSING,
             NETWORK_TRANSIENT, PO_TOKEN_MISSING, RATE_LIMITED_OR_FORBIDDEN,
         )
 
         valid_codes = {
-            ACCOUNT_REQUIRED, COOKIES_EXPIRED_OR_INVALID, JS_RUNTIME_MISSING,
+            ACCOUNT_REQUIRED, BROWSER_COOKIE_ACCESS_BLOCKED,
+            COOKIES_EXPIRED_OR_INVALID, JS_RUNTIME_MISSING,
             NETWORK_TRANSIENT, PO_TOKEN_MISSING, RATE_LIMITED_OR_FORBIDDEN, None,
         }
         for _pattern, _message_key, _severity, code in error_handler._YTDLP_PATTERNS:

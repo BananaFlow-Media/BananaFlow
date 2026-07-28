@@ -721,6 +721,10 @@ class DownloadOrchestrator:
             self._job_locks[key] = threading.Lock()
             self._active_requests[key] = req
             self._aggregator.register(key)
+            if req.url_resolver is not None:
+                self._aggregator.mark_resolution_source(
+                    key, getattr(req.url_resolver, "resolve_source", "live")
+                )
 
         pool = ThreadPoolExecutor(
             max_workers=n_workers,
@@ -1357,13 +1361,18 @@ class DownloadOrchestrator:
             self._mark_cancelled(key)
             return True
         resolve_start = time.monotonic()
+        resolver_error: Optional[Exception] = None
         try:
             resolved = resolver(cancel_ev)
-        except Exception as exc:  # noqa: BLE001 - a bad match must not sink the job
+        except Exception as exc:  # noqa: BLE001 - surfaced after atomic cleanup below
             logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
             resolved = ""
+            resolver_error = exc
         resolver_wait = time.monotonic() - resolve_start
         self._record_phase("resolver_wait", resolver_wait)
+        self._aggregator.mark_resolution_source(
+            key, getattr(resolver, "resolve_source", "live")
+        )
         logger.debug("[timing][track] %s resolver_wait=%.2fs", key, resolver_wait)
         if lock is not None:
             with lock:
@@ -1376,6 +1385,13 @@ class DownloadOrchestrator:
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
             self._mark_cancelled(key)
             return True
+        if resolver_error is not None:
+            raise resolver_error
+        if not resolved:
+            from core.match_errors import SafeMatchNotFound
+            raise SafeMatchNotFound(
+                "No identity-safe YouTube match was found for this Spotify track"
+            )
         return False
 
     def _download_one(self, key: str, req: DownloadRequest) -> None:
@@ -1652,6 +1668,7 @@ class DownloadOrchestrator:
         # by raising).  We intercept it to raise a catchable exception so
         # retry_download() can apply retriable-error detection and backoff.
         _err: list[str] = []
+        stale_match_refreshed = [False]
 
         def _capture_error(p: DownloadProgress) -> None:
             _err.append(p.error_message or "Unknown download error")
@@ -1660,6 +1677,36 @@ class DownloadOrchestrator:
             _err.clear()
             req.on_error = _capture_error
             self._engine.download(req)
+            if (
+                _err
+                and req.spotify_match_identity
+                and not stale_match_refreshed[0]
+            ):
+                from core.match_errors import is_media_unavailable_error
+                if is_media_unavailable_error(_err[0]):
+                    stale_match_refreshed[0] = True
+                    old_url = req.url
+                    from core.scraper import (
+                        invalidate_track_match,
+                        resolve_track_to_youtube,
+                    )
+                    invalidate_track_match(req.spotify_match_identity, old_url)
+                    replacement = resolve_track_to_youtube(
+                        req.spotify_match_identity,
+                        cookies_file=req.cookies_file,
+                        cancel_check=cancel_ev.is_set,
+                        force_refresh=True,
+                        exclude_urls={old_url},
+                    )
+                    if replacement:
+                        self._aggregator.mark_resolution_source(key, "live")
+                        logger.info(
+                            "[Orchestrator] Re-resolved one unavailable Spotify "
+                            "target for %s; retrying the proved recording", key,
+                        )
+                        req.url = replacement
+                        _err.clear()
+                        self._engine.download(req)
             if _err:
                 raise RuntimeError(_err[0])
 

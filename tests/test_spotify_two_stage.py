@@ -159,7 +159,7 @@ class TestOrchestratorLazyResolve:
         assert engine.downloaded_urls == []
         assert called["n"] == 0
 
-    def test_resolver_exception_does_not_sink_the_batch(self):
+    def test_resolver_exception_fails_the_job_without_downloading_placeholder(self):
         engine = _FakeEngine()
         orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=1)
 
@@ -169,9 +169,13 @@ class TestOrchestratorLazyResolve:
         req = _req("placeholder")
         req.url_resolver = bad_resolver
 
-        # Should not raise; the job proceeds with whatever url it had.
-        orch.run_batch([("k1", req)])
-        assert engine.downloaded_urls == ["placeholder"]
+        # The batch API reports the per-job failure, but the unresolved
+        # placeholder must never reach the download engine as if it were a
+        # proved recording match.
+        result = orch.run_batch([("k1", req)])
+        assert result.failed == 1
+        assert result.completed == 0
+        assert engine.downloaded_urls == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -407,7 +411,7 @@ class TestProgressiveScrapeEmit:
 
 
 class TestResolveCancel:
-    def test_cancel_returns_last_resort_before_ytdlp_fallback(self, monkeypatch):
+    def test_cancel_returns_no_match_before_ytdlp_fallback(self, monkeypatch):
         import core.scraper as scraper
 
         # Make the cheap YTM path yield nothing so control reaches the cancel
@@ -430,5 +434,5 @@ class TestResolveCancel:
         url = scraper._resolve_to_ytm_url(
             "Song", "Artist", 200, cancel_check=lambda: True
         )
-        assert url.startswith("ytsearch1:")
+        assert url == ""
         assert called["fallback"] == 0  # cancelled before the heavy fallback

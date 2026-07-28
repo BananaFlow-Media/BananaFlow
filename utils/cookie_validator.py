@@ -25,8 +25,25 @@ def _is_youtube_domain(domain: str) -> bool:
     A substring test would also match unrelated hosts such as
     "youtube.com.evil.example", so the domain column is compared exactly.
     """
-    host = domain.strip().lstrip(".").lower()
+    host = domain.removeprefix("#HttpOnly_").strip().lstrip(".").lower()
     return host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def _is_auth_domain(domain: str) -> bool:
+    host = domain.removeprefix("#HttpOnly_").strip().lstrip(".").lower()
+    roots = ("youtube.com", "google.com", "googlevideo.com", "youtu.be")
+    return any(host == root or host.endswith("." + root) for root in roots)
+
+
+_LOGIN_COOKIE_NAMES = frozenset({
+    "LOGIN_INFO", "SID", "HSID", "SSID", "APISID", "SAPISID",
+    "__Secure-1PSID", "__Secure-3PSID",
+    "__Secure-1PAPISID", "__Secure-3PAPISID",
+})
+
+
+def _is_cookie_line(line: str) -> bool:
+    return bool(line) and (not line.startswith("#") or line.startswith("#HttpOnly_"))
 
 
 def check_cookies_valid(path: str | Path) -> tuple[bool, str]:
@@ -56,7 +73,7 @@ def check_cookies_valid(path: str | Path) -> tuple[bool, str]:
 
     for line in text.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not _is_cookie_line(line):
             continue
         parts = line.split("\t")
         if len(parts) < 7:
@@ -69,13 +86,13 @@ def check_cookies_valid(path: str | Path) -> tuple[bool, str]:
             continue
         # 0 means session cookie (no expiry) — treat as valid
         if expiry == 0:
-            if name == "LOGIN_INFO" and _is_youtube_domain(domain):
+            if name in _LOGIN_COOKIE_NAMES and _is_auth_domain(domain):
                 has_login_info = True
             continue
         if expiry < now:
             expired += 1
             continue
-        if name == "LOGIN_INFO" and _is_youtube_domain(domain):
+        if name in _LOGIN_COOKIE_NAMES and _is_auth_domain(domain):
             has_login_info = True
 
     if total == 0:
@@ -112,12 +129,14 @@ def _parse_cookie_lines(path: Path) -> dict[tuple[str, str, str], str]:
         return entries
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not _is_cookie_line(stripped):
             continue
         parts = stripped.split("\t")
         if len(parts) < 7:
             continue
         domain, _include, cpath, _secure, _expiry, name, _value = parts[:7]
+        if not _is_auth_domain(domain):
+            continue
         entries[(domain, cpath, name)] = line
     return entries
 
@@ -129,7 +148,8 @@ def merge_cookies_file(source: str | Path, dest: str | Path) -> None:
 
     * A cookie present in both is replaced by the ``source`` version.
     * A cookie only in ``source`` is added.
-    * A cookie only in ``dest`` (e.g. for an unrelated site) is kept as-is.
+    * Cookies for unrelated sites are deliberately not retained in app-owned
+      storage; BananaFlow needs only YouTube/Google authentication domains.
 
     Creates ``dest`` (with parent directories) if it doesn't exist yet.
     """

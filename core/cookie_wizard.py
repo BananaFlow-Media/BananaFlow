@@ -28,6 +28,13 @@ from utils.security import redact_text, restrict_path_permissions, write_private
 
 logger = logging.getLogger(__name__)
 
+_AUTH_COOKIE_DOMAINS = ("youtube.com", "google.com", "googlevideo.com", "youtu.be")
+
+
+def _is_auth_cookie_domain(domain: str) -> bool:
+    host = (domain or "").strip().lstrip(".").casefold()
+    return any(host == root or host.endswith("." + root) for root in _AUTH_COOKIE_DOMAINS)
+
 
 def format_netscape_cookies(cookies: list) -> str:
     """Convert a Playwright cookies list to Netscape-format string."""
@@ -38,14 +45,17 @@ def format_netscape_cookies(cookies: list) -> str:
     ]
     for c in cookies:
         domain      = c["domain"]
+        if not _is_auth_cookie_domain(domain):
+            continue
         include_sub = "TRUE" if domain.startswith(".") else "FALSE"
         path        = c["path"]
         secure      = "TRUE" if c["secure"] else "FALSE"
         expiry      = int(c.get("expires", 0))
         if expiry == -1:
             expiry = 0
+        stored_domain = f"#HttpOnly_{domain}" if c.get("httpOnly") else domain
         lines.append(
-            f"{domain}\t{include_sub}\t{path}\t{secure}\t{expiry}\t{c['name']}\t{c['value']}"
+            f"{stored_domain}\t{include_sub}\t{path}\t{secure}\t{expiry}\t{c['name']}\t{c['value']}"
         )
     return "\n".join(lines)
 
@@ -89,17 +99,13 @@ def run_cookie_wizard(start_url: str = "https://www.youtube.com") -> bool:
             profile_dir.mkdir(parents=True, exist_ok=True)
             restrict_path_permissions(profile_dir, recursive=True)
             try:
-                # channel="chrome" launches the user's real, installed Chrome
-                # binary instead of Playwright's bundled Chromium-for-Testing
-                # build. Google's login flow fingerprints that bundled build
-                # (and the "--enable-automation" flag) and blocks sign-in
-                # with "This browser or app may not be secure" — real Chrome
-                # with that flag stripped avoids the block.
+                # The installed Chrome *binary* uses BananaFlow's separate,
+                # owner-only profile directory. It never opens, copies, or
+                # decrypts the user's default Chrome profile.
                 context = p.chromium.launch_persistent_context(
                     str(profile_dir),
                     headless=False,
                     channel="chrome",
-                    ignore_default_args=["--enable-automation"],
                 )
             except Exception:
                 # No system Chrome install found (e.g. Chrome-for-Testing-only
@@ -109,15 +115,6 @@ def run_cookie_wizard(start_url: str = "https://www.youtube.com") -> bool:
                 context = p.chromium.launch_persistent_context(
                     str(profile_dir), headless=False
                 )
-
-            # Stripping --enable-automation isn't enough on its own — Chrome
-            # still reports navigator.webdriver=true to the page (a signal
-            # Google's login flow checks), so mask it explicitly. This is a
-            # single documented Playwright API call, not a third-party
-            # "stealth" plugin (those are unmaintained and no longer reliable).
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
 
             page = context.pages[0] if context.pages else context.new_page()
 
@@ -154,7 +151,7 @@ def run_cookie_wizard(start_url: str = "https://www.youtube.com") -> bool:
             cookie_path: Path = get_app_cookies_path()
             write_private_text(cookie_path, netscape_str)
 
-            logger.info("[CookieWizard] Saved %d cookies to %s", len(cookies), cookie_path)
+            logger.info("[CookieWizard] Saved scoped authentication cookies to %s", cookie_path)
             return True
 
     except Exception as exc:

@@ -41,6 +41,7 @@ _PLAIN_FIELDS = (
     "square_thumbnails", "expand_thumbnails",
     "clean_filename", "is_solo",
     "youtube_reliability_mode", "stream_type", "category",
+    "spotify_match_identity",
     # Post-download resume checkpoint (core.downloader.DownloadRequest).
     # A job paused during post-processing or publishing has already
     # finished downloading; without these the restored request re-runs

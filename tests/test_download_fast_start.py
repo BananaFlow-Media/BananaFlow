@@ -30,6 +30,25 @@ from core.download_orchestrator import DownloadOrchestrator
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestMatchPrefetcher:
+    def test_prefetch_provenance_uses_the_canonical_match_cache_key(self):
+        from core.match_prefetcher import (
+            clear_prefetched_matches,
+            mark_prefetched_match,
+            was_prefetched_match,
+        )
+
+        clear_prefetched_matches()
+        track = {
+            "spotify_url": "https://open.spotify.com/track/canonical123?si=test",
+            "title": "Song",
+            "artist": "Artist",
+            "duration_sec": 200,
+        }
+        mark_prefetched_match(track)
+        assert was_prefetched_match("canonical123")
+        assert not was_prefetched_match(track["spotify_url"])
+        clear_prefetched_matches()
+
     def test_pre_resolves_only_the_first_n_and_warms_plugins_once(self, monkeypatch):
         from core.match_prefetcher import MatchPrefetcher
 

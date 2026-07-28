@@ -97,25 +97,26 @@ def _resolve_to_ytm_url(
     title: str, artist: str, duration_sec: int = 0,
     cookies_file: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    exclude_urls: Optional[set[str]] = None,
 ) -> str:
     """
     Resolve a track to a YouTube Music URL via ytmusicapi search.
 
-    Uses duration-based and text-similarity confidence scoring to pick the best match.
-    Falls back to a general YouTube search if YTM confidence is low, and finally
-    to a plain ytsearch1: query as a last resort.
+    Uses recording-identity gates to pick a safe match. A result that cannot
+    prove artist/title/version intent is rejected instead of being delegated
+    to an unscored ``ytsearch1`` download.
 
     ``cancel_check`` (if given) is polled between the cheap YTM search and the
     heavier yt-dlp fallback so a cancel doesn't let an already-doomed second
     network call run to completion.
     """
     query = f"{artist} {title}" if artist else title
-    best_ytm_candidate = None
-    best_ytm_score = -1.0
+    excluded = exclude_urls or set()
+    best_ytm_match = None
 
     try:
         from ytmusicapi import YTMusic
-        from core.spotify_match_scorer import score_candidate
+        from core.spotify_match_scorer import match_from_metadata
 
         yt = YTMusic()
         results = yt.search(query, filter="songs", limit=5)
@@ -136,7 +137,6 @@ def _resolve_to_ytm_url(
                         pass
                 return 0
 
-            best_ytm_breakdown = {}
             for r in results:
                 vid = r.get("videoId")
                 if not vid:
@@ -144,57 +144,62 @@ def _resolve_to_ytm_url(
 
                 yt_title = r.get("title") or ""
                 artists_list = r.get("artists") or []
-                yt_channel = artists_list[0].get("name") if artists_list else ""
+                artist_names = [
+                    item.get("name") or "" for item in artists_list
+                    if isinstance(item, dict)
+                ]
+                yt_channel = artist_names[0] if artist_names else ""
                 yt_dur = _dur_secs(r)
 
                 spotify_dur = duration_sec if duration_sec > 0 else None
 
-                score, breakdown = score_candidate(
-                    spotify_title=title,
-                    spotify_artist=artist,
-                    spotify_dur=spotify_dur,
+                candidate_url = f"https://music.youtube.com/watch?v={vid}"
+                if candidate_url in excluded:
+                    continue
+                match = match_from_metadata(
+                    url=candidate_url,
+                    title=title,
+                    artist=artist,
+                    duration_sec=spotify_dur,
                     yt_title=yt_title,
                     yt_channel=yt_channel,
-                    yt_dur=yt_dur if yt_dur > 0 else None
+                    yt_duration_sec=yt_dur if yt_dur > 0 else None,
+                    yt_artists=artist_names,
                 )
+                if match.safe and (
+                    best_ytm_match is None
+                    or (match.score, match.url) > (best_ytm_match.score, best_ytm_match.url)
+                ):
+                    best_ytm_match = match
 
-                if score > best_ytm_score:
-                    best_ytm_score = score
-                    best_ytm_candidate = (vid, score)
-                    best_ytm_breakdown = breakdown
-
-            if best_ytm_candidate:
-                vid, score = best_ytm_candidate
-                confidence = score / 100.0
-                if artist and best_ytm_breakdown.get("artist", 0.0) == 0.0:
-                    confidence = min(confidence, 0.50)
+            if best_ytm_match:
                 logger.debug(
-                    "[Scraper] Best YTM candidate: %s (score=%.1f, confidence=%.2f)",
-                    vid, score, confidence
+                    "[Scraper] Best safe YTM candidate: %s (score=%.1f, confidence=%.2f)",
+                    best_ytm_match.url, best_ytm_match.score, best_ytm_match.confidence,
                 )
-                if confidence >= 0.65:
-                    return f"https://music.youtube.com/watch?v={vid}"
+                if best_ytm_match.confidence >= 0.65:
+                    return best_ytm_match.url
 
     except Exception as exc:
         logger.debug("[Scraper] ytmusicapi search or scoring failed: %s", exc)
 
     # A cancel between the cheap YTM search and the heavier yt-dlp fallback
-    # returns the last-resort placeholder immediately rather than firing
+    # returns no match immediately rather than firing
     # another network call the user has already abandoned.
     if cancel_check and cancel_check():
-        return f"ytsearch1:{query} audio"
+        return ""
 
     # ── Fallback 1: General YouTube Search ──
     try:
         from core.spotify_match_scorer import find_best_youtube_match
         spotify_dur = duration_sec if duration_sec > 0 else None
-        yt_match = find_best_youtube_match(
-            title=title,
-            artist=artist,
-            duration_sec=spotify_dur,
-            min_confidence=0.55,
-            cookies_file=cookies_file,
+        match_kwargs = dict(
+            title=title, artist=artist, duration_sec=spotify_dur,
+            min_confidence=0.55, cookies_file=cookies_file,
         )
+        if excluded:
+            match_kwargs["exclude_urls"] = excluded
+        yt_match = find_best_youtube_match(**match_kwargs)
         if yt_match:
             logger.info(
                 "[Scraper] YTM confidence was low. Found strong general YouTube match: %s (confidence=%.2f)",
@@ -204,21 +209,11 @@ def _resolve_to_ytm_url(
     except Exception as exc:
         logger.debug("[Scraper] General YouTube fallback search failed: %s", exc)
 
-    # ── Fallback 2: Best YTM candidate (even if low confidence) ──
-    if best_ytm_candidate:
-        vid, score = best_ytm_candidate
-        if score >= 35.0:
-            logger.debug(
-                "[Scraper] Falling back to low confidence YTM candidate: %s (score=%.1f)",
-                vid, score
-            )
-            return f"https://music.youtube.com/watch?v={vid}"
-
-    # ── Fallback 3: Last Resort ytsearch1 ──
-    # Routine — every track always resolves to *something* playable via this
-    # last-resort search; nothing here is actionable by the user.
-    logger.debug("[Scraper] No confident match found for '%s'. Using last resort ytsearch1.", query)
-    return f"ytsearch1:{query} audio"
+    logger.warning(
+        "[Scraper] No identity-safe YouTube match for title=%r artist=%r",
+        title, artist,
+    )
+    return ""
 
 
 def _spotify_id_from_url(url: str) -> str:
@@ -254,6 +249,9 @@ def resolve_track_to_youtube(
     td: Dict,
     cookies_file: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    *,
+    force_refresh: bool = False,
+    exclude_urls: Optional[set[str]] = None,
 ) -> str:
     """Cache-aware resolution of one track dict to a YouTube URL.
 
@@ -272,22 +270,66 @@ def resolve_track_to_youtube(
     spotify_key, key_kind = _spotify_cache_key(td)
     cache = get_match_cache()
 
-    cached = cache.get(spotify_key, MATCH_ALGO_VERSION)
-    if cached:
+    # A refresh skips the current row but does not delete it here. Stale-target
+    # recovery already uses compare-and-delete with the failed URL; an
+    # unconditional second delete would race with another resolver that may
+    # have installed a newer mapping in the meantime.
+    cached = None if force_refresh else cache.get(spotify_key, MATCH_ALGO_VERSION)
+    if cached and cached not in (exclude_urls or set()):
+        try:
+            from core.match_prefetcher import was_prefetched_match
+            td["_match_source"] = (
+                "prefetched" if was_prefetched_match(spotify_key) else "cache"
+            )
+        except Exception:
+            td["_match_source"] = "cache"
         return cached
 
+    resolve_kwargs = dict(
+        cookies_file=cookies_file,
+        cancel_check=cancel_check,
+    )
+    if exclude_urls:
+        resolve_kwargs["exclude_urls"] = exclude_urls
     url = _resolve_to_ytm_url(
         td.get("title", ""),
         td.get("artist", ""),
         td.get("duration_sec") or 0,
-        cookies_file=cookies_file,
-        cancel_check=cancel_check,
+        **resolve_kwargs,
     )
 
-    # Cache only confident matches — never the ytsearch* last-resort sentinel.
     if url and not url.startswith("ytsearch"):
         cache.put(spotify_key, url, None, MATCH_ALGO_VERSION, key_kind=key_kind)
+    td["_match_source"] = "live"
     return url
+
+
+def invalidate_track_match(td: Dict, expected_url: Optional[str] = None) -> bool:
+    """Invalidate one cached match after a proven media-unavailable failure."""
+    from core.match_cache import get_match_cache
+    from core.spotify_match_scorer import MATCH_ALGO_VERSION
+
+    spotify_key, _key_kind = _spotify_cache_key(td)
+    return get_match_cache().delete(
+        spotify_key, MATCH_ALGO_VERSION, expected_url=expected_url,
+    )
+
+
+def track_match_source_hint(td: Dict) -> str:
+    """Inspect local state only; never perform a network match."""
+    from core.match_cache import get_match_cache
+    from core.spotify_match_scorer import MATCH_ALGO_VERSION
+
+    spotify_key, _key_kind = _spotify_cache_key(td)
+    if not get_match_cache().get(spotify_key, MATCH_ALGO_VERSION):
+        return "live"
+    try:
+        from core.match_prefetcher import was_prefetched_match
+        if was_prefetched_match(spotify_key):
+            return "prefetched"
+    except Exception:
+        pass
+    return "cache"
 
 
 def _sync_playwright_for(feature: str):

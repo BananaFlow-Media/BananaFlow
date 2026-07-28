@@ -45,6 +45,33 @@ DEFAULT_PREFETCH_LIMIT = 8
 # Concurrency for the pre-resolve pass. Matches the stage-1 resolve fan-out;
 # the searches are network-bound and independent.
 _PREFETCH_WORKERS = 3
+_prefetched_matches_lock = threading.Lock()
+_prefetched_match_keys: set[str] = set()
+
+
+def _prefetch_key(track: dict) -> str:
+    # Keep this identical to the persistent cache key. In particular, a
+    # spotify_url is normalized to its bare track ID and metadata-only tracks
+    # use the same composite hash rather than silently losing provenance.
+    from core.scraper import _spotify_cache_key
+    return _spotify_cache_key(track)[0]
+
+
+def clear_prefetched_matches() -> None:
+    with _prefetched_matches_lock:
+        _prefetched_match_keys.clear()
+
+
+def mark_prefetched_match(track: dict) -> None:
+    key = _prefetch_key(track)
+    if key:
+        with _prefetched_matches_lock:
+            _prefetched_match_keys.add(key)
+
+
+def was_prefetched_match(spotify_key: str) -> bool:
+    with _prefetched_matches_lock:
+        return spotify_key in _prefetched_match_keys
 
 
 class MatchPrefetcher:
@@ -83,6 +110,7 @@ class MatchPrefetcher:
         """
         with self._lock:
             self._cancel_locked()
+            clear_prefetched_matches()
             if cookies_file is not None:
                 self._cookies = cookies_file
             subset = [t for t in tracks if t][: self._limit]
@@ -151,7 +179,7 @@ class MatchPrefetcher:
             title = td.get("title", "")
             started = time.monotonic()
             try:
-                resolve_track_to_youtube(
+                resolved = resolve_track_to_youtube(
                     td,
                     cookies_file=self._cookies,
                     cancel_check=cancel.is_set,
@@ -159,6 +187,8 @@ class MatchPrefetcher:
             except Exception as exc:  # noqa: BLE001 - a bad match must not sink prefetch
                 logger.debug("[prefetch] resolve failed for %r: %s", title, exc)
                 return
+            if resolved and not cancel.is_set():
+                mark_prefetched_match(td)
             logger.debug(
                 "[timing][prefetch] resolved %r in %.2fs",
                 title, time.monotonic() - started,

@@ -467,17 +467,17 @@ class TestPerTrackNeverBecomesBatch:
 # ── Lifecycle states ─────────────────────────────────────────────────────────
 
 class TestLifecycle:
-    def test_single_track_batch_never_claims_a_batch_eta(self):
-        """A one-track batch ends at its first completion, so the throughput
-        model never gets two samples and the footer says "calculating…" for the
-        whole download. That is the right answer, not a gap: the one number
-        available is the track's own remaining transfer time, which is a lower
-        bound on the batch (post-processing and publish still follow) and would
-        read as a confident under-estimate. The track card shows it instead."""
+    def test_single_track_batch_labels_byte_time_as_a_lower_bound(self):
+        """Small batches cannot form a throughput window, but the active byte
+        time is still a useful *lower bound* when labelled honestly."""
         a, clock = _agg(["only"])
         assert a.snapshot().eta_seconds is None
         a.update("only", downloaded_bytes=10, total_bytes=100, speed_bps=10.0)
-        assert a.snapshot().eta_seconds is None      # no divide-by-zero either
+        snap = a.snapshot()
+        assert snap.eta_seconds == pytest.approx(9.0)
+        assert snap.eta_lower_seconds == pytest.approx(9.0)
+        assert snap.eta_upper_seconds is None
+        assert snap.eta_confidence == "lower_bound"
         clock.advance(9.0)
         a.complete("only")
         assert a.snapshot().eta_seconds is None      # nothing left to wait for

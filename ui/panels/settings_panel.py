@@ -23,6 +23,7 @@ New setting groups added (all backward-compatible – no removed cards):
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QTimer
@@ -121,7 +122,12 @@ class SettingsPanel(QWidget):
             t("cookies_file_configured") if self._cfg.cookies_file else t("cookies_file_unset")
         )
         try:
-            self._browser_card.setValue(self._cfg.cookies_browser)
+            browser_value = self._cfg.cookies_browser
+            if sys.platform == "win32" and browser_value in {
+                "chrome", "edge", "brave", "chromium"
+            }:
+                browser_value = ""
+            self._browser_card.setValue(browser_value)
             self._youtube_results_card.setValue(self._cfg.youtube_max_results)
             self._spotify_results_card.setValue(self._cfg.spotify_max_results)
             self._spotify_proxy_card.setText(self._cfg.proxy_server_url)
@@ -355,19 +361,26 @@ class SettingsPanel(QWidget):
         )
         features_grp.addSettingCard(self._update_card)
 
+        browser_options = [("", t("disabled")), ("firefox", "Mozilla Firefox")]
+        if sys.platform != "win32":
+            browser_options.extend((
+                ("chrome", "Google Chrome"),
+                ("edge", "Microsoft Edge"),
+                ("brave", "Brave"),
+            ))
+        if sys.platform == "darwin":
+            browser_options.append(("safari", "Safari"))
+        browser_card_value = self._cfg.cookies_browser
+        if sys.platform == "win32" and browser_card_value in {
+            "chrome", "edge", "brave", "chromium"
+        }:
+            browser_card_value = ""
         self._browser_card = _LanguageSettingCard(
             icon=FluentIcon.VPN,
             title=t("browser_cookies"),
             content=t("browser_cookies_desc"),
-            value=self._cfg.cookies_browser,
-            options=(
-                ("",        t("disabled")),
-                ("chrome",  "Google Chrome"),
-                ("firefox", "Mozilla Firefox"),
-                ("edge",    "Microsoft Edge"),
-                ("brave",   "Brave"),
-                ("safari",  "Safari"),
-            ),
+            value=browser_card_value,
+            options=tuple(browser_options),
             parent=features_grp,
         )
         self._browser_card.value_changed.connect(

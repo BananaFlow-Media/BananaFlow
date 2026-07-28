@@ -439,6 +439,8 @@ def build_base_ydl_opts(
     if cookies_file:
         opts["cookiefile"] = cookies_file
     elif cookies_browser:
+        from core.browser_session import require_supported_browser_cookie_mode
+        require_supported_browser_cookie_mode(cookies_browser)
         profile = _detect_last_used_chromium_profile(cookies_browser)
         opts["cookiesfrombrowser"] = (cookies_browser, profile, None, None)
 

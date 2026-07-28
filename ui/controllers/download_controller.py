@@ -321,7 +321,16 @@ class DownloadController(QObject):
                     "artist":           card.artist,
                     "duration_sec":     getattr(card, "duration_sec", None),
                 }
+                req.spotify_match_identity = dict(td)
                 req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
+            elif req_platform == SourcePlatform.SPOTIFY:
+                req.spotify_match_identity = {
+                    "spotify_id":       getattr(card, "spotify_id", ""),
+                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
+                    "title":            card.title,
+                    "artist":           card.artist,
+                    "duration_sec":     getattr(card, "duration_sec", None),
+                }
 
             return req
 
@@ -603,6 +612,10 @@ class DownloadController(QObject):
         can be -- see core.download_request_codec's had_pending_resolver
         flag and _card_to_dict's spotify_id/spotify_key_kind/duration_sec
         fields."""
+        from core.scraper import track_match_source_hint
+
+        source_hint = track_match_source_hint(td)
+
         def _resolve(ev, _td=td, _cookies=cookies):
             from core.scraper import resolve_track_to_youtube
             from utils.url_cleaner import clean_youtube_url as _clean
@@ -610,7 +623,9 @@ class DownloadController(QObject):
                 _td, cookies_file=_cookies,
                 cancel_check=lambda: ev is not None and ev.is_set(),
             )
+            _resolve.resolve_source = _td.get("_match_source", "live")
             return _clean(resolved)
+        _resolve.resolve_source = source_hint
         return _resolve
 
     @staticmethod
@@ -952,6 +967,7 @@ class DownloadController(QObject):
                     "duration_sec":     pj.card.get("duration_sec"),
                 }
                 req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
+                req.spotify_match_identity = dict(td)
             self._paused_requests[key] = req
             self._key_to_card[key] = card
             restored.append(card)

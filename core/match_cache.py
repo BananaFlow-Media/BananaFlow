@@ -73,6 +73,11 @@ ON CONFLICT(spotify_key, algo_version) DO UPDATE SET
     matched_at  = excluded.matched_at
 """
 
+_DELETE_SQL = (
+    "DELETE FROM yt_match_cache "
+    "WHERE spotify_key = ? AND algo_version = ?"
+)
+
 
 class MatchCache:
     """Thread-safe SQLite cache of Spotify-key → YouTube-URL matches.
@@ -152,6 +157,37 @@ class MatchCache:
                     )
         except Exception as exc:
             logger.debug("[MatchCache] put failed: %s", exc)
+
+    def delete(
+        self,
+        spotify_key: str,
+        algo_version: int,
+        *,
+        expected_url: Optional[str] = None,
+    ) -> bool:
+        """Invalidate one mapping, optionally only if its URL still matches.
+
+        The compare-and-delete form prevents a late failure from deleting a
+        newer mapping another resolver has already installed.
+        """
+        if not self._conn or not spotify_key:
+            return False
+        try:
+            with self._lock:
+                with self._conn:
+                    if expected_url is None:
+                        cursor = self._conn.execute(
+                            _DELETE_SQL, (spotify_key, algo_version),
+                        )
+                    else:
+                        cursor = self._conn.execute(
+                            _DELETE_SQL + " AND youtube_url = ?",
+                            (spotify_key, algo_version, expected_url),
+                        )
+            return bool(cursor.rowcount)
+        except Exception as exc:
+            logger.debug("[MatchCache] delete failed: %s", exc)
+            return False
 
     def count(self) -> int:
         """Return the number of cached entries (0 if the cache is disabled)."""

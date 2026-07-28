@@ -1039,7 +1039,7 @@ class AppWindow(FluentWindow):
         # detection signatures, not UI text, and stay hardcoded.
         if auth_related or any(x in detail for x in ["Please sign in", "sign in", "PO Token",
                                       "account cookies", "אימות", "חשבון", "Cookies",
-                                      "DPAPI", "Chrome", "bot", "visitor_data"]):
+                                      "DPAPI", "Chrome", "visitor_data"]):
             if confirm(
                 self,
                 headline,
@@ -1208,7 +1208,9 @@ class AppWindow(FluentWindow):
     def _is_browser_cookie_error_text(self, text: str) -> bool:
         haystack = text.lower()
         return (
-            "cookie database" in haystack
+            "browser_cookie_unsupported" in haystack
+            or "cannot be read safely on windows" in haystack
+            or "cookie database" in haystack
             or "database is locked" in haystack
             or "could not copy chrome" in haystack
             or ("could not copy" in haystack and "cookie" in haystack)
@@ -1219,13 +1221,14 @@ class AppWindow(FluentWindow):
 
     def _is_auth_error_text(self, text: str) -> bool:
         haystack = text.lower()
+        if "not a bot" in haystack or "bot challenge" in haystack:
+            return False
         return (
             "sign-in required" in haystack
             or "age-restricted" in haystack
             or "requires a youtube account" in haystack
             or "account cookies" in haystack
             or "sign in to confirm" in haystack
-            or "not a bot" in haystack
             or "po token" in haystack
             or "visitor_data" in haystack
         )

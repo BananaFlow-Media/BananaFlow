@@ -45,7 +45,11 @@ from core.quality_presets import (
     audio_preset_for_quality,
     video_preset_for_quality,
 )
-from core.warning_classifier import classify_warning
+from core.warning_classifier import (
+    BROWSER_COOKIE_ACCESS_BLOCKED,
+    COOKIES_EXPIRED_OR_INVALID,
+    classify_warning,
+)
 from core.youtube_reliability import CONSERVATIVE_FRAGMENT_CONCURRENCY, is_youtube_url
 from ui.i18n import t
 
@@ -81,8 +85,11 @@ class SilentLogger:
         ))
 
     @staticmethod
-    def _is_cookie_diagnostic(msg: str) -> bool:
-        return classify_warning(msg) == "cookies_expired_or_invalid"
+    def _is_coalesced_cookie_diagnostic(msg: str) -> bool:
+        return classify_warning(msg) in {
+            COOKIES_EXPIRED_OR_INVALID,
+            BROWSER_COOKIE_ACCESS_BLOCKED,
+        }
 
     def warning(self, msg: str) -> None:
         from utils.yt_dlp_opts import note_po_token_provider_diagnostic
@@ -95,7 +102,7 @@ class SilentLogger:
             else:
                 logger.debug("[yt-dlp][po_token] coalesced provider diagnostic: %s", msg)
             return
-        if self._is_cookie_diagnostic(msg):
+        if self._is_coalesced_cookie_diagnostic(msg):
             from utils.yt_dlp_opts import note_cookie_diagnostic
             note_cookie_diagnostic(msg)
             logger.debug("[yt-dlp][cookies] coalesced invalid-cookie diagnostic: %s", msg)
@@ -135,7 +142,7 @@ class SilentLogger:
             else:
                 logger.debug("[yt-dlp][po_token] coalesced provider diagnostic: %s", msg)
             return
-        if self._is_cookie_diagnostic(msg):
+        if self._is_coalesced_cookie_diagnostic(msg):
             from utils.yt_dlp_opts import note_cookie_diagnostic
             note_cookie_diagnostic(msg)
             logger.debug("[yt-dlp][cookies] coalesced invalid-cookie diagnostic: %s", msg)
@@ -327,6 +334,11 @@ class DownloadRequest:
     url_resolver: Optional[Callable[[Optional[threading.Event]], str]] = field(
         default=None, repr=False
     )
+
+    # Serializable Spotify identity retained after the lazy resolver has been
+    # consumed. If that exact upload later proves private/deleted, the
+    # orchestrator can invalidate only its cache row and resolve once more.
+    spotify_match_identity: Optional[dict] = None
 
     # Callbacks
     on_progress: Optional[Callable[[DownloadProgress], None]] = field(

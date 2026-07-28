@@ -7,6 +7,7 @@ guard against accidentally leaking cookie *values* into any message.
 
 from __future__ import annotations
 
+import sys
 from pathlib import PurePosixPath
 
 import pytest
@@ -292,7 +293,8 @@ class TestCookiesCheck:
         check, diag = check_cookies(cookies_browser="chrome")
         assert diag.mode == "browser"
         assert diag.browser == "chrome"
-        assert check.status == DoctorStatus.PASS
+        expected = DoctorStatus.WARN if sys.platform == "win32" else DoctorStatus.PASS
+        assert check.status == expected
 
     def test_cookie_value_never_appears_in_message_or_detail(self, tmp_path):
         p = tmp_path / "cookies.txt"

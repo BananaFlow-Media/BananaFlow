@@ -15,6 +15,7 @@ from core.spotify_match_scorer import (
     _duration_score,
     _normalize,
     _title_score,
+    assess_candidate,
     score_candidate,
 )
 
@@ -130,6 +131,25 @@ class TestScoreCandidate:
         # Good title/artist but duration kills it
         assert total < 70.0
 
+    def test_structured_artist_credit_overrides_title_name_drop(self):
+        _score, breakdown, safe = assess_candidate(
+            "Shallow", "Lady Gaga, Bradley Cooper", 215,
+            "Shallow (Lady Gaga & Bradley Cooper)", "Rodrigues", 222,
+            yt_artists=["Fabio Rodrigues"],
+        )
+        assert safe is False
+        assert "artist" in breakdown["reject_reasons"]
+        assert breakdown["structured_artist_evidence"] == 0.0
+
+    def test_specific_remaster_year_must_match(self):
+        _score, breakdown, safe = assess_candidate(
+            "Dreams - 2004 Remaster", "Fleetwood Mac", 257,
+            "Dreams (2002 Remaster)", "Fleetwood Mac", 256,
+            yt_artists=["Fleetwood Mac"],
+        )
+        assert safe is False
+        assert "version_qualifier" in breakdown["reject_reasons"]
+
 
 class TestResolveToYtmUrl:
     @pytest.fixture
@@ -181,9 +201,9 @@ class TestResolveToYtmUrl:
         assert url == "https://www.youtube.com/watch?v=fallback_vid"
         assert called_fallback == [True]
 
-    def test_resolve_last_resort(self, mock_ytmusic, monkeypatch):
+    def test_unproved_result_is_rejected_instead_of_downloading_first_hit(self, mock_ytmusic, monkeypatch):
         from core.scraper import _resolve_to_ytm_url
         monkeypatch.setattr("core.spotify_match_scorer.find_best_youtube_match", lambda *a, **k: None)
 
         url = _resolve_to_ytm_url("Nonexistent Song", "Nonexistent Artist", 224)
-        assert "ytsearch1" in url
+        assert url == ""

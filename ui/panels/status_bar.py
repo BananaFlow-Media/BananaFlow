@@ -34,6 +34,7 @@ cancel_requested()   User clicked Cancel.
 
 from __future__ import annotations
 
+import math
 import time
 from enum import Enum, auto
 from typing import Optional
@@ -105,6 +106,9 @@ class StatusBar(QFrame):
         # last ETA the aggregator gave it plus the moment it arrived, and simply
         # renders that value minus the time since.
         self._eta_base_seconds: Optional[float] = None
+        self._eta_lower_base: Optional[float] = None
+        self._eta_upper_base: Optional[float] = None
+        self._eta_confidence: str = "warming"
         self._eta_base_at: float = 0.0
         self._eta_timer = QTimer(self)
         self._eta_timer.setInterval(_ETA_TICK_MS)
@@ -162,8 +166,16 @@ class StatusBar(QFrame):
         # Re-anchor the countdown on every snapshot: this value is authoritative
         # and the ticker only fills the gaps between them.
         self._eta_base_seconds = snapshot.eta_seconds
+        self._eta_lower_base = getattr(snapshot, "eta_lower_seconds", None)
+        self._eta_upper_base = getattr(snapshot, "eta_upper_seconds", None)
+        self._eta_confidence = getattr(snapshot, "eta_confidence", "warming")
         self._eta_base_at = time.monotonic()
-        eta = self._fmt_eta(snapshot.eta_seconds)
+        eta = self._fmt_eta_range(
+            snapshot.eta_seconds,
+            self._eta_lower_base,
+            self._eta_upper_base,
+            self._eta_confidence,
+        )
         self._apply_state(
             StatusState.DOWNLOADING,
             message=message,
@@ -269,6 +281,8 @@ class StatusBar(QFrame):
         # Any state other than a live download has no ETA to count down.
         if state != StatusState.DOWNLOADING:
             self._eta_base_seconds = None
+            self._eta_lower_base = None
+            self._eta_upper_base = None
         self._sync_eta_timer()
 
         # Cancel button — only while an interruptible operation is live.
@@ -292,6 +306,41 @@ class StatusBar(QFrame):
         s = int(round(max(0.0, eta_seconds)))
         return t("eta_about_left", time=isolate_number(seconds_to_str(s)))
 
+    @staticmethod
+    def _rounded_interval(seconds: float, *, upper: bool) -> int:
+        seconds = max(0.0, seconds)
+        # The interval itself communicates uncertainty; keep its moving edges
+        # seconds-granular so a heartbeat never looks frozen. Only hour-scale
+        # bounds are coarsened, where seconds are genuinely immaterial.
+        step = 1 if seconds < 3600 else 15
+        units = seconds / step
+        rounded = math.ceil(units) if upper else math.floor(units)
+        return int(max(step if upper and seconds > 0 else 0, rounded * step))
+
+    def _fmt_eta_range(
+        self,
+        center: Optional[float],
+        lower: Optional[float],
+        upper: Optional[float],
+        confidence: str,
+    ) -> str:
+        if center is None:
+            return t("eta_calculating")
+        if lower is None:
+            return self._fmt_eta(center)
+        low = self._rounded_interval(lower, upper=False)
+        if upper is None or confidence == "lower_bound":
+            return t(
+                "eta_at_least_left",
+                time=isolate_number(seconds_to_str(low)),
+            )
+        high = max(low, self._rounded_interval(upper, upper=True))
+        return t(
+            "eta_range_left",
+            low=isolate_number(seconds_to_str(low)),
+            high=isolate_number(seconds_to_str(high)),
+        )
+
     def _tick_eta(self) -> None:
         """Advance the displayed ETA one second between snapshots."""
         if self._state != StatusState.DOWNLOADING or self._eta_base_seconds is None:
@@ -300,7 +349,20 @@ class StatusBar(QFrame):
         elapsed = max(0.0, time.monotonic() - self._eta_base_at)
         # Floors at zero rather than going negative: an overrun means the batch
         # is running behind the estimate, which the next snapshot will correct.
-        self._eta_lbl.setText(self._fmt_eta(max(0.0, self._eta_base_seconds - elapsed)))
+        lower = (
+            max(0.0, self._eta_lower_base - elapsed)
+            if self._eta_lower_base is not None else None
+        )
+        upper = (
+            max(0.0, self._eta_upper_base - elapsed)
+            if self._eta_upper_base is not None else None
+        )
+        self._eta_lbl.setText(self._fmt_eta_range(
+            max(0.0, self._eta_base_seconds - elapsed),
+            lower,
+            upper,
+            self._eta_confidence,
+        ))
 
     def _sync_eta_timer(self) -> None:
         """Run the countdown only while a live batch actually has an ETA.
@@ -375,13 +437,12 @@ class StatusBar(QFrame):
         bottom_row.addWidget(self._speed_lbl)
 
         self._eta_lbl = QLabel("")
-        # Wide enough for the longest string this slot can hold in either
-        # locale — "About 99:59:59 left" and its Hebrew equivalent both measure
-        # ~228px at the footer font. The previous 120px silently clipped even
-        # the old "Calculating time remaining…" placeholder. Fixed rather than
-        # minimum so a changing duration never shifts the rest of the footer.
+        # Wide enough for the longest center, range, or lower-bound string in
+        # either locale. The previous 120px silently clipped even the old
+        # "Calculating time remaining…" placeholder. Fixed rather than minimum
+        # so a changing duration never shifts the rest of the footer.
         # tests/test_status_bar.py measures this against the real font metrics.
-        self._eta_lbl.setFixedWidth(232)
+        self._eta_lbl.setFixedWidth(320)
         self._eta_lbl.setAlignment(Qt.AlignmentFlag.AlignTrailing | Qt.AlignmentFlag.AlignVCenter)
         bottom_row.addWidget(self._eta_lbl)
 

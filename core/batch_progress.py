@@ -91,6 +91,7 @@ Limitations are documented on :meth:`snapshot`.
 
 from __future__ import annotations
 
+import math
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -205,6 +206,9 @@ class JobProgress:
     # BatchProgressAggregator._eta_locked for how this adds a mandatory,
     # non-overlappable wait on top of the network-transfer estimate.
     serialized:       bool            = False
+    # How the final URL became available. This is pipeline provenance, not a
+    # quality judgement: direct/cache/prefetched/live all use the same matcher.
+    resolve_source:    str             = "direct"
 
     @property
     def known_size(self) -> bool:
@@ -257,6 +261,12 @@ class BatchSnapshot:
     # snapshot must never repaint the whole-batch footer as "0 of 1". Defaulted
     # so existing constructions keep working.
     batch_id:        str = ""
+    # Honest display interval. ``None`` upper means a measured lower bound
+    # (normally a one-track byte-transfer floor) rather than fake precision.
+    eta_lower_seconds: Optional[float] = None
+    eta_upper_seconds: Optional[float] = None
+    eta_confidence: str = "warming"  # warming | lower_bound | low | steady
+    eta_source: str = "none"
 
     @property
     def finished(self) -> int:
@@ -336,6 +346,7 @@ class BatchProgressAggregator:
         # gaps (see _throughput_cycle_locked for why gaps are the wrong unit).
         self._batch_start: float = self._time()
         self._completion_times: List[float] = []
+        self._completion_sources: List[str] = []
         self._window_anchor: float = self._batch_start
         self._window_full: bool = False
         # Highest number of jobs seen transferring at once. This is the batch's
@@ -347,6 +358,7 @@ class BatchProgressAggregator:
         self._peak_active: int = 0
         self._last_cycle: Optional[float] = None
         self._last_cycle_at: Optional[float] = None
+        self._last_eta_source: Optional[str] = None
 
     # ── Registration ──────────────────────────────────────────────────────────
 
@@ -383,11 +395,13 @@ class BatchProgressAggregator:
             self._batch_id = batch_id or uuid.uuid4().hex
             self._batch_start = self._time()
             self._completion_times = []
+            self._completion_sources = []
             self._window_anchor = self._batch_start
             self._window_full = False
             self._peak_active = 0
             self._last_cycle = None
             self._last_cycle_at = None
+            self._last_eta_source = None
             if keys:
                 for k in keys:
                     self._jobs[k] = JobProgress(key=k, state=JobState.QUEUED)
@@ -446,6 +460,14 @@ class BatchProgressAggregator:
             job = self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
             job.serialized = True
 
+    def mark_resolution_source(self, key: str, source: str) -> None:
+        """Attach direct/cache/prefetched/live provenance to one job."""
+        with self._lock:
+            job = self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
+            job.resolve_source = source if source in {
+                "direct", "cache", "prefetched", "live"
+            } else "live"
+
     # ── Mutators (called from pool threads) ───────────────────────────────────
 
     def update(
@@ -484,7 +506,7 @@ class BatchProgressAggregator:
             job.eta_seconds = eta_seconds
             self._recompute_speed_locked()
 
-    def _record_completion_locked(self) -> None:
+    def _record_completion_locked(self, job: JobProgress) -> None:
         """Add one tick to the throughput window (see the module docstring).
 
         Only transitions that consumed a real pipeline cycle belong here.
@@ -494,12 +516,14 @@ class BatchProgressAggregator:
         because a mass-cancel produces the same degenerate burst.
         """
         self._completion_times.append(self._time())
+        self._completion_sources.append(job.resolve_source or "direct")
         while len(self._completion_times) > _THROUGHPUT_WINDOW:
             self._window_full = True
             # The evicted completion becomes the window's new anchor, so the
             # span stays a real elapsed measurement rather than silently losing
             # the time that produced the completions still in the window.
             self._window_anchor = self._completion_times.pop(0)
+            self._completion_sources.pop(0)
 
     def complete(self, key: str, final_bytes: Optional[int] = None) -> None:
         """Mark a job finished successfully; it counts at its full size."""
@@ -515,7 +539,7 @@ class BatchProgressAggregator:
             job.eta_seconds = None
             job.ended_at = self._time()
             if not already_terminal:
-                self._record_completion_locked()
+                self._record_completion_locked(job)
             if final_bytes is not None and final_bytes > 0:
                 job.downloaded_bytes = int(final_bytes)
                 job.total_bytes = int(final_bytes)
@@ -580,7 +604,7 @@ class BatchProgressAggregator:
             # them. They consumed no pipeline time and must not be measured as
             # though they had.
             if state == JobState.FAILED and job.submitted:
-                self._record_completion_locked()
+                self._record_completion_locked(job)
             self._recompute_speed_locked()
 
     def cancel_outstanding(self) -> list[str]:
@@ -767,7 +791,23 @@ class BatchProgressAggregator:
             self._floor_uses_estimates = uses_estimates
         return raw, byte_weighted
 
-    def _throughput_cycle_locked(self) -> Optional[float]:
+    def _eta_source_locked(self, outstanding: List[JobProgress]) -> str:
+        """Choose a representative remaining-work cohort with hysteresis."""
+        counts: Dict[str, int] = {}
+        for job in outstanding:
+            source = job.resolve_source or "direct"
+            counts[source] = counts.get(source, 0) + 1
+        if not counts:
+            return "none"
+        priority = {"live": 3, "direct": 2, "cache": 1, "prefetched": 0}
+        leader = max(counts, key=lambda item: (counts[item], priority.get(item, 0)))
+        previous = self._last_eta_source
+        # Do not oscillate on every completion when two cohorts are nearly tied.
+        if previous in counts and counts[previous] >= counts[leader] - 1:
+            return previous
+        return leader
+
+    def _throughput_cycle_locked(self, source: Optional[str] = None) -> Optional[float]:
         """
         Measured wall-seconds per completion, or ``None`` while warming up.
 
@@ -786,7 +826,30 @@ class BatchProgressAggregator:
         now = self._time()
         t_last = times[-1]
 
-        if self._window_full:
+        all_sources = set(self._completion_sources)
+        all_sources.update(
+            job.resolve_source or "direct"
+            for job in self._jobs.values()
+            if job.state not in _TERMINAL and job.state != JobState.PAUSED
+        )
+
+        if source and len(all_sources) > 1 and not self._window_full:
+            # Ignore an opening cache/prefetch burst when live misses remain,
+            # but count every completion after the selected cohort reaches the
+            # pipeline. Those other completions still reduce real outstanding
+            # work and therefore belong in aggregate throughput.
+            source_indices = [
+                index for index, value in enumerate(self._completion_sources)
+                if value == source
+            ]
+            if len(source_indices) < _MIN_COMPLETIONS_FOR_ETA:
+                return None
+            anchor_index = source_indices[0]
+            n = len(times) - anchor_index - 1
+            if n < 2:
+                return None
+            anchor, span_end = times[anchor_index], t_last
+        elif self._window_full:
             # Past the first window, the anchor is itself a completion that
             # aged out, so the batch's opening costs are already behind it.
             anchor, n, span_end = self._window_anchor, len(times), t_last
@@ -910,7 +973,11 @@ class BatchProgressAggregator:
         self._last_cycle = value
         return value
 
-    def _eta_locked(self) -> tuple[Optional[float], bool]:
+    def _eta_details_locked(
+        self,
+    ) -> tuple[
+        Optional[float], bool, Optional[float], Optional[float], str, str
+    ]:
         """
         Whole-batch remaining time. Returns (seconds, is_estimate).
 
@@ -936,16 +1003,35 @@ class BatchProgressAggregator:
         if not outstanding:
             self._last_cycle = None
             self._last_cycle_at = None
-            return None, False
+            self._last_eta_source = None
+            return None, False, None, None, "warming", "none"
 
-        measured = self._throughput_cycle_locked()
+        source = self._eta_source_locked(outstanding)
+        measured = self._throughput_cycle_locked(source)
         if measured is None:
-            # Fewer than two completions: nothing has been measured yet and any
-            # number would be a guess dressed up as knowledge. The UI shows
-            # "calculating…" instead.
-            return None, True
+            # Small batches can finish before a throughput window exists. A
+            # byte-derived active-job time is still a sound lower bound, so
+            # expose it as such rather than presenting it as a precise ETA.
+            floor = self._slowest_active_byte_time_locked()
+            if len(jobs) <= 3 and floor is not None:
+                return floor, True, floor, None, "lower_bound", source
+            if len(jobs) <= 3 and self._completion_times:
+                observed_cycle = max(
+                    0.1,
+                    (self._completion_times[-1] - self._batch_start)
+                    / len(self._completion_times),
+                )
+                center = len(outstanding) * observed_cycle
+                return center, True, center * 0.5, center * 2.0, "low", source
+            return None, True, None, None, "warming", source
 
         now = self._time()
+        if self._last_eta_source not in (None, source):
+            # Hysteresis prevents casual switching; when a real cohort change
+            # does happen, do not blend incompatible warm/live rates.
+            self._last_cycle = None
+            self._last_cycle_at = None
+        self._last_eta_source = source
         cycle = self._smooth_cycle_locked(measured, now)
         stall = now - self._completion_times[-1]
         eta = max(0.0, len(outstanding) * cycle - min(stall, cycle))
@@ -954,7 +1040,31 @@ class BatchProgressAggregator:
         if floor is not None:
             eta = max(eta, floor)
 
-        return eta, True
+        sample_count = len(self._completion_times)
+        relative = max(0.15, min(0.75, 1.0 / math.sqrt(max(2, sample_count - 1))))
+        if sample_count < 7:
+            # With only a handful of completions there is not enough evidence
+            # to rule out a late retry/post-processing cohort. A deliberately
+            # wide interval is more honest than a narrow but fragile one.
+            relative = max(relative, 1.0)
+        if len(set(self._completion_sources)) > 1:
+            relative = min(1.10, relative + 0.10)
+        lower = max(floor or 0.0, eta * (1.0 - relative))
+        upper = max(lower, eta * (1.0 + relative))
+        if len(self._completion_times) >= 2:
+            recent = self._completion_times[-4:]
+            largest_recent_gap = max(
+                (right - left for left, right in zip(recent, recent[1:])),
+                default=0.0,
+            )
+            upper = max(upper, len(outstanding) * largest_recent_gap * 1.25)
+        confidence = "steady" if sample_count >= 7 and relative <= 0.35 else "low"
+        return eta, True, lower, upper, confidence, source
+
+    def _eta_locked(self) -> tuple[Optional[float], bool]:
+        """Compatibility view for callers that need only center + estimate flag."""
+        eta, estimate, _lower, _upper, _confidence, _source = self._eta_details_locked()
+        return eta, estimate
 
     def _snapshot_locked(self) -> BatchSnapshot:
         # Advance the speed decay on read, not only on mutation. The decay is a
@@ -972,7 +1082,9 @@ class BatchProgressAggregator:
 
         progress, byte_weighted = self._progress_locked()
         raw_speed = self._raw_active_speed_locked()
-        eta, eta_estimate = self._eta_locked()
+        (
+            eta, eta_estimate, eta_lower, eta_upper, eta_confidence, eta_source,
+        ) = self._eta_details_locked()
 
         return BatchSnapshot(
             total=len(self._jobs),
@@ -990,4 +1102,8 @@ class BatchProgressAggregator:
             eta_seconds=eta,
             eta_is_estimate=eta_estimate,
             batch_id=self._batch_id,
+            eta_lower_seconds=eta_lower,
+            eta_upper_seconds=eta_upper,
+            eta_confidence=eta_confidence,
+            eta_source=eta_source,
         )
