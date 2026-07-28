@@ -320,9 +320,16 @@ class DownloadController(QObject):
                 expand_thumbnails=self._cfg.expand_thumbnails,
                 clean_filename=is_clean,
                 proxy_url=self._cfg.get("youtube_proxy_url") or None,
-                is_solo=is_solo,
+                is_solo=(
+                    str(getattr(card, "source_kind", "") or "").upper()
+                    in {UrlKind.SINGLE_VIDEO.name, UrlKind.UNKNOWN.name}
+                    if getattr(card, "source_kind", "")
+                    else is_solo
+                ),
                 stream_type=_parse_stream_type(getattr(card, "category", "")),
                 category=getattr(card, "category", "") or None,
+                source_kind=getattr(card, "source_kind", "") or None,
+                source_url=getattr(card, "source_url", "") or None,
                 youtube_reliability_mode=self._cfg.youtube_reliability_mode,
             )
 
@@ -356,6 +363,14 @@ class DownloadController(QObject):
             key = str(id(card))
             track_playlist_name:   Optional[str] = None
             is_parent_discography: bool          = False
+            source_kind = str(getattr(card, "source_kind", "") or "").upper()
+            has_source_context = bool(source_kind)
+            independent_source = source_kind in {
+                UrlKind.SINGLE_VIDEO.name, UrlKind.UNKNOWN.name,
+            }
+            grouped_source = source_kind in {
+                UrlKind.PLAYLIST.name, UrlKind.ALBUM.name, UrlKind.ARTIST.name,
+            }
 
             if self._cfg.playlist_subfolders:
                 parent_artist = (card.parent_artist or "").strip()
@@ -364,7 +379,11 @@ class DownloadController(QObject):
                 platform      = (card.platform      or "").lower()
                 category      = (card.category      or "").strip()
 
-                if parent_artist:
+                if independent_source:
+                    # Album/artist fields describe this track but do not turn
+                    # a direct URL (or TXT list of direct URLs) into a collection.
+                    track_playlist_name = ""
+                elif parent_artist:
                     is_live     = "live" in card.title.lower() or "הופעה" in card.title
                     is_spotify  = "spotify" in platform
                     
@@ -417,16 +436,20 @@ class DownloadController(QObject):
 
                     is_parent_discography = True
 
-                elif is_multi:
+                elif grouped_source or (not has_source_context and is_multi):
                     # Generic multi-item (Playlist/Album) logic
-                    track_playlist_name = last_playlist_title or "Playlist"
+                    track_playlist_name = (
+                        (card.album or "").strip()
+                        or last_playlist_title
+                        or "Playlist"
+                    )
                 elif card.artist:
                     pass  # single track — no subfolder
             else:
                 track_playlist_name = ""
 
             # User wants NO folders for solo downloads
-            if is_solo:
+            if is_solo and not grouped_source:
                 track_playlist_name = ""
 
             # Use the same path the writability check ran against. opts["output_dir"]
@@ -443,7 +466,7 @@ class DownloadController(QObject):
 
             # Calculate the index to use for filename prefixing and metadata tags
             track_index = None
-            if not is_solo:
+            if grouped_source or (not has_source_context and not is_solo):
                 if card.release_type in ("album", "ep") and card.album_index > 0:
                     track_index = card.album_index
                 elif card.release_type == "playlist":
@@ -868,6 +891,8 @@ class DownloadController(QObject):
             "spotify_id":       getattr(card, "spotify_id", ""),
             "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
             "match_status":     getattr(card, "match_status", "matched"),
+            "source_kind":      getattr(card, "source_kind", ""),
+            "source_url":       getattr(card, "source_url", ""),
         }
 
     def _persist_paused_state(self) -> None:

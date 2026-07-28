@@ -103,6 +103,8 @@ class TrackMeta:
 
     # ── Platform ─────────────────────────────────────────────────────────────
     platform:       SourcePlatform = SourcePlatform.UNKNOWN
+    source_kind:    str   = ""          # UrlKind.name of the URL that produced this item
+    source_url:     str   = ""          # original fetched URL / collection identity
     
     # ── Custom Categories ───────────────────────────────────────────────────
     category:       str   = ""          # override for custom yt/scraper tabs
@@ -487,6 +489,8 @@ class PlaylistParser:
                 match_status=match_status,
                 resolution_error=track_data.get("resolution_error", ""),
                 platform=platform,
+                source_kind=kind.name,
+                source_url=url,
                 selected=match_status not in ("metadata_invalid", "unresolved"),
             )
             result.tracks.append(track)
@@ -742,11 +746,15 @@ class PlaylistParser:
                         result.cancelled = True
                         break
                     track = _entry_to_track(entry, idx, platform=platform, album=playlist_title)
+                    track.source_kind = kind.name
+                    track.source_url = url
                     result.tracks.append(track)
                     if on_item:
                         on_item(track, idx, len(entries))
             else:
                 track = _entry_to_track(info, 1, platform=platform, album="")
+                track.source_kind = kind.name
+                track.source_url = url
                 result.tracks.append(track)
                 result.playlist_title = track.title
                 if on_item:
@@ -831,6 +839,8 @@ class PlaylistParser:
                     # 'stream_intercept' tells the downloader to open this video
                     # page and intercept its HLS/DASH stream at download time.
                     category="stream_intercept",
+                    source_kind=kind.name,
+                    source_url=url,
                 )
                 result.tracks.append(track)
                 if on_item:
@@ -888,6 +898,8 @@ class PlaylistParser:
                 # Carry the stream type in the category field so DownloadRequest
                 # can route to the correct downloader without a schema change.
                 category=f"stream:{stream.stream_type}",
+                source_kind=kind.name,
+                source_url=url,
             )
             result.tracks.append(track)
             if on_item:

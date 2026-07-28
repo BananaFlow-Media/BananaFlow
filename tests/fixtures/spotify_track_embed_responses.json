@@ -14,7 +14,14 @@
           {"name": "Keren Peles", "uri": "spotify:artist:1T4wAIwQNLsOLQRkPVurY9"},
           {"name": "Roni Alter", "uri": "spotify:artist:2QZYh3YAFWqpJHf01j0DbN"}
         ],
-        "duration": 197100
+        "duration": 197100,
+        "visualIdentity": {
+          "image": [
+            {"url": "https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e02a90ffa9176a4ca0453e0629b", "maxHeight": 300, "maxWidth": 300},
+            {"url": "https://image-cdn-fa.spotifycdn.com/image/ab67616d00004851a90ffa9176a4ca0453e0629b", "maxHeight": 64, "maxWidth": 64},
+            {"url": "https://image-cdn-fa.spotifycdn.com/image/ab67616d0000b273a90ffa9176a4ca0453e0629b", "maxHeight": 640, "maxWidth": 640}
+          ]
+        }
       }
     },
     "2VxeLyX666F8uXCJ0dZF8B": {
@@ -29,7 +36,14 @@
           {"name": "Lady Gaga", "uri": "spotify:artist:1HY2Jd0NmPuamShAr6KMms"},
           {"name": "Bradley Cooper", "uri": "spotify:artist:4VIvfOurcf0vuLRxLkGnIG"}
         ],
-        "duration": 215733
+        "duration": 215733,
+        "visualIdentity": {
+          "image": [
+            {"url": "https://image-cdn-ak.spotifycdn.com/image/ab67616d00001e02b5d4b4ed17ec86c4b3944af2", "maxHeight": 300, "maxWidth": 300},
+            {"url": "https://image-cdn-ak.spotifycdn.com/image/ab67616d00004851b5d4b4ed17ec86c4b3944af2", "maxHeight": 64, "maxWidth": 64},
+            {"url": "https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b273b5d4b4ed17ec86c4b3944af2", "maxHeight": 640, "maxWidth": 640}
+          ]
+        }
       },
       "polluted_full_page_artist_links": [
         "Lady Gaga",

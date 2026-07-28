@@ -118,6 +118,8 @@ class FetchWorker(QThread):
                 "spotify_key_kind": track.spotify_key_kind,
                 "match_status":  track.match_status,
                 "resolution_error": track.resolution_error,
+                "source_kind":    track.source_kind,
+                "source_url":     track.source_url,
             }, idx, total or 0)
 
         def on_progress(msg: str) -> None:

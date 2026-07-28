@@ -175,6 +175,8 @@ class TrackCard(QFrame):
         spotify_key_kind: str      = "spotify_id",
         match_status:  str         = "matched",
         resolution_error: str      = "",
+        source_kind:    str         = "",
+        source_url:     str         = "",
         parent:       QWidget      = None,
     ) -> None:
         super().__init__(parent)
@@ -197,6 +199,8 @@ class TrackCard(QFrame):
         self.spotify_key_kind = spotify_key_kind
         self.match_status     = match_status
         self.resolution_error = resolution_error
+        self.source_kind      = source_kind
+        self.source_url       = source_url
         # Ensure platform is a string
         if hasattr(platform, "value"):
             plat_str = platform.value

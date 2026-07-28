@@ -913,6 +913,8 @@ class AppWindow(FluentWindow):
                     spotify_key_kind=item.get("spotify_key_kind", "spotify_id"),
                     match_status=item.get("match_status", "matched"),
                     resolution_error=item.get("resolution_error", ""),
+                    source_kind=item.get("source_kind", ""),
+                    source_url=item.get("source_url", ""),
                 )
                 self._add_track_to_queue(meta)
             except Exception as exc:
@@ -939,6 +941,8 @@ class AppWindow(FluentWindow):
                 "spotify_key_kind": getattr(c, "spotify_key_kind", "spotify_id"),
                 "match_status":  getattr(c, "match_status", "matched"),
                 "resolution_error": getattr(c, "resolution_error", ""),
+                "source_kind":    getattr(c, "source_kind", ""),
+                "source_url":     getattr(c, "source_url", ""),
             }
             for c in cards
             # "done" cards are finished; "paused" cards are owned by the
@@ -1562,6 +1566,8 @@ class AppWindow(FluentWindow):
             spotify_key_kind=get("spotify_key_kind", "spotify_id"),
             match_status=get("match_status", "matched"),
             resolution_error=get("resolution_error", ""),
+            source_kind=get("source_kind", ""),
+            source_url=get("source_url", ""),
         )
 
         card.remove_requested.connect(self._on_card_removed)

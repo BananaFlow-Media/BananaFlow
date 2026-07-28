@@ -60,6 +60,8 @@ def test_frozen_production_embed_extracts_only_track_credits(
     assert metadata["artist_credits"] == artists
     assert metadata["artist"] == ", ".join(artists)
     assert metadata["duration_sec"] == duration
+    assert metadata["thumbnail_url"].startswith("https://image-cdn-")
+    assert "ab67616d0000b273" in metadata["thumbnail_url"]  # largest 640px image
     assert not any(
         phrase.casefold() in metadata["artist"].casefold()
         for phrase in ("Show all", "Popular Releases", "Popular Albums", "Popular Singles")
@@ -119,7 +121,7 @@ def test_individual_track_production_path_emits_valid_metadata_as_pending(monkey
     metadata = parse_spotify_embed_track_html(_embed_html(track_id), track_id)
     row = SpotifyResolver._make_dict(
         metadata["title"], metadata["artist"], metadata["duration_sec"] * 1000,
-        "", metadata["spotify_url"],
+        metadata["thumbnail_url"], metadata["spotify_url"],
     )
     row.update(spotify_id=track_id, artist_credits=metadata["artist_credits"])
     monkeypatch.setattr(SpotifyResolver, "_embed_fallback", lambda *_a, **_k: [dict(row)])
@@ -134,6 +136,19 @@ def test_individual_track_production_path_emits_valid_metadata_as_pending(monkey
     assert items[0]["artist"] == "Lady Gaga, Bradley Cooper"
     assert emitted[0]["match_status"] == "pending"
     assert emitted[0]["url"].startswith("ytsearch1:")
+    assert emitted[0]["thumbnail_url"] == metadata["thumbnail_url"]
+
+
+def test_artwork_failure_is_nonfatal_to_structured_track_metadata():
+    track_id = "2VxeLyX666F8uXCJ0dZF8B"
+    entity = dict(_fixture()["tracks"][track_id]["entity"])
+    entity["visualIdentity"] = {"image": [{"url": "javascript:bad"}, "broken"]}
+    payload = {"props": {"pageProps": {"state": {"data": {"entity": entity}}}}}
+    html = '<script id="__NEXT_DATA__" type="application/json">' + json.dumps(payload) + "</script>"
+    metadata = parse_spotify_embed_track_html(html, track_id)
+    assert metadata["title"] == "Shallow"
+    assert metadata["artist_credits"] == ["Lady Gaga", "Bradley Cooper"]
+    assert metadata["thumbnail_url"] == ""
 
 
 def test_inconclusive_strict_path_invokes_general_fallback_and_ranks_real_candidates(

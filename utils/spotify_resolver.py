@@ -184,6 +184,26 @@ def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
         duration_sec = int(raw_duration) // 1000 if raw_duration else 0
     except (TypeError, ValueError):
         duration_sec = 0
+
+    # The public embed entity owns a track-scoped image set.  Prefer its
+    # largest declared image instead of querying broad page DOM selectors,
+    # which may point at recommendation cards or unrelated Spotify UI.
+    # Artwork is optional: a missing/malformed image must never invalidate
+    # otherwise usable track metadata.
+    images = (entity.get("visualIdentity") or {}).get("image") or []
+    artwork_candidates: list[tuple[int, str]] = []
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        url = str(image.get("url") or "").strip()
+        if not url.startswith(("https://", "http://")):
+            continue
+        try:
+            area = int(image.get("maxWidth") or 0) * int(image.get("maxHeight") or 0)
+        except (TypeError, ValueError):
+            area = 0
+        artwork_candidates.append((area, url))
+    thumbnail_url = max(artwork_candidates, default=(0, ""))[1]
     return {
         "title": title,
         "artist": ", ".join(artist_names),
@@ -191,6 +211,7 @@ def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
         "duration_sec": duration_sec,
         "spotify_id": entity_id or expected_track_id,
         "spotify_url": f"https://open.spotify.com/track/{entity_id or expected_track_id}",
+        "thumbnail_url": thumbnail_url,
     }
 
 
@@ -514,7 +535,8 @@ class SpotifyResolver:
             metadata = parse_spotify_embed_track_html(html, entity_id)
             d = cls._make_dict(
                 metadata["title"], metadata["artist"],
-                metadata["duration_sec"] * 1000, "", metadata["spotify_url"],
+                metadata["duration_sec"] * 1000, metadata["thumbnail_url"],
+                metadata["spotify_url"],
             )
             d["spotify_id"] = metadata["spotify_id"]
             d["artist_credits"] = metadata["artist_credits"]

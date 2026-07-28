@@ -79,7 +79,7 @@ class SearchController(QObject):
         Convert a SearchResult to TrackMeta and signal AppWindow to add it to
         the download queue.  AppWindow also switches to the queue tab.
         """
-        from core.playlist_parser import TrackMeta
+        from core.playlist_parser import TrackMeta, UrlKind
 
         meta = TrackMeta(
             title=result.title,
@@ -90,5 +90,7 @@ class SearchController(QObject):
             platform=result.platform,
             album=result.album,
             release_type=result.release_type,
+            source_kind=UrlKind.SINGLE_VIDEO.name,
+            source_url=result.url,
         )
         self.result_to_queue.emit(meta)

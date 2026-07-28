@@ -28,6 +28,10 @@ _SPOTIFY_TRACK_FIXTURES = {
         "id": "4CF4nWNKzvRsFN542wXLyX",
         "artists": [{"name": "Keren Peles"}, {"name": "Roni Alter"}],
         "duration": 197100,
+        "visualIdentity": {"image": [
+            {"url": "https://image.spotify.invalid/hebrew-300.jpg", "maxWidth": 300, "maxHeight": 300},
+            {"url": "https://image.spotify.invalid/hebrew-640.jpg", "maxWidth": 640, "maxHeight": 640},
+        ]},
     },
     "2VxeLyX666F8uXCJ0dZF8B": {
         "type": "track", "name": "Shallow",
@@ -35,6 +39,10 @@ _SPOTIFY_TRACK_FIXTURES = {
         "id": "2VxeLyX666F8uXCJ0dZF8B",
         "artists": [{"name": "Lady Gaga"}, {"name": "Bradley Cooper"}],
         "duration": 215733,
+        "visualIdentity": {"image": [
+            {"url": "https://image.spotify.invalid/shallow-300.jpg", "maxWidth": 300, "maxHeight": 300},
+            {"url": "https://image.spotify.invalid/shallow-640.jpg", "maxWidth": 640, "maxHeight": 640},
+        ]},
     },
 }
 
@@ -210,7 +218,7 @@ def _orchestrator_checks(steps: list[dict], output_dir: Path) -> None:
     )
 
 
-def _spotify_production_checks(steps: list[dict]) -> None:
+def _spotify_production_checks(steps: list[dict], output_dir: Path) -> None:
     """Exercise frozen real Spotify metadata through production parsing/scoring."""
     from core.match_errors import SpotifyMetadataInvalid
     from utils.spotify_resolver import (
@@ -234,6 +242,11 @@ def _spotify_production_checks(steps: list[dict]) -> None:
         and parsed["2VxeLyX666F8uXCJ0dZF8B"]["artist_credits"]
         == ["Lady Gaga", "Bradley Cooper"],
         "two frozen production track responses parsed",
+    )
+    _step(
+        steps, "spotify_track_scoped_artwork",
+        parsed["4CF4nWNKzvRsFN542wXLyX"]["thumbnail_url"].endswith("hebrew-640.jpg")
+        and parsed["2VxeLyX666F8uXCJ0dZF8B"]["thumbnail_url"].endswith("shallow-640.jpg"),
     )
 
     malformed_detected = False
@@ -330,6 +343,192 @@ def _spotify_production_checks(steps: list[dict]) -> None:
     bar.deleteLater()
     app.processEvents()
 
+    # Follow the user-visible artwork/source contract through real queue cards
+    # and DownloadController request construction.  Two direct Spotify URLs
+    # must stay root-level and unnumbered; one album item remains grouped even
+    # when it is the only selected card.
+    from config import AppConfig
+    from core.playlist_parser import UrlKind
+    from ui.controllers.download_controller import DownloadController
+
+    cfg = AppConfig()
+    cfg.output_dir = str(output_dir)
+    cfg.duplicate_action = "overwrite"
+    cfg.playlist_subfolders = True
+    cfg.playlist_index_prefix = True
+    controlled = _Engine(output_dir)
+    controller = DownloadController(cfg, controlled)
+    built = []
+
+    class _NoopWorker:
+        def start(self):
+            pass
+
+    controller._build_batch_worker = (  # noqa: SLF001 - packaged smoke seam
+        lambda jobs, preexisting: built.extend(jobs) or _NoopWorker()
+    )
+    direct_cards = [
+        TrackCard(
+            meta["title"], meta["artist"], queue_index=index,
+            platform="spotify", track_url=f"https://trace.invalid/release/{index}",
+            parent_artist=meta["artist_credits"][0], release_type="single",
+            thumbnail_url=meta["thumbnail_url"],
+            source_kind=UrlKind.SINGLE_VIDEO.name,
+            source_url=f"https://open.spotify.com/track/{track_id}",
+        )
+        for index, (track_id, meta) in enumerate(parsed.items(), start=1)
+    ]
+    opts = {
+        "media_type": "audio", "quality_label": "320",
+        "audio_format": "mp3", "video_format": "mp4",
+        "output_dir": str(output_dir),
+    }
+    controller.start_batch(direct_cards, opts, UrlKind.SINGLE_VIDEO, "")
+    direct_requests = [request for _key, request in built]
+    _step(
+        steps, "independent_track_output_context",
+        len(direct_requests) == 2
+        and all(request.playlist_name in (None, "") for request in direct_requests)
+        and all(request.forced_index is None and request.is_solo for request in direct_requests),
+    )
+    _step(
+        steps, "spotify_artwork_download_request",
+        [request.thumbnail_url for request in direct_requests]
+        == [card.thumbnail_url for card in direct_cards]
+        and all(request.thumbnail_url for request in direct_requests),
+    )
+
+    built.clear()
+    album_card = TrackCard(
+        "Album Track", "Album Artist", queue_index=8, platform="spotify",
+        track_url="https://trace.invalid/release/8", parent_artist="Album Artist",
+        album="Album Name", release_type="album", album_index=3,
+        source_kind=UrlKind.ALBUM.name,
+        source_url="https://open.spotify.com/album/album-id",
+    )
+    controller.start_batch([album_card], opts, UrlKind.SINGLE_VIDEO, "Wrong Global")
+    album_request = built[0][1]
+    _step(
+        steps, "grouped_source_output_context",
+        "Album Name" in (album_request.playlist_name or "")
+        and album_request.forced_index == 3 and not album_request.is_solo,
+    )
+
+    for queue_card in [*direct_cards, album_card]:
+        queue_card.deleteLater()
+    app.processEvents()
+
+
+def _txt_import_checks(steps: list[dict], app_data: Path) -> None:
+    """Drive the packaged FetchController over a realistic three-URL TXT."""
+    from PySide6.QtCore import QObject, Signal
+    from config import AppConfig
+    from core.playlist_parser import ParseResult, SourcePlatform, TrackMeta, UrlKind
+    from ui.controllers.fetch_controller import FetchController
+    import ui.workers.fetch_worker as worker_module
+
+    urls = [f"https://youtu.be/rcsmoke0000{index}" for index in range(1, 4)]
+    batch_file = app_data / "release-smoke-urls.txt"
+    batch_file.write_text("\n".join([urls[0], "unsupported text", *urls[1:]]), encoding="utf-8")
+    starts: list[str] = []
+    emitted: list[dict] = []
+    summaries: list[str] = []
+    original_worker = worker_module.FetchWorker
+
+    class _SmokeFetchWorker(QObject):
+        track_found = Signal(dict, int, int)
+        progress_msg = Signal(str)
+        soft_error = Signal(str)
+        finished = Signal(object)
+        error = Signal(object)
+
+        def __init__(self, url, **_kwargs):
+            super().__init__()
+            self.url = url
+
+        def start(self):
+            starts.append(self.url)
+            if self.url == urls[1]:
+                self.error.emit("controlled per-URL failure")
+                return
+            meta = TrackMeta(
+                title=self.url[-1], url=self.url, platform=SourcePlatform.YOUTUBE,
+                source_kind=UrlKind.SINGLE_VIDEO.name, source_url=self.url,
+            )
+            self.track_found.emit({
+                "title": meta.title, "track_url": meta.url,
+                "source_kind": meta.source_kind, "source_url": meta.source_url,
+            }, 1, 1)
+            self.finished.emit(ParseResult(
+                url=self.url, kind=UrlKind.SINGLE_VIDEO,
+                platform=SourcePlatform.YOUTUBE, tracks=[meta], total_count=1,
+            ))
+
+        def isRunning(self):
+            return False
+
+        def cancel(self):
+            pass
+
+        def wait(self, _milliseconds):
+            return True
+
+    try:
+        worker_module.FetchWorker = _SmokeFetchWorker
+        controller = FetchController(AppConfig())
+        controller.track_fetched.connect(emitted.append)
+        controller.temporary_status.connect(summaries.append)
+        controller.batch_import(str(batch_file))
+    finally:
+        worker_module.FetchWorker = original_worker
+        batch_file.unlink(missing_ok=True)
+
+    _step(
+        steps, "txt_import_all_urls",
+        starts == urls and [item["source_url"] for item in emitted] == [urls[0], urls[2]],
+        f"started={len(starts)} succeeded={len(emitted)}",
+    )
+    _step(
+        steps, "txt_import_failure_continuation",
+        bool(summaries) and "2" in summaries[-1] and "1" in summaries[-1],
+    )
+
+
+def _provider_timeout_checks(steps: list[dict]) -> None:
+    """Reproduce the packaged Deno TimeoutExpired circuit-breaker boundary."""
+    import subprocess
+    from yt_dlp.utils import Popen
+    from utils import yt_dlp_opts
+
+    original_run = Popen.run
+    original_installed = yt_dlp_opts._bgutil_stderr_capture_installed  # noqa: SLF001
+    calls = []
+
+    def _timeout(command, *args, **kwargs):
+        calls.append(command)
+        raise subprocess.TimeoutExpired(command, 15.0)
+
+    try:
+        yt_dlp_opts.reset_po_token_provider_circuit()
+        yt_dlp_opts._bgutil_stderr_capture_installed = False  # noqa: SLF001
+        Popen.run = staticmethod(_timeout)
+        yt_dlp_opts.install_bgutil_stderr_capture()
+        for _ in range(2):
+            try:
+                Popen.run(["deno", "run", "generate_once.ts", "--version"])
+            except subprocess.TimeoutExpired:
+                pass
+        metrics = yt_dlp_opts.po_token_provider_metrics()
+        _step(
+            steps, "provider_timeout_work_bounded",
+            len(calls) == 2 and metrics["attempts"] == 2 and metrics["circuit_open"],
+            f"attempts={metrics['attempts']}",
+        )
+    finally:
+        Popen.run = original_run
+        yt_dlp_opts._bgutil_stderr_capture_installed = original_installed  # noqa: SLF001
+        yt_dlp_opts.reset_po_token_provider_circuit()
+
 
 def _verify_protected_store(steps: list[dict], secret: str) -> None:
     from utils.cookie_store import DPAPI_MAGIC, materialize_cookie_file, read_cookie_store
@@ -421,7 +620,9 @@ def run_release_candidate_smoke() -> int:
             )
             _verify_protected_store(steps, secret)
             _orchestrator_checks(steps, app_data / "smoke-downloads")
-            _spotify_production_checks(steps)
+            _spotify_production_checks(steps, app_data / "smoke-downloads")
+            _txt_import_checks(steps, app_data)
+            _provider_timeout_checks(steps)
 
         elif scenario == "upgrade":
             _step(

@@ -153,6 +153,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # ── Batch import ────────────────────────────────────────────────────────
         "batch_import_failed": "Batch Import Failed",
         "no_urls_found": "No supported URLs found in {filename}",
+        "batch_import_progress": "Importing URL {current} of {total}…",
+        "batch_import_complete": "Import complete: {success} succeeded, {failed} failed, {skipped} skipped.",
+        "batch_import_cancelled": "Import cancelled: {success} succeeded, {failed} failed, {skipped} skipped, {remaining} not processed.",
 
         # ── Scraper ─────────────────────────────────────────────────────────────
         "scrape_multi_found": "{count} media link(s) found. First URL loaded — press Fetch Info to begin.",
@@ -1525,6 +1528,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # ── Batch import ────────────────────────────────────────────────────────
         "batch_import_failed": "ייבוא אצווה נכשל",
         "no_urls_found": "לא נמצאו קישורים נתמכים בקובץ {filename}",
+        "batch_import_progress": "מייבא קישור {current} מתוך {total}…",
+        "batch_import_complete": "הייבוא הושלם: {success} הצליחו, {failed} נכשלו, {skipped} דולגו.",
+        "batch_import_cancelled": "הייבוא בוטל: {success} הצליחו, {failed} נכשלו, {skipped} דולגו, {remaining} לא עובדו.",
 
         # ── Scraper ─────────────────────────────────────────────────────────────
         "scrape_multi_found": "נמצאו {count} קישורי מדיה. הקישור הראשון נטען — לחץ הצג מידע להתחיל.",

@@ -295,6 +295,11 @@ class DownloadRequest:
     stream_type: Optional[str] = None
     platform: Optional[SourcePlatform] = None
 
+    # Original queue-source identity.  Output routing uses this instead of
+    # inferring collection semantics from the current selection size.
+    source_kind: Optional[str] = None
+    source_url:  Optional[str] = None
+
     # Category tag forwarded from TrackMeta (e.g. "stream_intercept", "stream:hls")
     category: Optional[str] = None
 

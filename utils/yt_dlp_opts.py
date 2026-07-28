@@ -267,7 +267,17 @@ def install_bgutil_stderr_capture() -> None:
             if not _is_bgutil_script_command(command):
                 return original_run(command, *args, **kwargs)
             kwargs.setdefault("stderr", subprocess.PIPE)
-            stdout, stderr, returncode = original_run(command, *args, **kwargs)
+            try:
+                stdout, stderr, returncode = original_run(command, *args, **kwargs)
+            except (subprocess.TimeoutExpired, TimeoutError):
+                # A timed-out provider process is just as unusable as a
+                # non-zero exit.  Count the actual child attempt before yt-dlp
+                # wraps/rephrases it so the existing circuit breaker disables
+                # the provider after two failures.  The following retry can
+                # still use yt-dlp's ordinary clients instead of repeating the
+                # same 15-second startup timeout four times per track.
+                note_po_token_provider_attempt_failure()
+                raise
             if stderr:
                 text = str(stderr).strip()
                 if text:
