@@ -178,11 +178,14 @@ def _run_internal_smoke_test(argv: list[str]) -> int:
     """
     index = argv.index("--internal-smoke-test")
     target = argv[index + 1] if index + 1 < len(argv) else ""
-    if target != "tag-editor":
-        print(f'{{"ok": false, "error": "unknown smoke target {target!r}"}}')
-        return 2
-    from core.internal_smoke_test import run_tag_editor_smoke_test
-    return run_tag_editor_smoke_test()
+    if target == "tag-editor":
+        from core.internal_smoke_test import run_tag_editor_smoke_test
+        return run_tag_editor_smoke_test()
+    if target == "release-candidate":
+        from core.release_candidate_smoke import run_release_candidate_smoke
+        return run_release_candidate_smoke()
+    print(f'{{"ok": false, "error": "unknown smoke target {target!r}"}}')
+    return 2
 
 
 if __name__ == "__main__":

@@ -362,6 +362,18 @@ jobs:
           }
           Write-Host "All release files carry $version and are covered by SHA256SUMS.txt."
 
+      - name: Packaged release-candidate smoke (installer + portable)
+        shell: pwsh
+        run: '& .\scripts\run_windows_release_smoke.ps1 -EvidenceDir smoke-evidence\release-candidate'
+
+      - name: Upload release-candidate smoke evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: release-candidate-smoke-${{ steps.ver.outputs.version }}
+          path: smoke-evidence/release-candidate/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Generate build provenance attestation
         # Binds the released ZIP/installer/checksums to this exact workflow
         # run, commit, and builder identity via a signed, GitHub-hosted
