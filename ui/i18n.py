@@ -92,6 +92,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "phase_starting":    "Starting…",
         "phase_downloading": "Downloading",
         "phase_processing":  "Finishing up…",
+        "spotify_metadata_invalid_card": "Spotify track details are invalid — this track will not be downloaded.",
+        "spotify_unresolved_card": "No reasonable recording match was found — this track will not be downloaded.",
         "eta_calculating": "Calculating…",
         # {time} is a preformatted M:SS / H:MM:SS duration from
         # utils.time_format.seconds_to_str, so the footer can count down by the
@@ -1466,6 +1468,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "phase_starting":    "מתחיל…",
         "phase_downloading": "מוריד",
         "phase_processing":  "מסיים…",
+        "spotify_metadata_invalid_card": "פרטי הרצועה מ-Spotify אינם תקינים — הרצועה לא תורד.",
+        "spotify_unresolved_card": "לא נמצאה הקלטה מתאימה — הרצועה לא תורד.",
         "eta_calculating": "מחשב…",
         "eta_about_left": "בערך {time} נותרו",
         "eta_range_left": "נותרו בערך {low}–{high}",
@@ -2913,6 +2917,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "נמצאו תוצאות חיפוש, אך אף אחת לא הוכיחה התאמה של אמן, שיר, "
             "משך וגרסת הקלטה. ההורדה נעצרה כדי לא להחליף בשקט לגרסת כיסוי, "
             "הופעה חיה, רמיקס או גרסה אחרת."
+        ),
+        "err_spotify_metadata_invalid_title": "פרטי רצועת Spotify אינם תקינים",
+        "err_spotify_metadata_invalid_detail": (
+            "Spotify החזיר פרטי רצועה חסרים, פגומים או מזוהמים בתוכן מהעמוד. "
+            "הרצועה נשארה ללא פתרון ולא נוספה לתור ההורדה."
         ),
         "err_browser_cookie_access_title": "לא ניתן לקרוא עוגיות דפדפן בבטחה",
         "err_browser_cookie_access_detail": (

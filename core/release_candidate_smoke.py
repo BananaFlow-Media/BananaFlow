@@ -21,6 +21,23 @@ from types import SimpleNamespace
 
 _SCENARIOS = frozenset({"fresh", "upgrade", "restart", "delete"})
 
+_SPOTIFY_TRACK_FIXTURES = {
+    "4CF4nWNKzvRsFN542wXLyX": {
+        "type": "track", "name": "באת לי פתאום",
+        "uri": "spotify:track:4CF4nWNKzvRsFN542wXLyX",
+        "id": "4CF4nWNKzvRsFN542wXLyX",
+        "artists": [{"name": "Keren Peles"}, {"name": "Roni Alter"}],
+        "duration": 197100,
+    },
+    "2VxeLyX666F8uXCJ0dZF8B": {
+        "type": "track", "name": "Shallow",
+        "uri": "spotify:track:2VxeLyX666F8uXCJ0dZF8B",
+        "id": "2VxeLyX666F8uXCJ0dZF8B",
+        "artists": [{"name": "Lady Gaga"}, {"name": "Bradley Cooper"}],
+        "duration": 215733,
+    },
+}
+
 
 def _step(steps: list[dict], name: str, ok: bool, detail: str = "") -> None:
     steps.append({"step": name, "ok": bool(ok), "detail": detail})
@@ -159,6 +176,160 @@ def _orchestrator_checks(steps: list[dict], output_dir: Path) -> None:
         f"snapshots={len(callbacks.snapshots)} eta_snapshots={len(eta_snapshots)}",
     )
 
+    # A failed Spotify resolver is terminal before DownloadEngine.  A resolved
+    # peer in the same batch must still finish, proving both mixed-batch
+    # continuation and the empty-URL boundary in packaged production code.
+    mixed_engine = _Engine(output_dir)
+    mixed_callbacks = _Callbacks()
+    valid = DownloadRequest(
+        url="https://trace.invalid/release/9",
+        output_dir=str(output_dir), media_type=MediaType.AUDIO,
+    )
+    invalid = DownloadRequest(
+        url="ytsearch1:invalid spotify metadata",
+        output_dir=str(output_dir), media_type=MediaType.AUDIO,
+    )
+    invalid.spotify_match_identity = {"title": "Song", "artist": "Artist"}
+    invalid.url_resolver = _Resolver("")
+    mixed = DownloadOrchestrator(
+        mixed_engine, mixed_callbacks, max_workers=2,
+    ).run_batch(
+        [("resolved", valid), ("unresolved", invalid)],
+        delay_range=(0.0, 0.0), batch_id="release-candidate-mixed",
+    )
+    _step(
+        steps, "mixed_resolved_unresolved_batch",
+        mixed.completed == 1 and mixed.failed == 1,
+        f"completed={mixed.completed} failed={mixed.failed}",
+    )
+    _step(
+        steps, "no_empty_url_engine_submission",
+        mixed_engine.urls == ["https://trace.invalid/release/9"]
+        and all(mixed_engine.urls),
+        f"engine_urls={len(mixed_engine.urls)}",
+    )
+
+
+def _spotify_production_checks(steps: list[dict]) -> None:
+    """Exercise frozen real Spotify metadata through production parsing/scoring."""
+    from core.match_errors import SpotifyMetadataInvalid
+    from utils.spotify_resolver import (
+        normalise_spotify_artist_credits,
+        parse_spotify_embed_track_html,
+    )
+
+    parsed = {}
+    for track_id, entity in _SPOTIFY_TRACK_FIXTURES.items():
+        payload = {"props": {"pageProps": {"state": {"data": {"entity": entity}}}}}
+        html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload, ensure_ascii=False)
+            + "</script>"
+        )
+        parsed[track_id] = parse_spotify_embed_track_html(html, track_id)
+    _step(
+        steps, "spotify_track_scoped_metadata",
+        parsed["4CF4nWNKzvRsFN542wXLyX"]["artist_credits"]
+        == ["Keren Peles", "Roni Alter"]
+        and parsed["2VxeLyX666F8uXCJ0dZF8B"]["artist_credits"]
+        == ["Lady Gaga", "Bradley Cooper"],
+        "two frozen production track responses parsed",
+    )
+
+    malformed_detected = False
+    try:
+        normalise_spotify_artist_credits([
+            "Lady Gaga", "Lady Gaga", "Bradley Cooper",
+            "Popular Releases by Lady Gaga", "Show all",
+        ])
+    except SpotifyMetadataInvalid:
+        malformed_detected = True
+    _step(steps, "spotify_polluted_metadata_detected", malformed_detected)
+
+    import core.spotify_match_scorer as scorer
+    import core.scraper as scraper
+    import ytmusicapi
+
+    original_ytmusic = ytmusicapi.YTMusic
+    original_search = scorer._search
+    original_deep = scorer._deep_validate_urls
+    fallback_calls: list[str] = []
+    try:
+        class _StrictYTM:
+            def search(self, *_args, **_kwargs):
+                return [{
+                    "videoId": "strict01", "title": "Shallow",
+                    "artists": [{"name": "Lady Gaga"}, {"name": "Bradley Cooper"}],
+                    "duration_seconds": 215,
+                }]
+
+        ytmusicapi.YTMusic = _StrictYTM
+        scorer._search = lambda *_a, **_k: fallback_calls.append("unexpected") or []
+        strict_url = scraper._resolve_to_ytm_url(
+            "Shallow", "Lady Gaga, Bradley Cooper", 215,
+        )
+        _step(
+            steps, "spotify_strict_match_flow",
+            strict_url.endswith("strict01") and not fallback_calls,
+        )
+
+        class _InconclusiveYTM:
+            def search(self, *_args, **_kwargs):
+                return [{
+                    "videoId": "karaoke0", "title": "Shallow Karaoke",
+                    "artists": [{"name": "Karaoke All Stars"}],
+                    "duration_seconds": 215,
+                }]
+
+        candidates = [
+            {"id": "tribute1", "title": "Lady Gaga & Bradley Cooper - Shallow",
+             "channel": "Tribute Stage", "artists": [{"name": "Tribute Stage"}],
+             "duration": 215},
+            {"id": "official1", "title": "Shallow", "channel": "Lady Gaga",
+             "artists": [{"name": "Lady Gaga"}, {"name": "Bradley Cooper"}],
+             "duration": 215},
+        ]
+        fallback_calls.clear()
+        ytmusicapi.YTMusic = _InconclusiveYTM
+        scorer._search = lambda *_a, **_k: fallback_calls.append("general") or list(candidates)
+        scorer._deep_validate_urls = lambda *_a, **_k: []
+        fallback_url = scraper._resolve_to_ytm_url(
+            "Shallow", "Lady Gaga, Bradley Cooper", 215,
+        )
+        _step(
+            steps, "spotify_general_fallback_flow",
+            fallback_calls == ["general"] and fallback_url.endswith("official1"),
+            f"fallback_calls={len(fallback_calls)}",
+        )
+    finally:
+        ytmusicapi.YTMusic = original_ytmusic
+        scorer._search = original_search
+        scorer._deep_validate_urls = original_deep
+
+    # UI state is exercised without showing a window.  An invalid row starts
+    # unselected/non-downloadable and therefore leaves Download disabled.
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from ui.app_window import _DownloadBar
+    from ui.components.track_card import TrackCard
+
+    app = QApplication.instance() or QApplication([])
+    card = TrackCard(
+        "Broken Spotify row", platform="spotify", track_url="",
+        match_status="metadata_invalid",
+        resolution_error="spotify_metadata_invalid_card",
+    )
+    bar = _DownloadBar()
+    bar.set_count(0, 1)
+    _step(
+        steps, "spotify_unresolved_ui_state",
+        not card.is_selected() and not card.is_downloadable()
+        and not bar._dl_btn.isEnabled(),
+    )
+    card.deleteLater()
+    bar.deleteLater()
+    app.processEvents()
+
 
 def _verify_protected_store(steps: list[dict], secret: str) -> None:
     from utils.cookie_store import DPAPI_MAGIC, materialize_cookie_file, read_cookie_store
@@ -250,6 +421,7 @@ def run_release_candidate_smoke() -> int:
             )
             _verify_protected_store(steps, secret)
             _orchestrator_checks(steps, app_data / "smoke-downloads")
+            _spotify_production_checks(steps)
 
         elif scenario == "upgrade":
             _step(

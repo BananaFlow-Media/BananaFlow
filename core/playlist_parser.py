@@ -115,7 +115,8 @@ class TrackMeta:
     # "pending". Non-Spotify paths resolve up-front and stay "matched".
     spotify_id:       str = ""            # stable Spotify track id (cache key)
     spotify_key_kind: str = "spotify_id"  # "spotify_id" | "composite"
-    match_status:     str = "matched"     # "matched" | "pending"
+    match_status:     str = "matched"     # matched | pending | metadata_invalid | unresolved
+    resolution_error: str = ""            # stable UI translation key for blocked rows
 
     # ── State used by the GUI (not set by the parser) ─────────────────────────
     selected:       bool = True         # pre-tick all items in the UI
@@ -484,8 +485,9 @@ class PlaylistParser:
                 spotify_id=track_data.get("spotify_id", ""),
                 spotify_key_kind=track_data.get("spotify_key_kind", "spotify_id"),
                 match_status=match_status,
+                resolution_error=track_data.get("resolution_error", ""),
                 platform=platform,
-                selected=True,
+                selected=match_status not in ("metadata_invalid", "unresolved"),
             )
             result.tracks.append(track)
             if on_item:

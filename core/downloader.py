@@ -527,7 +527,7 @@ class DownloadEngine:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
                 url=request.url,
-                error_message="❌ Download URL is empty.",
+                error_message="This unresolved track has no downloadable media target.",
             ), error=True)
             return
 

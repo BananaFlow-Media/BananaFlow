@@ -1,0 +1,53 @@
+{
+  "captured_at": "2026-07-28",
+  "source": "https://open.spotify.com/embed/track/{track_id}",
+  "tracks": {
+    "4CF4nWNKzvRsFN542wXLyX": {
+      "url": "https://open.spotify.com/track/4CF4nWNKzvRsFN542wXLyX",
+      "entity": {
+        "type": "track",
+        "name": "באת לי פתאום",
+        "title": "באת לי פתאום",
+        "uri": "spotify:track:4CF4nWNKzvRsFN542wXLyX",
+        "id": "4CF4nWNKzvRsFN542wXLyX",
+        "artists": [
+          {"name": "Keren Peles", "uri": "spotify:artist:1T4wAIwQNLsOLQRkPVurY9"},
+          {"name": "Roni Alter", "uri": "spotify:artist:2QZYh3YAFWqpJHf01j0DbN"}
+        ],
+        "duration": 197100
+      }
+    },
+    "2VxeLyX666F8uXCJ0dZF8B": {
+      "url": "https://open.spotify.com/track/2VxeLyX666F8uXCJ0dZF8B",
+      "entity": {
+        "type": "track",
+        "name": "Shallow",
+        "title": "Shallow",
+        "uri": "spotify:track:2VxeLyX666F8uXCJ0dZF8B",
+        "id": "2VxeLyX666F8uXCJ0dZF8B",
+        "artists": [
+          {"name": "Lady Gaga", "uri": "spotify:artist:1HY2Jd0NmPuamShAr6KMms"},
+          {"name": "Bradley Cooper", "uri": "spotify:artist:4VIvfOurcf0vuLRxLkGnIG"}
+        ],
+        "duration": 215733
+      },
+      "polluted_full_page_artist_links": [
+        "Lady Gaga",
+        "Lady Gaga",
+        "Bradley Cooper",
+        "Lewis Capaldi",
+        "P!nk",
+        "Nate Ruess",
+        "Calum Scott",
+        "Bruno Mars",
+        "Colby O'Donis",
+        "Popular Releases by Lady Gaga",
+        "Show all",
+        "Popular Albums by Lady Gaga",
+        "Show all",
+        "Popular Singles and EPs by Lady Gaga",
+        "Show all"
+      ]
+    }
+  }
+}

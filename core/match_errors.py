@@ -9,6 +9,10 @@ class SafeMatchNotFound(RuntimeError):
     """No candidate proved the requested recording identity."""
 
 
+class SpotifyMetadataInvalid(ValueError):
+    """Spotify did not provide a trustworthy track title and artist credit set."""
+
+
 _MEDIA_UNAVAILABLE_RE = re.compile(
     r"private video|video unavailable|has been removed|no longer available|"
     r"video (?:was )?deleted|this video is unavailable",

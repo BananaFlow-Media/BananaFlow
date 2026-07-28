@@ -908,6 +908,11 @@ class AppWindow(FluentWindow):
                     category=item.get("category", ""),
                     album_index=item.get("album_index", 0),
                     total_tracks=item.get("total_tracks", 0),
+                    duration_sec=item.get("duration_sec"),
+                    spotify_id=item.get("spotify_id", ""),
+                    spotify_key_kind=item.get("spotify_key_kind", "spotify_id"),
+                    match_status=item.get("match_status", "matched"),
+                    resolution_error=item.get("resolution_error", ""),
                 )
                 self._add_track_to_queue(meta)
             except Exception as exc:
@@ -929,6 +934,11 @@ class AppWindow(FluentWindow):
                 "category":      c.category,
                 "album_index":   c.album_index,
                 "total_tracks":  c.total_tracks,
+                "duration_sec":  getattr(c, "duration_sec", None),
+                "spotify_id":    getattr(c, "spotify_id", ""),
+                "spotify_key_kind": getattr(c, "spotify_key_kind", "spotify_id"),
+                "match_status":  getattr(c, "match_status", "matched"),
+                "resolution_error": getattr(c, "resolution_error", ""),
             }
             for c in cards
             # "done" cards are finished; "paused" cards are owned by the
@@ -1551,6 +1561,7 @@ class AppWindow(FluentWindow):
             spotify_id=get("spotify_id", ""),
             spotify_key_kind=get("spotify_key_kind", "spotify_id"),
             match_status=get("match_status", "matched"),
+            resolution_error=get("resolution_error", ""),
         )
 
         card.remove_requested.connect(self._on_card_removed)

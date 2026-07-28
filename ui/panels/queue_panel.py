@@ -264,6 +264,7 @@ class QueuePanel(QWidget):
         spotify_id:    str         = "",
         spotify_key_kind: str      = "spotify_id",
         match_status:  str         = "matched",
+        resolution_error: str      = "",
     ) -> TrackCard:
         """
         Create and append a new TrackCard.  Hides the empty state on first add.
@@ -290,6 +291,7 @@ class QueuePanel(QWidget):
             spotify_id=spotify_id,
             spotify_key_kind=spotify_key_kind,
             match_status=match_status,
+            resolution_error=resolution_error,
             parent=self._drop_area,
         )
         card.remove_requested.connect(self._on_card_remove)
@@ -316,7 +318,7 @@ class QueuePanel(QWidget):
         return list(self._cards)
 
     def get_selected_cards(self) -> list[TrackCard]:
-        return [c for c in self._cards if c.is_selected()]
+        return [c for c in self._cards if c.is_selected() and c.is_downloadable()]
 
     def card_by_index(self, queue_index: int) -> Optional[TrackCard]:
         for c in self._cards:

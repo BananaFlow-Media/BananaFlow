@@ -44,6 +44,13 @@ def test_fresh_restart_and_delete_packaged_phases(tmp_path, monkeypatch):
         "direct_download_startup",
         "spotify_resolver_startup",
         "eta_snapshot_delivery",
+        "spotify_track_scoped_metadata",
+        "spotify_polluted_metadata_detected",
+        "spotify_strict_match_flow",
+        "spotify_general_fallback_flow",
+        "no_empty_url_engine_submission",
+        "mixed_resolved_unresolved_batch",
+        "spotify_unresolved_ui_state",
     } <= names
 
     residue = root / ".bananaflow" / "auth_tmp" / "session-crash-residue.txt"

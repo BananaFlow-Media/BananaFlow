@@ -174,6 +174,7 @@ class TrackCard(QFrame):
         spotify_id:    str         = "",
         spotify_key_kind: str      = "spotify_id",
         match_status:  str         = "matched",
+        resolution_error: str      = "",
         parent:       QWidget      = None,
     ) -> None:
         super().__init__(parent)
@@ -195,6 +196,7 @@ class TrackCard(QFrame):
         self.spotify_id       = spotify_id
         self.spotify_key_kind = spotify_key_kind
         self.match_status     = match_status
+        self.resolution_error = resolution_error
         # Ensure platform is a string
         if hasattr(platform, "value"):
             plat_str = platform.value
@@ -215,6 +217,10 @@ class TrackCard(QFrame):
 
         self._build(title, artist, duration, plat_str)
         self._apply_shadow()
+        if match_status in ("metadata_invalid", "unresolved"):
+            self.mark_unresolved(
+                t(resolution_error) if resolution_error else t("spotify_unresolved_card")
+            )
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -391,6 +397,21 @@ class TrackCard(QFrame):
 
     def set_selected(self, checked: bool) -> None:
         self._check.setChecked(checked)
+
+    def is_downloadable(self) -> bool:
+        """Whether ordinary queue construction may submit this card."""
+        return self.match_status not in ("metadata_invalid", "unresolved")
+
+    def mark_unresolved(self, message: str = "") -> None:
+        """Make a failed Spotify match visible and impossible to resubmit."""
+        if self.match_status != "metadata_invalid":
+            self.match_status = "unresolved"
+        self.resolution_error = self.resolution_error or "spotify_unresolved_card"
+        self._check.setChecked(False)
+        self._check.setEnabled(False)
+        self.set_status("error")
+        if message:
+            self._artist_lbl.setText(message)
 
     @property
     def platform(self) -> str:
