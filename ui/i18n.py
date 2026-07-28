@@ -99,7 +99,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # (eta_about_sec/min/hr) could not express seconds above a minute.
         "eta_about_left": "About {time} left",
         "eta_range_left": "About {low}–{high} left",
-        "eta_at_least_left": "At least {time} left",
+        "eta_current_speed_left": "About {time} at the current speed",
         "eta_tooltip": "Estimated time remaining for the whole batch",
         "starting_downloads": "Starting {n} download{plural}…",
         "download_progress_count": "Downloading {current} / {total}…",
@@ -213,7 +213,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "authentication": "Authentication",
         "cookies_file": "Cookies File",
         "cookies_file_unset": "Not set — click Browse to select a cookies.txt file",
-        "cookies_file_configured": "Configured in BananaFlow's private per-user app-data folder — click Browse to update",
+        "cookies_file_configured": "Protected for your Windows account in BananaFlow's private app-data folder — click Browse to update",
         "cookies_updated_title": "Cookies updated",
         "cookies_updated_msg": "Your saved cookies were updated successfully.",
         "cookies_store_failed_title": "Cookies were not stored",
@@ -373,6 +373,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # ── Browser cookies ─────────────────────────────────────────────────────
         "browser_cookies":      "Browser Cookies Source",
         "browser_cookies_desc": "Read cookies from your browser to authenticate access to age-restricted or members-only content",
+        "browser_cookie_migrated_title": "Browser cookie setting updated",
+        "browser_cookie_migrated_msg": "BananaFlow removed an older live Chrome, Edge, Brave, or Chromium cookie setting because Windows no longer permits that access safely and reliably. Use BananaFlow's isolated sign-in helper or import cookies.txt instead. Firefox remains available.",
         "disabled":             "Disabled",
 
         # ── Release types ───────────────────────────────────────────────────────
@@ -1467,7 +1469,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "eta_calculating": "מחשב…",
         "eta_about_left": "בערך {time} נותרו",
         "eta_range_left": "נותרו בערך {low}–{high}",
-        "eta_at_least_left": "נותרו לפחות {time}",
+        "eta_current_speed_left": "בערך {time} בקצב הנוכחי",
         "eta_tooltip": "הערכת הזמן הנותר לאצווה כולה",
         "starting_downloads": "מתחיל הורדה של {n} פריטים…",
         "download_progress_count": "מוריד {current} מתוך {total}…",
@@ -1577,7 +1579,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "authentication": "אימות",
         "cookies_file": "קובץ עוגיות",
         "cookies_file_unset": "לא הוגדר — לחץ עיון לבחירת קובץ cookies.txt",
-        "cookies_file_configured": "מוגדר בתיקיית נתוני המשתמש הפרטית של BananaFlow — לחץ עיון כדי לעדכן",
+        "cookies_file_configured": "מוגן עבור חשבון Windows שלך בתיקיית הנתונים הפרטית של BananaFlow — לחץ עיון כדי לעדכן",
         "cookies_updated_title": "קובץ העוגיות עודכן",
         "cookies_updated_msg": "קובץ העוגיות השמור עודכן בהצלחה.",
         "cookies_store_failed_title": "העוגיות לא נשמרו",
@@ -1734,6 +1736,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # ── Browser cookies ─────────────────────────────────────────────────────
         "browser_cookies":      "מקור עוגיות דפדפן",
         "browser_cookies_desc": "קרא קובצי עוגיות מהדפדפן שלך כדי לאמת גישה לתוכן המוגבל בגיל או שמיועד רק לחברים",
+        "browser_cookie_migrated_title": "הגדרת עוגיות הדפדפן עודכנה",
+        "browser_cookie_migrated_msg": "BananaFlow הסיר הגדרה ישנה לקריאת עוגיות ישירות מ־Chrome, Edge, Brave או Chromium, משום ש-Windows אינו מאפשר עוד גישה כזו באופן בטוח ואמין. יש להשתמש בעוזר ההתחברות המבודד של BananaFlow או לייבא cookies.txt. התמיכה ב-Firefox נשארה זמינה.",
         "disabled":             "מושבת",
 
         # ── Release types ───────────────────────────────────────────────────────

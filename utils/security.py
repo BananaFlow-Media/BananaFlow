@@ -284,7 +284,9 @@ def restrict_path_permissions(path: str | Path, *, recursive: bool = False) -> N
     if recursive and target.is_dir():
         command.extend(["/T", "/C"])
 
-    result = run_hidden(command, purpose="acl-harden", timeout=60)
+    # Authentication paths themselves are sensitive operational data.  The
+    # command is intentionally omitted from logs for this ACL-only subprocess.
+    result = run_hidden(command, purpose="acl-harden", timeout=60, log_command=False)
     if result.returncode != 0:
         raise OSError("Windows ACL hardening failed")
 
@@ -326,6 +328,23 @@ def write_private_text(path: str | Path, text: str) -> Path:
     return destination
 
 
+def write_private_bytes(path: str | Path, payload: bytes) -> Path:
+    """Atomically write binary authentication data with owner-only access."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    harden_directory_once(destination.parent)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_bytes(payload)
+        restrict_path_permissions(temporary)
+        os.replace(temporary, destination)
+        restrict_path_permissions(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return destination
+
+
 @dataclass(frozen=True)
 class AuthDeletionResult:
     removed: tuple[str, ...]
@@ -342,6 +361,7 @@ def delete_stored_auth_data(
     profile_dir: str | Path | None = None,
 ) -> AuthDeletionResult:
     """Delete only BananaFlow-owned cookies and its dedicated browser profile."""
+    default_cookie_path = cookie_path is None
     if cookie_path is None or profile_dir is None:
         from utils.paths import get_app_browser_profile_dir, get_app_cookies_path
 
@@ -353,11 +373,24 @@ def delete_stored_auth_data(
     removed: list[str] = []
     failed: list[str] = []
 
-    try:
-        if cookie.exists():
-            cookie.unlink()
-            removed.append("cookies")
-    except OSError:
+    cookie_targets = [cookie]
+    if default_cookie_path:
+        from utils.paths import get_legacy_app_cookies_path
+        legacy = get_legacy_app_cookies_path()
+        if legacy not in cookie_targets:
+            cookie_targets.append(legacy)
+    cookie_removed = False
+    cookie_failed = False
+    for target in cookie_targets:
+        try:
+            if target.exists():
+                target.unlink()
+                cookie_removed = True
+        except OSError:
+            cookie_failed = True
+    if cookie_removed:
+        removed.append("cookies")
+    if cookie_failed:
         failed.append("cookies")
 
     try:

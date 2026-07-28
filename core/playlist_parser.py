@@ -47,7 +47,10 @@ except ImportError:
 
 from utils.time_format import seconds_to_str as _seconds_to_str
 from utils.logger import SilentLogger as _SilentLogger
-from utils.yt_dlp_opts import build_parse_ydl_opts as _build_parse_ydl_opts
+from utils.yt_dlp_opts import (
+    build_parse_ydl_opts as _build_parse_ydl_opts,
+    private_cookie_ydl_opts,
+)
 from utils.artwork_cleaner import clean_artwork_url
 from utils.url_cleaner import host_matches_domain
 
@@ -711,8 +714,9 @@ class PlaylistParser:
         ydl_opts = self._build_opts(cookies_file=cookies_file, logger=extract_logger)
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            with private_cookie_ydl_opts(ydl_opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
 
             if not info:
                 # build_parse_ydl_opts sets ignoreerrors=True, so a real extractor

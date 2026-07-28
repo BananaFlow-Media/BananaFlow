@@ -356,15 +356,6 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         ErrorSeverity.ERROR,
         None,
     ),
-    # Private / deleted video — not the same as "requires login": no
-    # amount of cookies fixes a deleted/private video, so this is
-    # deliberately left without a Doctor-linked code.
-    (
-        re.compile(r"private video|video (?:is )?unavailable|has been removed|no longer available", re.I),
-        "err_video_unavailable",
-        ErrorSeverity.WARNING,
-        None,
-    ),
     # Rate-limited / throttled
     (
         re.compile(r"429|too many requests|rate.?limit|throttl", re.I),
@@ -378,6 +369,17 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         "err_403",
         ErrorSeverity.ERROR,
         RATE_LIMITED_OR_FORBIDDEN,
+    ),
+    # Private / deleted video — evaluated after actionable HTTP evidence. A
+    # multi-client yt-dlp attempt can emit 429/403 first and end with the
+    # generic phrase "video unavailable"; the concrete transport response
+    # must win so users do not retry or change authentication for the wrong
+    # reason.
+    (
+        re.compile(r"private video|video (?:is )?unavailable|has been removed|no longer available", re.I),
+        "err_video_unavailable",
+        ErrorSeverity.WARNING,
+        None,
     ),
     # Copyright / DMCA takedown
     (

@@ -422,14 +422,21 @@ To authenticate downloads of age-restricted or members-only content:
 
 1. Go to **Settings → Basic → Sign in for restricted downloads** and click **Sign in…**.
 2. A browser window opens. Log into YouTube normally.
-3. Close the browser. Cookies are saved into the app-data directory as
-   `app_cookies.txt` (`%APPDATA%\.bananaflow\` on Windows,
-   `~/Library/Application Support/BananaFlow/` on macOS).
+3. Close the browser. BananaFlow retains only the YouTube session cookies it
+   needs. On Windows they are encrypted for the current Windows account with
+   DPAPI as `app_cookies.dpapi`; on other systems `app_cookies.txt` receives
+   owner-only permissions in the app-data directory.
 4. The app picks up cookies automatically on the next download — no restart required.
 
 > **Note:** Cookies expire after browser session rotation. If downloads fail with "Sign in" errors, re-run the wizard.
 
-**Alternative:** Use the **Get cookies.txt LOCALLY** Chrome extension to export a `cookies.txt` file manually, then set it in Settings → Expert & Diagnostics → Authentication.
+**Alternative:** Export a Netscape-format `cookies.txt` file locally and import
+it in Settings → Expert & Diagnostics → Authentication. BananaFlow minimizes
+and protects its internal copy; the original export remains yours to delete.
+Live Chrome, Edge, Brave, and Chromium profile extraction is disabled on
+Windows because profile locks and current browser encryption cannot be bypassed
+safely. Firefox import, the isolated sign-in helper, and manual export remain
+available.
 
 ---
 

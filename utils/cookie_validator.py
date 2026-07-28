@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from ui.i18n import t
-from utils.security import write_private_text
+from utils.cookie_store import read_cookie_store, scoped_cookie_text, write_cookie_store
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def check_cookies_valid(path: str | Path) -> tuple[bool, str]:
         return False, t("cookies_file_not_found", path=p)
 
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        text = read_cookie_store(p)
     except OSError as exc:
         return False, t("cookies_read_error", exc=exc)
 
@@ -127,7 +127,7 @@ def _parse_cookie_lines(path: Path) -> dict[tuple[str, str, str], str]:
     entries: dict[tuple[str, str, str], str] = {}
     if not path.exists():
         return entries
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in read_cookie_store(path).splitlines():
         stripped = line.strip()
         if not _is_cookie_line(stripped):
             continue
@@ -156,7 +156,6 @@ def merge_cookies_file(source: str | Path, dest: str | Path) -> None:
     source = Path(source)
     dest = Path(dest)
 
-    merged = _parse_cookie_lines(dest)
-    merged.update(_parse_cookie_lines(source))
-
-    write_private_text(dest, _COOKIES_HEADER + "\n".join(merged.values()) + "\n")
+    existing = read_cookie_store(dest) if dest.exists() else ""
+    imported = read_cookie_store(source)
+    write_cookie_store(dest, scoped_cookie_text(existing, imported))

@@ -305,6 +305,55 @@ class TestAppConfig:
         assert migrate(data) is False
         assert data == once
 
+    def test_windows_upgrade_clears_live_chromium_and_sets_notice(self, monkeypatch):
+        import config_migrate
+
+        monkeypatch.setattr(config_migrate.sys, "platform", "win32")
+        data = {"config_version": 9, "cookies_browser": "Chrome"}
+        assert config_migrate.migrate(data) is True
+        assert data["cookies_browser"] == ""
+        assert data["cookies_browser_migration_notice_pending"] is True
+
+    @pytest.mark.parametrize("browser", ["firefox", ""])
+    def test_windows_upgrade_preserves_supported_browser_values(
+        self, monkeypatch, browser,
+    ):
+        import config_migrate
+
+        monkeypatch.setattr(config_migrate.sys, "platform", "win32")
+        data = {"config_version": 9, "cookies_browser": browser}
+        assert config_migrate.migrate(data) is True
+        assert data["cookies_browser"] == browser
+        assert not data.get("cookies_browser_migration_notice_pending", False)
+
+    def test_non_windows_upgrade_preserves_live_chromium(self, monkeypatch):
+        import config_migrate
+
+        monkeypatch.setattr(config_migrate.sys, "platform", "linux")
+        data = {"config_version": 9, "cookies_browser": "chrome"}
+        assert config_migrate.migrate(data) is True
+        assert data["cookies_browser"] == "chrome"
+        assert not data.get("cookies_browser_migration_notice_pending", False)
+
+    def test_windows_browser_migration_is_saved_by_app_config(
+        self, tmp_path, monkeypatch,
+    ):
+        import config_migrate
+
+        monkeypatch.setattr(config_migrate.sys, "platform", "win32")
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "config_version": 9,
+            "cookies_browser": "edge",
+        }), encoding="utf-8")
+        cfg = self._make_config(tmp_path)
+        cfg._load()
+        stored = json.loads(config_file.read_text(encoding="utf-8"))
+        assert cfg.cookies_browser == ""
+        assert cfg.cookies_browser_migration_notice_pending is True
+        assert stored["cookies_browser"] == ""
+        assert stored["cookies_browser_migration_notice_pending"] is True
+
     def test_unknown_keys_preserved(self, tmp_path):
         """Keys not in _DEFAULTS should not crash _load."""
         config_file = tmp_path / "config.json"

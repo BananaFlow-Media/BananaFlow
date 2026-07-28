@@ -57,7 +57,10 @@ from core.playlist_parser import SourcePlatform, classify_url, _best_thumbnail
 from utils.logger import SilentLogger as _SilentLogger
 from utils.time_format import seconds_to_str as _seconds_to_str
 from utils.url_cleaner import host_matches_domain
-from utils.yt_dlp_opts import build_search_ydl_opts as _build_search_opts
+from utils.yt_dlp_opts import (
+    build_search_ydl_opts as _build_search_opts,
+    private_cookie_ydl_opts,
+)
 from utils.artwork_cleaner import clean_artwork_url
 
 
@@ -535,11 +538,12 @@ class _YTDLPBackend:
         results: list[SearchResult] = []
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(
-                    f"ytsearch{max_results}:{query}",
-                    download=False,
-                )
+            with private_cookie_ydl_opts(opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(
+                        f"ytsearch{max_results}:{query}",
+                        download=False,
+                    )
         except yt_dlp.utils.UserNotLive:
             return results
         except yt_dlp.utils.DownloadError as exc:
@@ -613,8 +617,9 @@ class _YTDLPBackend:
         seen: set[str] = set()
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(safe_url, download=False)
+            with private_cookie_ydl_opts(opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(safe_url, download=False)
         except Exception:
             return results
 
@@ -671,11 +676,12 @@ class _YTDLPBackend:
         results: list[SearchResult] = []
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(
-                    f"ytsearch{max_results}:{query} official channel",
-                    download=False,
-                )
+            with private_cookie_ydl_opts(opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(
+                        f"ytsearch{max_results}:{query} official channel",
+                        download=False,
+                    )
         except Exception:
             return results
 
@@ -1096,8 +1102,9 @@ class PageScraper:
                 max_results=50,
             )
             opts.update({"extract_flat": True, "skip_download": True})
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(page_url, download=False)
+            with private_cookie_ydl_opts(opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(page_url, download=False)
             if info:
                 for entry in info.get("entries") or []:
                     if self._cancel.is_set():

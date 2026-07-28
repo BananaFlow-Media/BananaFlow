@@ -101,7 +101,8 @@ def test_merge_cookies_replaces_matching_entry_and_discards_other_sites(tmp_path
         encoding="utf-8",
     )
     merge_cookies_file(source, destination)
-    stored = destination.read_text(encoding="utf-8")
+    from utils.cookie_store import read_cookie_store
+    stored = read_cookie_store(destination)
     assert "new-login" in stored
     assert "old-login" not in stored
     assert "keep-me" not in stored
@@ -117,7 +118,8 @@ def test_http_only_login_cookie_is_preserved_and_validated(tmp_path):
     assert check_cookies_valid(cookie_file) == (True, "")
     destination = tmp_path / "stored.txt"
     merge_cookies_file(cookie_file, destination)
-    assert "#HttpOnly_.youtube.com" in destination.read_text(encoding="utf-8")
+    from utils.cookie_store import read_cookie_store
+    assert "#HttpOnly_.youtube.com" in read_cookie_store(destination)
 
 
 def test_google_secure_login_cookie_is_accepted(tmp_path):
@@ -143,7 +145,7 @@ def test_locked_cookie_destination_fails_without_configuring_partial_data(
     def locked(*_args, **_kwargs):
         raise PermissionError("locked")
 
-    monkeypatch.setattr(cookie_validator, "write_private_text", locked)
+    monkeypatch.setattr(cookie_validator, "write_cookie_store", locked)
     with pytest.raises(PermissionError):
         merge_cookies_file(source, destination)
     assert destination.read_bytes() == before
@@ -226,7 +228,7 @@ def test_cookie_wizard_uses_private_writer_and_profile_hardening():
     source = (Path(__file__).resolve().parents[1] / "core" / "cookie_wizard.py").read_text(
         encoding="utf-8"
     )
-    assert "write_private_text(cookie_path, netscape_str)" in source
+    assert "write_cookie_store(cookie_path, netscape_str)" in source
     assert "restrict_path_permissions(profile_dir, recursive=True)" in source
     assert "navigator.webdriver" not in source
     assert "ignore_default_args" not in source

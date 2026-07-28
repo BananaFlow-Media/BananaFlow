@@ -18,12 +18,12 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
 # Cache rows made by older matchers are intentionally invisible.
-MATCH_ALGO_VERSION = 3
+MATCH_ALGO_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,25 @@ class RecordingIntent:
     base_title: str
     versions: frozenset[str]
     qualifiers: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ArtistCredits:
+    """Parsed recording credits: primary first, collaborators thereafter.
+
+    Separators are recognized on the raw Unicode string before punctuation is
+    folded. Short fragments are discarded, which keeps names such as ``AC/DC``
+    and a leading ``X`` in ``X Ambassadors`` from becoming false artist hits.
+    The complete credit string remains a comparison variant as well.
+    """
+
+    full: str
+    primary: str
+    credited: tuple[str, ...]
+
+    @property
+    def all(self) -> tuple[str, ...]:
+        return (self.primary, *self.credited) if self.primary else ()
 
 
 @dataclass
@@ -89,6 +108,10 @@ _VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("sped_up", re.compile(r"\b(?:sped\s*up|nightcore)\b", re.I)),
     ("slowed", re.compile(r"\b(?:slowed|slow\s+version|reverb(?:ed)?)\b", re.I)),
     ("mono", re.compile(r"\bmono(?:phonic)?\b", re.I)),
+    # Parentheses are required so a song whose actual title is "Clean" does
+    # not lose its identity. Editorial clean/explicit status is recording
+    # intent when Spotify includes it in the requested title.
+    ("clean_edit", re.compile(r"\(\s*clean(?:\s+(?:edit|version))?\s*\)", re.I)),
 )
 
 _BRANDED_CHANNEL_RE = re.compile(r"\bvevo\b", re.I)
@@ -143,11 +166,65 @@ def _similarity(left: str, right: str) -> float:
 
 
 def _artist_variants(artist: str) -> list[str]:
-    # Keep the full credit string first, then individual credited artists.
-    folded = _fold(artist)
-    parts = re.split(r"\s*(?:,|&|\band\b|\bx\b|\bfeat(?:uring)?\b|\bft\b|/|;)\s*", folded)
-    values = [folded] + [part.strip() for part in parts if len(part.strip()) >= 2]
+    credits = parse_artist_credits(artist)
+    values = [credits.full, *credits.all]
     return list(dict.fromkeys(value for value in values if value))
+
+
+_CREDIT_SEPARATOR_RE = re.compile(
+    r"\s*(?:,|&|;|/|\bfeat(?:uring)?\.?\b|\bft\.?\b)\s*"
+    r"|(?<=\S)\s+[x×]\s+(?=\S)",
+    re.I,
+)
+
+
+def parse_artist_credits(artist: str) -> ArtistCredits:
+    """Parse primary and additional credited artists before normalization."""
+    raw = unicodedata.normalize("NFKC", artist or "").strip()
+    full = _fold(raw)
+    if not raw:
+        return ArtistCredits("", "", ())
+    raw_parts = [part.strip() for part in _CREDIT_SEPARATOR_RE.split(raw) if part.strip()]
+    parts = []
+    for part in raw_parts:
+        folded = _fold(part)
+        # Separator-like fragments from a legitimate name (AC/DC, M/A/R/R/S)
+        # are not useful standalone identities. The complete folded name above
+        # remains available for exact comparison.
+        if len(folded.replace(" ", "")) >= 3:
+            parts.append(folded)
+    parts = list(dict.fromkeys(parts))
+    if not parts:
+        parts = [full] if full else []
+    return ArtistCredits(full, parts[0] if parts else "", tuple(parts[1:]))
+
+
+def _channel_artist_evidence(spotify_artist: str, channel: str) -> float:
+    """Strict channel identity evidence, excluding title-only name drops."""
+    credits = parse_artist_credits(spotify_artist)
+    channel_folded = _fold(channel)
+    if not credits.primary or not channel_folded:
+        return 0.0
+    cleaned = re.sub(r"\b(?:official|music|channel|vevo|topic)\b", " ", channel_folded)
+    cleaned = " ".join(cleaned.split())
+    compact_channel = cleaned.replace(" ", "")
+    for suffix in ("official", "music", "channel", "vevo", "topic"):
+        if compact_channel.endswith(suffix) and len(compact_channel) > len(suffix):
+            compact_channel = compact_channel[:-len(suffix)]
+            break
+    best = 0.0
+    for requested in credits.all:
+        compact_requested = requested.replace(" ", "")
+        if cleaned == requested or (
+            len(compact_requested) >= 3 and compact_channel == compact_requested
+        ):
+            best = 1.0
+        else:
+            # Do not use token-subset coverage here: ``Adele Fan Archive``
+            # contains every token in ``Adele`` but is not Adele's performer
+            # identity. Sequence similarity penalizes the extra uploader text.
+            best = max(best, SequenceMatcher(None, requested, cleaned).ratio())
+    return best
 
 
 def _artist_evidence(
@@ -253,6 +330,7 @@ def assess_candidate(
     yt_dur: Optional[int],
     *,
     yt_artists: Optional[Iterable[str]] = None,
+    channel_is_verified: bool = False,
 ) -> tuple[float, dict, bool]:
     structured_artists = tuple(item for item in (yt_artists or ()) if item)
     clean_candidate_title = _candidate_title_without_artist(yt_title, spotify_artist)
@@ -265,6 +343,21 @@ def assess_candidate(
     structured_artist_evidence = _artist_evidence(
         spotify_artist, "", "", structured_artists,
     ) if structured_artists else None
+    requested_credits = parse_artist_credits(spotify_artist)
+    primary_structured_evidence = (
+        _artist_evidence(requested_credits.primary, "", "", structured_artists)
+        if structured_artists and requested_credits.primary else None
+    )
+    credited_structured_evidence = [
+        _artist_evidence(name, "", "", structured_artists)
+        for name in requested_credits.credited
+    ]
+    channel_artist_evidence = _channel_artist_evidence(spotify_artist, yt_channel)
+    independent_artist_evidence = (
+        primary_structured_evidence
+        if primary_structured_evidence is not None
+        else channel_artist_evidence
+    )
     duration_delta = (
         abs(int(spotify_dur) - int(yt_dur))
         if spotify_dur is not None and yt_dur is not None else None
@@ -286,11 +379,19 @@ def assess_candidate(
     # mention. A cover performer can put the original artists in its title;
     # accepting that mention over contradictory structured credits would pick
     # the wrong recording.
-    if spotify_artist and structured_artist_evidence is not None:
-        if structured_artist_evidence < 0.72:
+    if spotify_artist and primary_structured_evidence is not None:
+        if primary_structured_evidence < 0.72:
             reasons.append("artist")
-    elif spotify_artist and artist_evidence < 0.72:
-        reasons.append("artist")
+        elif credited_structured_evidence and any(
+            evidence < 0.72 for evidence in credited_structured_evidence
+        ):
+            reasons.append("credited_artist")
+    elif spotify_artist and independent_artist_evidence < 0.72:
+        # A requested artist written into a video title is ranking evidence,
+        # not performer proof. Covers, tributes, karaoke and fan uploads all
+        # use that convention. General YouTube acceptance needs a separately
+        # matching channel identity or structured performer credits.
+        reasons.append("artist_source")
     if source_intent.versions != candidate_intent.versions:
         reasons.append("version")
     if (
@@ -320,6 +421,20 @@ def assess_candidate(
             round(structured_artist_evidence, 4)
             if structured_artist_evidence is not None else None
         ),
+        "primary_artist_evidence": (
+            round(primary_structured_evidence, 4)
+            if primary_structured_evidence is not None else None
+        ),
+        "credited_artist_evidence": [
+            round(value, 4) for value in credited_structured_evidence
+        ],
+        "channel_artist_evidence": round(channel_artist_evidence, 4),
+        "channel_is_verified": bool(channel_is_verified),
+        "artist_proof": (
+            "structured" if primary_structured_evidence is not None
+            else "channel" if channel_artist_evidence >= 0.72
+            else "none"
+        ),
         "source_versions": sorted(source_intent.versions),
         "candidate_versions": sorted(candidate_intent.versions),
         "source_version_qualifiers": sorted(source_intent.qualifiers),
@@ -339,10 +454,12 @@ def score_candidate(
     yt_dur: Optional[int],
     *,
     yt_artists: Optional[Iterable[str]] = None,
+    channel_is_verified: bool = False,
 ) -> tuple[float, dict]:
     score, breakdown, _safe = assess_candidate(
         spotify_title, spotify_artist, spotify_dur,
         yt_title, yt_channel, yt_dur, yt_artists=yt_artists,
+        channel_is_verified=channel_is_verified,
     )
     return score, breakdown
 
@@ -357,10 +474,11 @@ def match_from_metadata(
     yt_channel: str,
     yt_duration_sec: Optional[int],
     yt_artists: Optional[Iterable[str]] = None,
+    channel_is_verified: bool = False,
 ) -> MatchResult:
     score, breakdown, safe = assess_candidate(
         title, artist, duration_sec, yt_title, yt_channel, yt_duration_sec,
-        yt_artists=yt_artists,
+        yt_artists=yt_artists, channel_is_verified=channel_is_verified,
     )
     evidence = "complete" if (duration_sec is None or yt_duration_sec is not None) else "partial"
     return MatchResult(
@@ -392,11 +510,26 @@ def _entry_match(entry: dict, title: str, artist: str, duration_sec: Optional[in
         yt_duration = int(raw_duration) if raw_duration is not None else None
     except (TypeError, ValueError):
         yt_duration = None
+    structured_artists: list[str] = []
+    raw_artists = entry.get("artists") or []
+    if isinstance(raw_artists, (list, tuple)):
+        for item in raw_artists:
+            if isinstance(item, dict):
+                value = item.get("name") or item.get("title") or ""
+            else:
+                value = str(item or "")
+            if value:
+                structured_artists.append(value)
+    raw_artist = entry.get("artist")
+    if isinstance(raw_artist, str) and raw_artist.strip():
+        structured_artists.append(raw_artist.strip())
     return match_from_metadata(
         url=url, title=title, artist=artist, duration_sec=duration_sec,
         yt_title=entry.get("title") or "",
         yt_channel=entry.get("channel") or entry.get("uploader") or "",
         yt_duration_sec=yt_duration,
+        yt_artists=structured_artists or None,
+        channel_is_verified=bool(entry.get("channel_is_verified")),
     )
 
 
@@ -482,6 +615,7 @@ def find_best_youtube_match(
     cookies_file: Optional[str] = None,
     min_confidence: float = 0.55,
     exclude_urls: Optional[set[str]] = None,
+    path_observer: Optional[Callable[[str], None]] = None,
 ) -> Optional[MatchResult]:
     """Return the best identity-safe candidate, never merely the first hit."""
     excluded = exclude_urls or set()
@@ -506,11 +640,16 @@ def find_best_youtube_match(
         best = safe_flat[0]
         runner_score = safe_flat[1].score if len(safe_flat) > 1 else -1.0
         if best.evidence_quality == "complete" and best.score - runner_score >= 8.0:
+            best.breakdown["resolution_path"] = "flat"
+            if path_observer:
+                path_observer("flat")
             return best
 
     # Validate at most the three strongest semantic candidates. This is the
     # quality guard omitted by the original flat-search experiment.
     validation_urls = [item.url for item in flat[:3]]
+    if validation_urls and path_observer:
+        path_observer("deep_validation")
     try:
         deep = _rank(_deep_validate_urls(
             validation_urls, title=title, artist=artist,
@@ -525,11 +664,17 @@ def find_best_youtube_match(
         if item.safe and item.confidence >= min_confidence and item.url not in excluded
     ]
     if safe_deep:
+        safe_deep[0].breakdown["resolution_path"] = "deep"
         return safe_deep[0]
 
     # If duration was unavailable at both layers, a high-evidence flat result
     # can still be safe when title, artist, and version all agree. It is marked
     # partial so callers/tests can distinguish it from a fully validated hit.
     if safe_flat and safe_flat[0].score >= max(72.0, min_confidence * 100.0):
+        safe_flat[0].breakdown["resolution_path"] = "flat_partial"
+        if path_observer:
+            path_observer("flat_partial")
         return safe_flat[0]
+    if path_observer:
+        path_observer("conservative_miss")
     return None

@@ -311,6 +311,7 @@ class AppWindow(FluentWindow):
         self._setup_drag_drop()
 
         QTimer.singleShot(300,  self._start_background_workers)
+        QTimer.singleShot(450,  self._show_browser_cookie_migration_notice)
         # Reclaim abandoned download workspaces and restore paused jobs first,
         # so a paused batch is back in the queue before the queue-state resume
         # prompt and before the user can start anything new.
@@ -318,6 +319,18 @@ class AppWindow(FluentWindow):
         QTimer.singleShot(1200, self._check_auto_resume)
         # Offer review-first recovery if a previous run crashed mid-Apply.
         QTimer.singleShot(1500, self._check_tag_apply_recovery)
+
+    def _show_browser_cookie_migration_notice(self) -> None:
+        """Explain a one-time Windows upgrade after persisting the safe value."""
+        if not self._cfg.cookies_browser_migration_notice_pending:
+            return
+        show_info(
+            self,
+            t("browser_cookie_migrated_title"),
+            t("browser_cookie_migrated_msg"),
+        )
+        self._cfg.cookies_browser_migration_notice_pending = False
+        self._cfg.save()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Panel construction

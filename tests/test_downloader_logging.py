@@ -16,6 +16,16 @@ import pytest
 from core.downloader import SilentLogger
 
 
+def test_concrete_429_evidence_outranks_later_generic_unavailable():
+    from error_handler import classify_error
+
+    logger = SilentLogger()
+    logger.warning("Unable to download webpage: HTTP Error 429: Too Many Requests")
+    combined = f"{logger.failure_evidence} | ERROR: Video unavailable"
+    info = classify_error(Exception(combined))
+    assert info.message_key == "err_rate_limited"
+
+
 CRITICAL_MESSAGES = [
     ("WARNING: YouTube account cookies are no longer valid", "cookies_expired_or_invalid"),
     ("ERROR: No supported JavaScript runtime could be found", "js_runtime_missing"),

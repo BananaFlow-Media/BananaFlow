@@ -48,7 +48,9 @@ The per-user application-data directory is `%APPDATA%\.bananaflow` on Windows,
 - `downloads.db`: download history;
 - `update_state.json`: dismissed or snoozed update prompts;
 - `logs/bananaflow.log` plus rotating backups: local operational logs;
-- `app_cookies.txt`: an imported or app-captured Netscape cookie file;
+- `app_cookies.dpapi` on Windows: a current-user DPAPI-protected, minimized
+  YouTube cookie store (`app_cookies.txt` with owner-only permissions on other
+  platforms);
 - `browser_profile/`: the dedicated persistent profile used by the sign-in
   wizard;
 - local caches, pending Tag Editor drafts, and recovery/backup data used by
@@ -57,10 +59,15 @@ The per-user application-data directory is `%APPDATA%\.bananaflow` on Windows,
 
 Cookie values are not intentionally displayed in diagnostics or written to
 logs. Central redaction also covers common credential and authorization forms.
-Cookie files, configuration, logs, and the dedicated browser profile are
-restricted to the current user where supported. Cookies can still grant account
-access: treat them like passwords, avoid sharing them, and consider a dedicated
-account.
+The app retains only the cookie names and YouTube/Google domains needed for
+yt-dlp's YouTube session rather than copying a whole Google account jar.
+Plaintext is materialized into an owner-only temporary file only while a
+consumer runs and is deleted afterward. Cookie storage, configuration, logs,
+and the dedicated browser profile are restricted to the current user where
+supported. Windows DPAPI protects against offline or cross-user access on that
+computer; it does not protect against malware already running as the same user.
+Cookies can still grant account access: treat them like passwords, avoid
+sharing them, and consider a dedicated account.
 
 The app browser profile is separate from the user's normal Chrome/Edge/etc.
 profile. If the user instead enables direct browser-cookie reading, yt-dlp reads
@@ -84,7 +91,8 @@ Never attach credentials or cookies to a public Issue.
 ## Deleting data
 
 - In Settings, **Delete stored sign-in data** asks for confirmation and deletes
-  BananaFlow's `app_cookies.txt` and dedicated `browser_profile/`. Locked data is
+  BananaFlow's protected cookie store (including a legacy plaintext store, if
+  present) and dedicated `browser_profile/`. Locked data is
   reported and left for a safe retry.
 - The History screen can clear download-history records.
 - Downloaded files and user-selected exports must be deleted from their chosen

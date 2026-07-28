@@ -10,6 +10,7 @@ from core.spotify_match_scorer import (
     match_from_metadata,
 )
 from utils.metadata_cleaner import clean_title_and_artist
+from scripts.validate_spotify_matching import independent_recording_oracle
 
 
 CORPUS = json.loads(
@@ -37,12 +38,15 @@ def _rank_case(case: dict, candidates: list | None = None):
 
 
 def test_representative_recording_intent_corpus():
-    assert len(CORPUS) >= 20
+    assert len(CORPUS) >= 50
     for case in CORPUS:
         ranked = _rank_case(case)
         safe = [candidate for candidate in ranked if candidate.safe]
-        assert safe, case["name"]
-        assert safe[0].youtube_title == case["expected"], case["name"]
+        if case["expected"] is None:
+            assert not safe, case["name"]
+        else:
+            assert safe, case["name"]
+            assert safe[0].youtube_title == case["expected"], case["name"]
 
 
 def test_corpus_ranking_is_deterministic_across_result_order():
@@ -52,7 +56,10 @@ def test_corpus_ranking_is_deterministic_across_result_order():
             shuffled = list(case["candidates"])
             rng.shuffle(shuffled)
             safe = [candidate for candidate in _rank_case(case, shuffled) if candidate.safe]
-            assert safe[0].youtube_title == case["expected"], case["name"]
+            if case["expected"] is None:
+                assert not safe, case["name"]
+            else:
+                assert safe[0].youtube_title == case["expected"], case["name"]
 
 
 def test_decisive_flat_result_avoids_deep_extraction(monkeypatch):
@@ -66,9 +73,11 @@ def test_decisive_flat_result_avoids_deep_extraction(monkeypatch):
         "core.spotify_match_scorer._deep_validate_urls",
         lambda urls, **kwargs: deep_calls.append(list(urls)) or [],
     )
-    result = find_best_youtube_match("Easy On Me", "Adele", 224)
+    paths = []
+    result = find_best_youtube_match("Easy On Me", "Adele", 224, path_observer=paths.append)
     assert result and result.youtube_title == "Adele - Easy On Me"
     assert deep_calls == []
+    assert paths == ["flat"]
 
 
 def test_ambiguous_flat_search_deep_validates_at_most_three(monkeypatch):
@@ -82,8 +91,10 @@ def test_ambiguous_flat_search_deep_validates_at_most_three(monkeypatch):
         "core.spotify_match_scorer._deep_validate_urls",
         lambda urls, **kwargs: seen.extend(urls) or [],
     )
-    find_best_youtube_match("Song", "Artist", 200)
+    paths = []
+    find_best_youtube_match("Song", "Artist", 200, path_observer=paths.append)
     assert len(seen) <= 3
+    assert "deep_validation" in paths
 
 
 def test_metadata_cleaner_preserves_recording_version_markers():
@@ -92,3 +103,17 @@ def test_metadata_cleaner_preserves_recording_version_markers():
     )
     assert title == "Dreams (2004 Remaster)"
     assert artist == "Fleetwood Mac"
+
+
+def test_independent_live_oracle_accepts_descriptive_parentheticals():
+    assert independent_recording_oracle(
+        "Summertime Sadness (Cedric Gervais Remix)", "Lana Del Rey", 214,
+        "Summertime Sadness (Lana Del Rey Vs. Cedric Gervais) (Cedric Gervais Remix)",
+        ["Lana Del Rey"], 215,
+    )
+
+
+def test_independent_live_oracle_rejects_wrong_artist_even_at_same_duration():
+    assert not independent_recording_oracle(
+        "Stay", "Rihanna", 240, "Stay", ["Random Covers"], 240,
+    )

@@ -571,7 +571,8 @@ def _inspect_cookies_file(path: Path) -> CookieDiagnostics:
     diag.file_exists = True
 
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        from utils.cookie_store import read_cookie_store
+        text = read_cookie_store(path)
     except OSError:
         return diag  # exists but unreadable
     diag.file_readable = True

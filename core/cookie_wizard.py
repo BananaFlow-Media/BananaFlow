@@ -24,7 +24,7 @@ from utils.playwright_check import (
     PlaywrightNotAvailable,
     require_playwright_or_raise,
 )
-from utils.security import redact_text, restrict_path_permissions, write_private_text
+from utils.security import redact_text, restrict_path_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,8 @@ def run_cookie_wizard(start_url: str = "https://www.youtube.com") -> bool:
     actually invalidates the session, not on every wizard run.
 
     After the user closes the browser, captures all cookies and saves them
-    to the standard app cookies path (~/.bananaflow/app_cookies.txt on Unix,
-    %APPDATA%\\.bananaflow\\app_cookies.txt on Windows).
+    to the standard app cookie store (owner-only Netscape text on Unix and a
+    current-user DPAPI-protected store on Windows).
 
     Parameters
     ----------
@@ -149,9 +149,10 @@ def run_cookie_wizard(start_url: str = "https://www.youtube.com") -> bool:
 
             netscape_str = format_netscape_cookies(cookies)
             cookie_path: Path = get_app_cookies_path()
-            write_private_text(cookie_path, netscape_str)
+            from utils.cookie_store import write_cookie_store
+            write_cookie_store(cookie_path, netscape_str)
 
-            logger.info("[CookieWizard] Saved scoped authentication cookies to %s", cookie_path)
+            logger.info("[CookieWizard] Saved scoped authentication cookies securely")
             return True
 
     except Exception as exc:

@@ -271,14 +271,15 @@ class TestEtaCountdown:
         assert "6:30" in bar._eta_lbl.text()
         assert "9:01" in bar._eta_lbl.text()
 
-    def test_small_batch_renders_honest_lower_bound(self, bar):
+    def test_small_batch_renders_current_speed_projection(self, bar):
         bar.show_batch_progress(_snapshot(
             eta=42.0,
-            eta_lower=42.0,
+            eta_lower=None,
             eta_upper=None,
-            eta_confidence="lower_bound",
+            eta_confidence="current_speed",
         ))
-        assert bar._eta_lbl.text().startswith("At least ")
+        assert bar._eta_lbl.text().startswith("About ")
+        assert "current speed" in bar._eta_lbl.text()
         assert "0:42" in bar._eta_lbl.text()
 
     def test_calculating_placeholder_when_estimate_unavailable(self, bar):

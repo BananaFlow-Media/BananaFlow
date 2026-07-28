@@ -326,14 +326,17 @@ class StatusBar(QFrame):
     ) -> str:
         if center is None:
             return t("eta_calculating")
+        if confidence == "current_speed":
+            current = self._rounded_interval(center, upper=True)
+            return t(
+                "eta_current_speed_left",
+                time=isolate_number(seconds_to_str(current)),
+            )
         if lower is None:
             return self._fmt_eta(center)
         low = self._rounded_interval(lower, upper=False)
-        if upper is None or confidence == "lower_bound":
-            return t(
-                "eta_at_least_left",
-                time=isolate_number(seconds_to_str(low)),
-            )
+        if upper is None:
+            return self._fmt_eta(center)
         high = max(low, self._rounded_interval(upper, upper=True))
         return t(
             "eta_range_left",

@@ -1,10 +1,11 @@
-"""Deterministic and real-time whole-batch ETA validation harness.
+"""Deterministic whole-batch ETA schedule-replay harness.
 
 Run directly to print JSON metrics. The schedules cover cold startup, serial
 and parallel throughput, mixed prefetch/live resolution, retry/failure stalls,
 and a final post-processing drain. The default is a zero-sleep fake-clock run;
-``--realtime-runs`` replays the same workloads against the real monotonic
-clock for controlled, directly comparable end-to-end observations.
+``--wall-clock-runs`` replays the same synthetic schedules against the real
+monotonic clock. It validates timing behavior only; it is deliberately not
+described as an application-level or real-download validation.
 """
 
 from __future__ import annotations
@@ -203,22 +204,22 @@ def run_realtime_validation(*, runs: int, scale: float) -> list[list[Metrics]]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--realtime-runs", type=int, default=0,
+        "--wall-clock-runs", "--realtime-runs", dest="wall_clock_runs", type=int, default=0,
         help="also replay every scenario this many times against the real clock",
     )
     parser.add_argument(
         "--scale", type=float, default=0.03,
-        help="real-time replay scale (0.03 makes 100 simulated seconds take 3 seconds)",
+        help="wall-clock replay scale (0.03 makes 100 simulated seconds take 3 seconds)",
     )
     args = parser.parse_args()
     payload: dict[str, object] = {
         "deterministic": [asdict(item) for item in run_validation()],
     }
-    if args.realtime_runs:
-        payload["realtime"] = [
+    if args.wall_clock_runs:
+        payload["controlled_wall_clock_replay"] = [
             [asdict(item) for item in run]
             for run in run_realtime_validation(
-                runs=args.realtime_runs, scale=args.scale,
+                runs=args.wall_clock_runs, scale=args.scale,
             )
         ]
         payload["realtime_scale"] = args.scale

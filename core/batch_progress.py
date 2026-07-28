@@ -80,6 +80,13 @@ absorbs the YouTube cooldown, Spotify match resolution, gate starvation,
 ffmpeg conversion, tagging, retry backoff and the cross-volume copy
 automatically — none of it needs to be modelled per-phase.
 
+Completion histories are also bounded independently by resolution source.
+The cohort that dominates the remaining work (live, direct, cache, prefetched,
+or unknown) prices the ETA once it has enough evidence. A mixed global history
+is used only as an explicitly labeled, wider-uncertainty warm-up fallback after
+that cohort has produced at least one observation; an opening cache burst can
+therefore never set the long-run rate for live misses.
+
 Until the batch has produced three counted completions the ETA is ``None``
 and the UI shows "calculating…" rather than a number it cannot justify.
 Two completions give a single interval, and a rate from one interval is a
@@ -149,6 +156,19 @@ _SPEED_HALF_LIFE_S = 3.0
 # may honestly raise it — it simply may not teleport. 1.5 s lets a genuine
 # correction land within a couple of seconds while absorbing jitter.
 _ETA_SMOOTH_HALF_LIFE_S = 1.5
+
+_RESOLUTION_SOURCES = frozenset({
+    "live", "direct", "cache", "prefetched", "unknown",
+})
+
+
+@dataclass
+class _CompletionHistory:
+    """One bounded completion timeline with its own evicted anchor."""
+
+    times: List[float] = field(default_factory=list)
+    window_anchor: float = 0.0
+    window_full: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -261,12 +281,15 @@ class BatchSnapshot:
     # snapshot must never repaint the whole-batch footer as "0 of 1". Defaulted
     # so existing constructions keep working.
     batch_id:        str = ""
-    # Honest display interval. ``None`` upper means a measured lower bound
-    # (normally a one-track byte-transfer floor) rather than fake precision.
+    # Honest display interval. A missing interval means either warm-up or a
+    # current-speed projection; it is never presented as a guaranteed bound.
     eta_lower_seconds: Optional[float] = None
     eta_upper_seconds: Optional[float] = None
-    eta_confidence: str = "warming"  # warming | lower_bound | low | steady
+    eta_confidence: str = "warming"  # warming | current_speed | low | steady
     eta_source: str = "none"
+    # Which completion history priced the ETA. Normally identical to
+    # ``eta_source``; ``global`` is an explicit warm-up fallback only.
+    eta_rate_source: str = "none"
 
     @property
     def finished(self) -> int:
@@ -349,6 +372,10 @@ class BatchProgressAggregator:
         self._completion_sources: List[str] = []
         self._window_anchor: float = self._batch_start
         self._window_full: bool = False
+        self._completion_histories: Dict[str, _CompletionHistory] = {
+            source: _CompletionHistory(window_anchor=self._batch_start)
+            for source in _RESOLUTION_SOURCES
+        }
         # Highest number of jobs seen transferring at once. This is the batch's
         # real concurrency, not its configured limit: the conservative YouTube
         # gate holds every job but one at the gate rather than in ACTIVE, so a
@@ -359,6 +386,7 @@ class BatchProgressAggregator:
         self._last_cycle: Optional[float] = None
         self._last_cycle_at: Optional[float] = None
         self._last_eta_source: Optional[str] = None
+        self._last_rate_source: Optional[str] = None
 
     # ── Registration ──────────────────────────────────────────────────────────
 
@@ -398,10 +426,15 @@ class BatchProgressAggregator:
             self._completion_sources = []
             self._window_anchor = self._batch_start
             self._window_full = False
+            self._completion_histories = {
+                source: _CompletionHistory(window_anchor=self._batch_start)
+                for source in _RESOLUTION_SOURCES
+            }
             self._peak_active = 0
             self._last_cycle = None
             self._last_cycle_at = None
             self._last_eta_source = None
+            self._last_rate_source = None
             if keys:
                 for k in keys:
                     self._jobs[k] = JobProgress(key=k, state=JobState.QUEUED)
@@ -461,12 +494,10 @@ class BatchProgressAggregator:
             job.serialized = True
 
     def mark_resolution_source(self, key: str, source: str) -> None:
-        """Attach direct/cache/prefetched/live provenance to one job."""
+        """Attach bounded source-cohort provenance to one job."""
         with self._lock:
             job = self._jobs.setdefault(key, JobProgress(key=key, state=JobState.QUEUED))
-            job.resolve_source = source if source in {
-                "direct", "cache", "prefetched", "live"
-            } else "live"
+            job.resolve_source = source if source in _RESOLUTION_SOURCES else "unknown"
 
     # ── Mutators (called from pool threads) ───────────────────────────────────
 
@@ -515,8 +546,12 @@ class BatchProgressAggregator:
         instant and drive the measured rate to nonsense. CANCELLED is excluded
         because a mass-cancel produces the same degenerate burst.
         """
-        self._completion_times.append(self._time())
-        self._completion_sources.append(job.resolve_source or "direct")
+        completed_at = self._time()
+        source = job.resolve_source or "unknown"
+        if source not in _RESOLUTION_SOURCES:
+            source = "unknown"
+        self._completion_times.append(completed_at)
+        self._completion_sources.append(source)
         while len(self._completion_times) > _THROUGHPUT_WINDOW:
             self._window_full = True
             # The evicted completion becomes the window's new anchor, so the
@@ -524,6 +559,12 @@ class BatchProgressAggregator:
             # the time that produced the completions still in the window.
             self._window_anchor = self._completion_times.pop(0)
             self._completion_sources.pop(0)
+
+        history = self._completion_histories[source]
+        history.times.append(completed_at)
+        while len(history.times) > _THROUGHPUT_WINDOW:
+            history.window_full = True
+            history.window_anchor = history.times.pop(0)
 
     def complete(self, key: str, final_bytes: Optional[int] = None) -> None:
         """Mark a job finished successfully; it counts at its full size."""
@@ -795,11 +836,15 @@ class BatchProgressAggregator:
         """Choose a representative remaining-work cohort with hysteresis."""
         counts: Dict[str, int] = {}
         for job in outstanding:
-            source = job.resolve_source or "direct"
+            source = job.resolve_source or "unknown"
+            if source not in _RESOLUTION_SOURCES:
+                source = "unknown"
             counts[source] = counts.get(source, 0) + 1
         if not counts:
             return "none"
-        priority = {"live": 3, "direct": 2, "cache": 1, "prefetched": 0}
+        priority = {
+            "live": 4, "direct": 3, "unknown": 2, "cache": 1, "prefetched": 0,
+        }
         leader = max(counts, key=lambda item: (counts[item], priority.get(item, 0)))
         previous = self._last_eta_source
         # Do not oscillate on every completion when two cohorts are nearly tied.
@@ -807,7 +852,9 @@ class BatchProgressAggregator:
             return previous
         return leader
 
-    def _throughput_cycle_locked(self, source: Optional[str] = None) -> Optional[float]:
+    def _legacy_mixed_throughput_cycle_locked(
+        self, source: Optional[str] = None,
+    ) -> Optional[float]:
         """
         Measured wall-seconds per completion, or ``None`` while warming up.
 
@@ -913,6 +960,76 @@ class BatchProgressAggregator:
             cycle = max(cycle, (now - anchor) / n)
         return cycle
 
+    def _history_cycle_locked(
+        self,
+        history: _CompletionHistory,
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Return ``(cycle, last_completion)`` for exactly one timeline."""
+        times = history.times
+        if len(times) < _MIN_COMPLETIONS_FOR_ETA:
+            return None, None
+
+        now = self._time()
+        t_last = times[-1]
+        if history.window_full:
+            anchor, n, span_end = history.window_anchor, len(times), t_last
+        else:
+            # The first observed wave fills the pipeline. Measure only whole
+            # steady-state waves after it, independently for every cohort.
+            w = max(1, self._peak_active)
+            after = len(times) - w
+            waves = after // w
+            if waves < 1:
+                return None, None
+            n = waves * w
+            anchor = times[w - 1]
+            span_end = times[w + n - 1]
+
+        span = span_end - anchor
+        if span <= 0.0:
+            span = now - anchor
+        if span <= 0.0:
+            return None, None
+        cycle = span / n
+        if cycle <= 0.0:
+            return None, None
+
+        stall = now - t_last
+        if stall > cycle:
+            cycle = max(cycle, (now - anchor) / n)
+        return cycle, t_last
+
+    def _throughput_measurement_locked(
+        self,
+        source: Optional[str] = None,
+    ) -> tuple[Optional[float], Optional[float], str, int, List[float]]:
+        """Measure one cohort, using global history only as explicit fallback."""
+        if source and source in _RESOLUTION_SOURCES:
+            history = self._completion_histories[source]
+            cycle, last = self._history_cycle_locked(history)
+            if cycle is not None:
+                return cycle, last, source, len(history.times), history.times
+            # A faster, already-finished cohort is not evidence about work that
+            # has not produced even one observation.  Once the selected cohort
+            # emits its first completion, the mixed global rate may keep the
+            # display moving while the cohort-specific window warms, clearly
+            # labeled as low-confidence global fallback.
+            if not history.times:
+                return None, None, "none", 0, []
+
+        global_history = _CompletionHistory(
+            times=self._completion_times,
+            window_anchor=self._window_anchor,
+            window_full=self._window_full,
+        )
+        cycle, last = self._history_cycle_locked(global_history)
+        return cycle, last, "global", len(self._completion_times), self._completion_times
+
+    def _throughput_cycle_locked(self, source: Optional[str] = None) -> Optional[float]:
+        """Compatibility view returning only the selected measured cycle."""
+        cycle, _last, _basis, _count, _times = self._throughput_measurement_locked(source)
+        return cycle
+
     def _slowest_active_byte_time_locked(self) -> Optional[float]:
         """
         Longest time any single in-flight job still needs at its own speed.
@@ -976,7 +1093,7 @@ class BatchProgressAggregator:
     def _eta_details_locked(
         self,
     ) -> tuple[
-        Optional[float], bool, Optional[float], Optional[float], str, str
+        Optional[float], bool, Optional[float], Optional[float], str, str, str
     ]:
         """
         Whole-batch remaining time. Returns (seconds, is_estimate).
@@ -1004,17 +1121,21 @@ class BatchProgressAggregator:
             self._last_cycle = None
             self._last_cycle_at = None
             self._last_eta_source = None
-            return None, False, None, None, "warming", "none"
+            self._last_rate_source = None
+            return None, False, None, None, "warming", "none", "none"
 
         source = self._eta_source_locked(outstanding)
-        measured = self._throughput_cycle_locked(source)
+        measured, measured_last, rate_source, sample_count, measurement_times = (
+            self._throughput_measurement_locked(source)
+        )
         if measured is None:
-            # Small batches can finish before a throughput window exists. A
-            # byte-derived active-job time is still a sound lower bound, so
-            # expose it as such rather than presenting it as a precise ETA.
+            # Small batches can finish before a throughput window exists. Byte
+            # time at the current speed is useful, but neither the byte total
+            # nor the future speed is guaranteed. Present it only as a
+            # current-speed projection, never as a lower bound.
             floor = self._slowest_active_byte_time_locked()
             if len(jobs) <= 3 and floor is not None:
-                return floor, True, floor, None, "lower_bound", source
+                return floor, True, None, None, "current_speed", source, "bytes"
             if len(jobs) <= 3 and self._completion_times:
                 observed_cycle = max(
                     0.1,
@@ -1022,25 +1143,28 @@ class BatchProgressAggregator:
                     / len(self._completion_times),
                 )
                 center = len(outstanding) * observed_cycle
-                return center, True, center * 0.5, center * 2.0, "low", source
-            return None, True, None, None, "warming", source
+                return center, True, center * 0.5, center * 2.0, "low", source, "global"
+            return None, True, None, None, "warming", source, "none"
 
         now = self._time()
-        if self._last_eta_source not in (None, source):
+        if (
+            self._last_eta_source not in (None, source)
+            or self._last_rate_source not in (None, rate_source)
+        ):
             # Hysteresis prevents casual switching; when a real cohort change
             # does happen, do not blend incompatible warm/live rates.
             self._last_cycle = None
             self._last_cycle_at = None
         self._last_eta_source = source
+        self._last_rate_source = rate_source
         cycle = self._smooth_cycle_locked(measured, now)
-        stall = now - self._completion_times[-1]
+        stall = now - (measured_last if measured_last is not None else now)
         eta = max(0.0, len(outstanding) * cycle - min(stall, cycle))
 
         floor = self._slowest_active_byte_time_locked()
         if floor is not None:
             eta = max(eta, floor)
 
-        sample_count = len(self._completion_times)
         relative = max(0.15, min(0.75, 1.0 / math.sqrt(max(2, sample_count - 1))))
         if sample_count < 7:
             # With only a handful of completions there is not enough evidence
@@ -1049,21 +1173,27 @@ class BatchProgressAggregator:
             relative = max(relative, 1.0)
         if len(set(self._completion_sources)) > 1:
             relative = min(1.10, relative + 0.10)
+        if rate_source == "global" and source != "global":
+            # The selected cohort is still warming. Global evidence keeps the
+            # display moving but must carry visibly wider uncertainty.
+            relative = max(relative, 0.75)
         lower = max(floor or 0.0, eta * (1.0 - relative))
         upper = max(lower, eta * (1.0 + relative))
-        if len(self._completion_times) >= 2:
-            recent = self._completion_times[-4:]
+        if len(measurement_times) >= 2:
+            recent = measurement_times[-4:]
             largest_recent_gap = max(
                 (right - left for left, right in zip(recent, recent[1:])),
                 default=0.0,
             )
             upper = max(upper, len(outstanding) * largest_recent_gap * 1.25)
         confidence = "steady" if sample_count >= 7 and relative <= 0.35 else "low"
-        return eta, True, lower, upper, confidence, source
+        return eta, True, lower, upper, confidence, source, rate_source
 
     def _eta_locked(self) -> tuple[Optional[float], bool]:
         """Compatibility view for callers that need only center + estimate flag."""
-        eta, estimate, _lower, _upper, _confidence, _source = self._eta_details_locked()
+        eta, estimate, _lower, _upper, _confidence, _source, _rate = (
+            self._eta_details_locked()
+        )
         return eta, estimate
 
     def _snapshot_locked(self) -> BatchSnapshot:
@@ -1084,6 +1214,7 @@ class BatchProgressAggregator:
         raw_speed = self._raw_active_speed_locked()
         (
             eta, eta_estimate, eta_lower, eta_upper, eta_confidence, eta_source,
+            eta_rate_source,
         ) = self._eta_details_locked()
 
         return BatchSnapshot(
@@ -1106,4 +1237,5 @@ class BatchProgressAggregator:
             eta_upper_seconds=eta_upper,
             eta_confidence=eta_confidence,
             eta_source=eta_source,
+            eta_rate_source=eta_rate_source,
         )

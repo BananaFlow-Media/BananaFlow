@@ -67,6 +67,19 @@ class SilentLogger:
     ``core.warning_classifier`` so the log line is actionable instead of
     just repeating yt-dlp's prose.
     """
+    def __init__(self) -> None:
+        self._failure_evidence: list[str] = []
+
+    def _remember_failure_evidence(self, msg: str) -> None:
+        category = classify_warning(msg)
+        if category and msg not in self._failure_evidence:
+            self._failure_evidence.append(msg)
+
+    @property
+    def failure_evidence(self) -> str:
+        """Earlier extractor evidence retained for final error precedence."""
+        return " | ".join(self._failure_evidence[-3:])
+
     def debug(self, msg: str) -> None:
         if msg.startswith("[debug] "):
             return
@@ -92,6 +105,7 @@ class SilentLogger:
         }
 
     def warning(self, msg: str) -> None:
+        self._remember_failure_evidence(msg)
         from utils.yt_dlp_opts import note_po_token_provider_diagnostic
         if self._is_po_token_diagnostic(msg):
             if note_po_token_provider_diagnostic(msg):
@@ -132,6 +146,7 @@ class SilentLogger:
             logger.warning(f"[yt-dlp] {msg}")
 
     def error(self, msg: str) -> None:
+        self._remember_failure_evidence(msg)
         from utils.yt_dlp_opts import note_po_token_provider_diagnostic
         if self._is_po_token_diagnostic(msg):
             if note_po_token_provider_diagnostic(msg):
@@ -702,7 +717,12 @@ class DownloadEngine:
                 error_message=str(exc),
             ), error=True)
         except yt_dlp.utils.DownloadError as exc:
-            err_msg = _get_friendly_error(str(exc))
+            evidence = ""
+            if isinstance(locals().get("opts"), dict):
+                candidate_logger = opts.get("logger")
+                evidence = getattr(candidate_logger, "failure_evidence", "")
+            combined = f"{evidence} | {exc}" if evidence else str(exc)
+            err_msg = _get_friendly_error(combined)
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
                 url=url,
@@ -1171,10 +1191,11 @@ class DownloadEngine:
                 note_cookie_diagnostic(warn_msg)
                 logger.debug("[Downloader][cookies] preflight diagnostic coalesced: %s", warn_msg)
 
+        ytdlp_logger = SilentLogger()
         opts: dict[str, Any] = _build_base_opts(
             cookies_file=cookies_file or None,
             cookies_browser=req.cookies_browser or None,
-            logger=SilentLogger(),
+            logger=ytdlp_logger,
             quiet=True,
             retries=10,
             proxy=req.proxy_url or None,
