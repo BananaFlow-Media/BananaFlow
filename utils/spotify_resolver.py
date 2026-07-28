@@ -128,7 +128,7 @@ def validate_spotify_track_metadata(title: str, artists) -> tuple[str, list[str]
 def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
     """Parse a public Spotify embed response into exact track metadata."""
     match = re.search(
-        r'<script\b(?=[^>]*\bid=["\']__NEXT_DATA__["\'])[^>]*>(.*?)</script>',
+        r'<script\b(?=[^>]*\bid=["\']__NEXT_DATA__["\'])[^>]*>(.*?)</script\s*>',
         html or "",
         re.DOTALL | re.I,
     )

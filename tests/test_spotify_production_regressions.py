@@ -88,6 +88,17 @@ def test_malformed_structured_track_is_explicitly_rejected():
         parse_spotify_embed_track_html(html, "2VxeLyX666F8uXCJ0dZF8B")
 
 
+def test_embed_parser_handles_spaced_script_end_tag_without_consuming_page_content():
+    track_id = "2VxeLyX666F8uXCJ0dZF8B"
+    html = _embed_html(track_id).replace(
+        "</script>",
+        "</script   ><script>window.UNRELATED = 'Popular Albums';</script>",
+    )
+    metadata = parse_spotify_embed_track_html(html, track_id)
+    assert metadata["title"] == "Shallow"
+    assert metadata["artist_credits"] == ["Lady Gaga", "Bradley Cooper"]
+
+
 def test_individual_track_production_path_emits_valid_metadata_as_pending(monkeypatch):
     track_id = "2VxeLyX666F8uXCJ0dZF8B"
     metadata = parse_spotify_embed_track_html(_embed_html(track_id), track_id)
