@@ -1239,6 +1239,46 @@ class MetadataEditorPanel(
 
         return page
 
+    def _build_table_error_page(self) -> QWidget:
+        """A scan failure has to be visible where the files would have been.
+
+        It previously only reached a summary label that is never shown, so a
+        folder that failed to scan looked identical to an empty one.
+        """
+        page = QWidget()
+        card, layout = self._build_state_card(page)
+        self._error_state_card = card
+
+        layout.addWidget(EmptyStateIcon("warning", card), alignment=Qt.AlignCenter)
+
+        self._error_title_lbl = QLabel(t("meta_scan_error_title"))
+        self._error_title_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._error_title_lbl)
+
+        self._error_body_lbl = QLabel("")
+        self._error_body_lbl.setAlignment(Qt.AlignCenter)
+        self._error_body_lbl.setWordWrap(True)
+        self._error_body_lbl.setMaximumWidth(330)
+        self._error_body_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._error_body_lbl)
+        layout.addSpacing(8)
+
+        self._error_retry_btn = QPushButton(t("meta_scan_error_retry"))
+        self._error_retry_btn.setStyleSheet(btn_style())
+        a11y.describe(self._error_retry_btn, t("meta_scan_error_retry"))
+        self._error_retry_btn.clicked.connect(self._on_scan)
+        layout.addWidget(self._error_retry_btn, alignment=Qt.AlignCenter)
+
+        return page
+
+    def _show_table_error(self, message: str) -> None:
+        if hasattr(self, "_error_body_lbl"):
+            self._error_body_lbl.setText(message)
+        if hasattr(self, "_error_retry_btn"):
+            self._error_retry_btn.setEnabled(self._root_folder is not None)
+        if hasattr(self, "_table_stack"):
+            self._table_stack.setCurrentWidget(self._table_error_page)
+
     def _build_table_loading_page(self) -> QWidget:
         page = QWidget()
         card, layout = self._build_state_card(page)
@@ -1581,8 +1621,10 @@ class MetadataEditorPanel(
         self._table_stack.addWidget(self._table_content)
         self._table_empty_page = self._build_table_empty_page()
         self._table_loading_page = self._build_table_loading_page()
+        self._table_error_page = self._build_table_error_page()
         self._table_stack.addWidget(self._table_empty_page)
         self._table_stack.addWidget(self._table_loading_page)
+        self._table_stack.addWidget(self._table_error_page)
         table_layout.addWidget(self._table_stack)
         self._show_table_empty()
         splitter.addWidget(table_frame)
@@ -1717,7 +1759,9 @@ class MetadataEditorPanel(
             ("edit",  t("meta_edit_tags_group"),        FluentIcon.EDIT,        self._inspector),
             ("tools", t("meta_action_engine_title"),    FluentIcon.TAG,         self._build_action_engine_page()),
             ("tools", t("meta_group_from_filename"),    FluentIcon.PASTE,
-             self._build_inspector_actions(("title_strip", "title_full", "track_num", "split_at"))),
+             self._build_inspector_actions(
+                 ("title_strip", "title_full", "track_num", "split_at"),
+                 extra=self._build_apply_value_group())),
             ("tools", t("meta_group_cleanup"),          FluentIcon.ERASE_TOOL,
              self._build_inspector_actions(
                  None,
@@ -1940,6 +1984,7 @@ class MetadataEditorPanel(
         op_keys: Optional[tuple[str, ...]],
         *,
         sections: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None,
+        extra: Optional[QWidget] = None,
     ) -> QScrollArea:
         # No inline title here — the persistent inspector header
         # (self._inspector_title_lbl) already shows the active category name,
@@ -1951,6 +1996,8 @@ class MetadataEditorPanel(
         layout.setAlignment(Qt.AlignTop)
 
         layout.addWidget(self._build_magic_ops_widget(op_keys, sections=sections))
+        if extra is not None:
+            layout.addWidget(extra)
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -3193,6 +3240,10 @@ class MetadataEditorPanel(
     def on_scan_error(self, msg: str) -> None:
         self._set_scan_loading(False)
         self._summary_lbl.setText(t("md_scan_error", msg=msg))
+        # Only show the failure card when there is nothing to fall back to;
+        # a failed refresh of an already-loaded folder must not blank the table.
+        if not self._model.get_all_tracks():
+            self._show_table_error(msg)
 
     def on_scan_complete(self, result: ScanResult) -> None:
         n = result.files_count

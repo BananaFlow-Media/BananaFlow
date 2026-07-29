@@ -467,6 +467,48 @@ class InspectorBuildMixin:
         layout.addWidget(self._build_properties_group())
         layout.addStretch()
         return self._inspector_scroll(w)
+    def _build_apply_value_group(self) -> QGroupBox:
+        """Set one artist or album across the whole selection at once.
+
+        The controller has supported this from the start and it is covered by
+        tests, but the two handlers read line edits that were never built and
+        nothing ever called them -- the feature had no reachable UI at all.
+        This is that missing entry point, not a new capability.
+        """
+        group = QGroupBox(t("meta_apply_value_group"))
+        layout = QVBoxLayout(group)
+        layout.setSpacing(6)
+
+        note = QLabel(t("meta_apply_value_note"))
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
+        layout.addWidget(note)
+
+        for field_key, label_key, button_key, handler in (
+            ("_insp_folder_artist", "meta_field_artist",
+             "meta_apply_artist_to_selection", self._on_insp_folder_artist),
+            ("_insp_folder_album", "meta_field_album",
+             "meta_apply_album_to_selection", self._on_insp_folder_album),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(5)
+            edit = QLineEdit()
+            edit.setPlaceholderText(t(label_key))
+            a11y.describe(edit, t(button_key))
+            edit.returnPressed.connect(handler)
+            setattr(self, field_key, edit)
+            row.addWidget(edit, stretch=1)
+
+            button = QPushButton(t(button_key))
+            button.setStyleSheet(btn_style())
+            a11y.describe(button, t(button_key))
+            button.clicked.connect(handler)
+            self._selection_scope_buttons.append(button)
+            row.addWidget(button)
+            layout.addLayout(row)
+
+        return group
+
     def _build_tools_auto_page(self) -> QScrollArea:
         """Tools > Auto arrange.
 

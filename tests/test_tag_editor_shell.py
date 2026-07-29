@@ -421,3 +421,82 @@ def test_check_external_page_is_quiet_when_the_disk_agrees(panel, tmp_path):
     _load(panel, tmp_path, count=2, changed=1)
     assert panel._external_summary.text() == t("meta_external_none")
     assert not panel._external_review_all_btn.isEnabled()
+
+
+# --------------------------------------------------------------------------- #
+# Set-one-value: a working feature that had no reachable UI
+# --------------------------------------------------------------------------- #
+
+def test_set_artist_across_selection_is_reachable_and_emits(panel, tmp_path):
+    """The handlers existed and were tested, but nothing built or called them."""
+    tracks = _load(panel, tmp_path, count=3)
+    panel._workspace.set_selected_items(tracks[:2])
+
+    emitted = []
+    panel.artist_to_scope.connect(lambda artist, items: emitted.append((artist, items)))
+
+    panel._insp_folder_artist.setText("  Ishay Ribo  ")
+    panel._on_insp_folder_artist()
+
+    assert emitted == [("Ishay Ribo", tracks[:2])]
+
+
+def test_set_album_across_selection_is_reachable_and_emits(panel, tmp_path):
+    tracks = _load(panel, tmp_path, count=2)
+    panel._workspace.set_selected_items([tracks[0]])
+
+    emitted = []
+    panel.album_to_scope.connect(lambda album, items: emitted.append((album, items)))
+
+    panel._insp_folder_album.setText("Kavana")
+    panel._on_insp_folder_album()
+
+    assert emitted == [("Kavana", [tracks[0]])]
+
+
+def test_set_value_does_nothing_without_a_value_or_a_selection(panel, tmp_path):
+    tracks = _load(panel, tmp_path, count=2)
+    emitted = []
+    panel.artist_to_scope.connect(lambda *a: emitted.append(a))
+
+    # Empty input with a selection.
+    panel._workspace.set_selected_items([tracks[0]])
+    panel._insp_folder_artist.setText("   ")
+    panel._on_insp_folder_artist()
+    assert emitted == []
+
+    # A value, but nothing selected: row selection is the editing scope.
+    panel._workspace.set_selected_items([])
+    panel._insp_folder_artist.setText("Someone")
+    panel._on_insp_folder_artist()
+    assert emitted == []
+
+
+# --------------------------------------------------------------------------- #
+# Scan failure is a visible state, not a silent one
+# --------------------------------------------------------------------------- #
+
+def test_scan_error_is_shown_where_the_files_would_have_been(panel, tmp_path):
+    """It previously only reached a label that is never displayed."""
+    panel._root_folder = tmp_path
+    panel.on_scan_error("Access is denied")
+
+    assert panel._table_stack.currentWidget() is panel._table_error_page
+    assert "Access is denied" in panel._error_body_lbl.text()
+    assert panel._error_retry_btn.isEnabled()
+
+
+def test_scan_error_retry_rescans_the_same_folder(panel, tmp_path):
+    scans = []
+    panel.scan_requested.connect(lambda folder, recursive: scans.append(folder))
+    panel._root_folder = tmp_path
+    panel.on_scan_error("boom")
+    panel._error_retry_btn.click()
+    assert scans == [tmp_path]
+
+
+def test_a_failed_refresh_does_not_blank_a_loaded_folder(panel, tmp_path):
+    """Losing the listing you already have would be worse than the error."""
+    _load(panel, tmp_path, count=2)
+    panel.on_scan_error("transient failure")
+    assert panel._table_stack.currentWidget() is not panel._table_error_page
