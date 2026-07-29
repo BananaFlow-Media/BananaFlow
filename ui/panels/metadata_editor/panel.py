@@ -759,6 +759,18 @@ class MetadataEditorPanel(
             )
             for btn in self._inspector_mode_buttons.values():
                 btn.setStyleSheet(mode_qss)
+        if hasattr(self, "_inspector_pages"):
+            # Splitting the one long inspector scroll into sibling pages put the
+            # groups inside fresh containers that the page-level rules no longer
+            # reached, so each page painted its own default background and the
+            # field labels kept an opaque one. State it explicitly here.
+            self._inspector_pages.setStyleSheet(
+                f"QScrollArea {{ background: {c.surface}; border: none; }}"
+                f"QScrollArea > QWidget > QWidget {{ background: {c.surface}; }}"
+                f"QGroupBox {{ background: transparent; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; }}"
+                f"QLabel {{ background: transparent; color: {c.text_primary}; }}"
+            )
         if getattr(self, "_inspector_tool_buttons", None):
             chip_qss = (
                 f"QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
