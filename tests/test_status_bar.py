@@ -261,26 +261,44 @@ class TestEtaCountdown:
         bar.show_batch_progress(_snapshot(eta=3725.0))
         assert "1:02:05" in bar._eta_lbl.text()
 
-    def test_eta_renders_uncertainty_range(self, bar):
+    def test_eta_renders_one_countdown_not_uncertainty_range(self, bar):
         bar.show_batch_progress(_snapshot(
             eta=452.0,
             eta_lower=390.2,
             eta_upper=540.1,
             eta_confidence="low",
         ))
-        assert "6:30" in bar._eta_lbl.text()
-        assert "9:01" in bar._eta_lbl.text()
+        assert "7:32" in bar._eta_lbl.text()
+        assert "6:30" not in bar._eta_lbl.text()
+        assert "9:01" not in bar._eta_lbl.text()
 
-    def test_small_batch_renders_current_speed_projection(self, bar):
+    def test_small_batch_uses_the_same_single_countdown_wording(self, bar):
         bar.show_batch_progress(_snapshot(
             eta=42.0,
             eta_lower=None,
             eta_upper=None,
             eta_confidence="current_speed",
         ))
-        assert bar._eta_lbl.text().startswith("About ")
-        assert "current speed" in bar._eta_lbl.text()
         assert "0:42" in bar._eta_lbl.text()
+        assert "About" not in bar._eta_lbl.text()
+
+    def test_hebrew_eta_is_one_plain_remaining_value(self, bar):
+        from ui import i18n
+        original = i18n.current_language()
+        try:
+            i18n.set_language("he")
+            bar.show_batch_progress(_snapshot(
+                eta=87.0, eta_lower=82.0, eta_upper=92.0,
+                eta_confidence="low",
+            ))
+            text = bar._eta_lbl.text()
+            assert "נותרו" in text
+            assert "1:27" in text
+            assert "בערך" not in text
+            assert "1:22" not in text
+            assert "1:32" not in text
+        finally:
+            i18n.set_language(original)
 
     def test_calculating_placeholder_when_estimate_unavailable(self, bar):
         from ui.i18n import t

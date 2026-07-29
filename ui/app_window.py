@@ -973,10 +973,9 @@ class AppWindow(FluentWindow):
                 parent=self,
             )
             return
-        # The download workers now own match resolution; stop the fast-start
-        # prefetch so the two don't race the same lookups. Matches it already
-        # cached remain and give the opening tracks instant, cache-hit resolves.
-        self._match_prefetcher.cancel()
+        # Keep an in-flight fast-start match alive. The resolver's single-flight
+        # boundary lets the download pipeline join that exact work instead of
+        # cancelling it or starting the same cold lookup again.
         opts = self._options_bar.get_options()
         self._download_ctrl.start_batch(
             selected, opts, self._last_url_kind, self._last_playlist_title
@@ -984,6 +983,7 @@ class AppWindow(FluentWindow):
 
     def _on_global_pause_resume(self, pause: bool) -> None:
         if pause:
+            self._match_prefetcher.cancel()
             # Pause, not cancel: the outcome model keeps the distinction, so
             # the footer shows "paused" and the queue stays resumable.
             self._download_ctrl.global_pause()
@@ -1715,6 +1715,7 @@ class AppWindow(FluentWindow):
 
     def _on_cancel(self) -> None:
         was_downloading = self._download_ctrl.is_downloading()
+        self._match_prefetcher.cancel()
         self._fetch_ctrl.cancel()
         self._search_ctrl.cancel()
         self._download_ctrl.cancel_all()

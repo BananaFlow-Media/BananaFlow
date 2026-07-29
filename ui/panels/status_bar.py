@@ -170,12 +170,7 @@ class StatusBar(QFrame):
         self._eta_upper_base = getattr(snapshot, "eta_upper_seconds", None)
         self._eta_confidence = getattr(snapshot, "eta_confidence", "warming")
         self._eta_base_at = time.monotonic()
-        eta = self._fmt_eta_range(
-            snapshot.eta_seconds,
-            self._eta_lower_base,
-            self._eta_upper_base,
-            self._eta_confidence,
-        )
+        eta = self._fmt_eta(snapshot.eta_seconds)
         self._apply_state(
             StatusState.DOWNLOADING,
             message=message,
@@ -304,7 +299,7 @@ class StatusBar(QFrame):
         if eta_seconds is None:
             return t("eta_calculating")
         s = int(round(max(0.0, eta_seconds)))
-        return t("eta_about_left", time=isolate_number(seconds_to_str(s)))
+        return t("eta_left", time=isolate_number(seconds_to_str(s)))
 
     @staticmethod
     def _rounded_interval(seconds: float, *, upper: bool) -> int:
@@ -352,19 +347,8 @@ class StatusBar(QFrame):
         elapsed = max(0.0, time.monotonic() - self._eta_base_at)
         # Floors at zero rather than going negative: an overrun means the batch
         # is running behind the estimate, which the next snapshot will correct.
-        lower = (
-            max(0.0, self._eta_lower_base - elapsed)
-            if self._eta_lower_base is not None else None
-        )
-        upper = (
-            max(0.0, self._eta_upper_base - elapsed)
-            if self._eta_upper_base is not None else None
-        )
-        self._eta_lbl.setText(self._fmt_eta_range(
-            max(0.0, self._eta_base_seconds - elapsed),
-            lower,
-            upper,
-            self._eta_confidence,
+        self._eta_lbl.setText(self._fmt_eta(
+            max(0.0, self._eta_base_seconds - elapsed)
         ))
 
     def _sync_eta_timer(self) -> None:

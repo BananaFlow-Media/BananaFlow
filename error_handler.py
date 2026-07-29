@@ -78,6 +78,15 @@ class ErrorInfo:
     def is_fatal(self) -> bool:
         return self.severity == ErrorSeverity.CRITICAL
 
+    def stops_batch(self) -> bool:
+        """Whether the same local configuration will fail every peer job.
+
+        Transfer failures, video restrictions, rate limits and bare HTTP 403s
+        are track-scoped. Broken browser-cookie access and critical local
+        prerequisites (FFmpeg/output permissions) are batch-wide.
+        """
+        return self.message_key == "err_browser_cookie_access" or self.is_fatal()
+
     def status_line(self) -> str:
         """A one-line summary for a status area. Emoji-free by design: the GUI
         maps ``severity`` to a themed status icon (ui.components.status_icon)

@@ -483,12 +483,34 @@ class SpotifyResolver:
     # Embed API fallback (no credentials required)
     # ──────────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _localized_page_html(
+        entity_type: str, entity_id: str, locale: str = "en-US",
+    ) -> str:
+        """Fetch Spotify's locale-aware public page without credentials."""
+        language = (
+            "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
+            if str(locale).lower().startswith("he")
+            else "en-US,en;q=0.9"
+        )
+        url = f"https://open.spotify.com/{entity_type}/{entity_id}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _REQUEST_UA,
+            "Accept-Language": language,
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch Spotify page: {exc}") from exc
+
     @classmethod
     def _embed_fallback(
         cls,
         entity_type: str,
         entity_id:   str,
         on_item:     Optional[Callable[[dict], None]] = None,
+        locale:      str = "en-US",
     ) -> list[dict]:
         """
         Fetch the Spotify embed page and parse the ``__NEXT_DATA__`` payload.
@@ -496,7 +518,15 @@ class SpotifyResolver:
         Fragile – Spotify may change the embed payload structure at any time.
         """
         embed_url = f"{_EMBED_BASE}/{entity_type}/{entity_id}"
-        req = urllib.request.Request(embed_url, headers={"User-Agent": _REQUEST_UA})
+        language = (
+            "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
+            if str(locale).lower().startswith("he")
+            else "en-US,en;q=0.9"
+        )
+        req = urllib.request.Request(embed_url, headers={
+            "User-Agent": _REQUEST_UA,
+            "Accept-Language": language,
+        })
 
         try:
             with urllib.request.urlopen(req, timeout=12) as resp:

@@ -501,12 +501,17 @@ class PlaylistParser:
         try:
             # ── SPOTIFY ──────────────────────────────────────────────────────
             if platform == SourcePlatform.SPOTIFY:
+                from ui.i18n import current_language
                 from core.scraper import (
                     scrape_spotify_playlist, scrape_spotify_album,
                     scrape_spotify_artist, scrape_spotify_track
                 )
+                spotify_locale = "he-IL" if current_language() == "he" else "en-US"
                 if kind == UrlKind.SINGLE_VIDEO:
-                    title, _ = scrape_spotify_track(url, on_item=_on_scraper_item, cookies_file=cookies_file)
+                    title, _ = scrape_spotify_track(
+                        url, on_item=_on_scraper_item, cookies_file=cookies_file,
+                        locale=spotify_locale,
+                    )
                 elif kind in (UrlKind.PLAYLIST, UrlKind.ALBUM, UrlKind.ARTIST):
                     # Two-stage flow: show the whole catalog immediately with
                     # metadata only; the YouTube match is deferred to download
@@ -516,11 +521,15 @@ class PlaylistParser:
                     title = self._scrape_spotify_catalog(
                         url, kind, on_item=_on_scraper_item,
                         on_progress=on_progress, cookies_file=cookies_file,
+                        locale=spotify_locale,
                     )
                     if kind == UrlKind.ARTIST:
                         title = f"{title} (Discography)"
                 else:
-                    title, _ = scrape_spotify_track(url, on_item=_on_scraper_item, cookies_file=cookies_file)
+                    title, _ = scrape_spotify_track(
+                        url, on_item=_on_scraper_item, cookies_file=cookies_file,
+                        locale=spotify_locale,
+                    )
                 result.playlist_title = title
 
             # ── YOUTUBE MUSIC ────────────────────────────────────────────────
@@ -654,6 +663,7 @@ class PlaylistParser:
         on_item:     Callable[[dict], None],
         on_progress: Optional[Callable[[str], None]],
         cookies_file: Optional[str],
+        locale:       str = "en-US",
     ) -> str:
         """Stage 1 of the two-stage Spotify import.
 
@@ -688,7 +698,7 @@ class PlaylistParser:
         }.get(kind, scrape_spotify_playlist)
         title, _ = scraper(
             url, on_item=_pending_on_item, cookies_file=cookies_file,
-            metadata_only=True, cancel_check=cancel_cb,
+            metadata_only=True, cancel_check=cancel_cb, locale=locale,
         )
         self._notify(on_progress, t("found_n_tracks", n=count[0]))
         return title

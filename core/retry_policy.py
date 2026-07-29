@@ -67,6 +67,17 @@ _PERMANENT_PATTERNS = [
     re.compile(r"\b403\b|forbidden", re.I),
 ]
 
+_TEMPORARY_MEDIA_403_RE = re.compile(
+    r"unable to download (?:video )?data[^\n]*\b403\b|"
+    r"\b403\b[^\n]*unable to download (?:video )?data",
+    re.I,
+)
+
+
+def is_temporary_media_403(error_message: str) -> bool:
+    """True only for a transfer-stage 403 fixed by fresh extraction data."""
+    return bool(_TEMPORARY_MEDIA_403_RE.search(error_message or ""))
+
 
 def is_retriable(error_message: str) -> bool:
     """
@@ -74,6 +85,8 @@ def is_retriable(error_message: str) -> bool:
     that is worth retrying.
     """
     # Check permanent patterns first — they take priority
+    if is_temporary_media_403(error_message):
+        return True
     for pat in _PERMANENT_PATTERNS:
         if pat.search(error_message):
             return False
@@ -148,10 +161,18 @@ def retry_download(
         except Exception as exc:
             last_error = str(exc)
 
-            if attempt >= policy.max_retries:
+            # Refresh a transfer-stage 403 once; a second refusal is final for
+            # this track. Generic retries retain their configured budget.
+            retry_limit = (
+                min(policy.max_retries, 1)
+                if is_temporary_media_403(last_error)
+                else policy.max_retries
+            )
+
+            if attempt >= retry_limit:
                 logger.warning(
                     "[Retry] %s — all %d attempts exhausted: %s",
-                    job_key, policy.max_retries + 1, last_error[:100],
+                    job_key, retry_limit + 1, last_error[:100],
                 )
                 return last_error
 
@@ -166,7 +187,7 @@ def retry_download(
             logger.info(
                 "[Retry] %s — attempt %d/%d failed (retriable), "
                 "waiting %.1fs: %s",
-                job_key, attempt + 1, policy.max_retries + 1,
+                job_key, attempt + 1, retry_limit + 1,
                 delay, last_error[:80],
             )
 

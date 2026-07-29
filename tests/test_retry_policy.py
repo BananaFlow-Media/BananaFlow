@@ -158,6 +158,20 @@ class TestRetryDownload:
         assert result is not None
         assert calls[0] == 1
 
+    def test_temporary_media_transfer_403_gets_one_fresh_bounded_attempt(self):
+        calls = [0]
+        def fn():
+            calls[0] += 1
+            if calls[0] == 1:
+                raise Exception(
+                    "unable to download video data: HTTP Error 403: Forbidden"
+                )
+        result = retry_download(
+            fn, RetryPolicy(max_retries=3, base_delay_s=0.01), job_key="dubai"
+        )
+        assert result is None
+        assert calls[0] == 2
+
     def test_bot_check_error_not_retried_by_loop(self):
         calls = [0]
         def fn():

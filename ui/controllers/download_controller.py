@@ -1357,19 +1357,28 @@ class DownloadController(QObject):
         # still succeed, so these must NOT cancel the whole batch. They still
         # mark that one card as errored and show once via the throttled
         # per-track error dialog.
-        is_fatal = False
-        fatal_markers = [
-            "cookie database",
-            "DPAPI",
-            "HTTP Error 403",
-            "Signature solving failed",
-            "n challenge solving failed",
-        ]
-        if any(marker in err_msg for marker in fatal_markers):
-            is_fatal = True
+        stops_batch = getattr(err, "stops_batch", None)
+        if callable(stops_batch):
+            is_fatal = bool(stops_batch())
+        else:
+            # Compatibility for legacy/custom error objects. These phrases
+            # identify one broken cookie mechanism; a bare 403 or signature
+            # failure is not evidence that unrelated videos will fail.
+            is_fatal = any(marker in err_msg.casefold() for marker in (
+                "cookie database", "failed to decrypt with dpapi",
+                "app-bound encryption",
+            ))
             
         # Get the failing URL to pass to the UI
         failing_url = ""
+        try:
+            track_req = self._active_request_for_key(key)
+        except Exception:
+            logger.debug(
+                "[DownloadController] Failed request lookup for %s",
+                key, exc_info=True,
+            )
+            track_req = None
         if track_req:
             failing_url = track_req.url
 
@@ -1384,7 +1393,7 @@ class DownloadController(QObject):
         if emit_dialog:
             self.show_error_dialog.emit(err, failing_url)
 
-        if is_fatal:
+        if is_fatal and emit_dialog:
             logger.warning("[DownloadController] Fatal error detected. Stopping batch.")
             # Record the fatal cause BEFORE cancelling so the outcome is
             # reported as a technical stop, not a user cancellation — and so

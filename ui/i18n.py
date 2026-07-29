@@ -99,6 +99,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # second instead of rounding to whole minutes. The old per-unit keys
         # (eta_about_sec/min/hr) could not express seconds above a minute.
         "eta_about_left": "About {time} left",
+        "eta_left": "{time} left",
         "eta_range_left": "About {low}–{high} left",
         "eta_current_speed_left": "About {time} at the current speed",
         "eta_tooltip": "Estimated time remaining for the whole batch",
@@ -1473,6 +1474,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "spotify_metadata_invalid_card": "פרטי הרצועה מ-Spotify אינם תקינים — הרצועה לא תורד.",
         "eta_calculating": "מחשב…",
         "eta_about_left": "בערך {time} נותרו",
+        "eta_left": "נותרו {time}",
         "eta_range_left": "נותרו בערך {low}–{high}",
         "eta_current_speed_left": "בערך {time} בקצב הנוכחי",
         "eta_tooltip": "הערכת הזמן הנותר לאצווה כולה",

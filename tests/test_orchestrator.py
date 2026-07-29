@@ -151,6 +151,40 @@ class TestDownloadOrchestrator:
         assert len(cb.track_errors) == 1
         assert cb.track_errors[0][0] == "b"
 
+    def test_temporary_media_403_recovers_automatically_and_peer_continues(self):
+        from core.download_orchestrator import DownloadOrchestrator
+
+        class Temporary403Engine(FakeEngine):
+            def __init__(self):
+                super().__init__()
+                self.calls = {}
+
+            def download(self, req):
+                self.calls[req.url] = self.calls.get(req.url, 0) + 1
+                if "dubai" in req.url and self.calls[req.url] == 1:
+                    req.on_error(DownloadProgress(
+                        status=DownloadStatus.ERROR, url=req.url,
+                        error_message=(
+                            "unable to download video data: "
+                            "HTTP Error 403: Forbidden"
+                        ),
+                    ))
+                    return
+                super().download(req)
+
+        engine = Temporary403Engine()
+        cb = FakeCallbacks()
+        result = DownloadOrchestrator(engine, cb, max_workers=2).run_batch([
+            _make_job("dubai", "https://youtube.test/dubai"),
+            _make_job("peer", "https://youtube.test/peer"),
+        ])
+
+        assert result.completed == 2
+        assert result.failed == 0
+        assert engine.calls["https://youtube.test/dubai"] == 2
+        assert engine.calls["https://youtube.test/peer"] == 1
+        assert cb.track_errors == []
+
     def test_cancel_before_start(self):
         from core.download_orchestrator import DownloadOrchestrator
         engine = FakeEngine()
