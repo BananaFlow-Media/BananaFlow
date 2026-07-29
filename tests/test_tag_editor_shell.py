@@ -282,3 +282,142 @@ def test_current_column_order_passes_through_unchanged(panel):
 @pytest.mark.parametrize("bad", [[], None, [0, 0, 1], list(range(99))])
 def test_untrustworthy_column_order_falls_back_to_defaults(panel, bad):
     assert panel._migrate_saved_column_order(bad) is None
+
+
+# --------------------------------------------------------------------------- #
+# Inspector: three modes, fifteen panes
+# --------------------------------------------------------------------------- #
+
+def test_inspector_exposes_all_fifteen_panes(panel):
+    assert len(panel._inspector_tool_buttons) == 15
+    assert panel._inspector_pages.count() == 15
+    counts = {mode: panel._inspector_pane_modes.count(mode)
+              for mode in ("edit", "tools", "check")}
+    assert counts == {"edit": 5, "tools": 6, "check": 4}
+
+
+def test_legacy_tool_indices_still_mean_what_they_meant(panel):
+    """_select_inspector_tool is API: indices 0..7 are the old rail order."""
+    from ui.i18n import t
+
+    assert panel._inspector_tool_titles[0] == t("meta_edit_tags_group")
+    assert panel._inspector_tool_titles[1] == t("meta_action_engine_title")
+    assert panel._inspector_tool_titles[7] == t("meta_problems_title")
+
+    panel._select_inspector_tool(1)
+    assert panel._inspector_pages.currentIndex() == 1
+    assert panel._inspector_tool_buttons[1].isChecked()
+    assert not panel._inspector_tool_buttons[0].isChecked()
+
+
+def test_mode_tabs_track_the_active_pane(panel):
+    panel._select_inspector_tool(0)                      # edit / fields
+    assert panel._inspector_mode_buttons["edit"].isChecked()
+    assert not panel._inspector_mode_buttons["tools"].isChecked()
+
+    panel._select_inspector_tool(1)                      # tools / actions
+    assert panel._inspector_mode_buttons["tools"].isChecked()
+    assert not panel._inspector_mode_buttons["edit"].isChecked()
+
+
+def test_switching_mode_lands_on_its_first_pane(panel):
+    panel._open_inspector_mode("check")
+    assert panel._inspector_pane_modes[panel._active_inspector_tool] == "check"
+    # Re-opening the mode you are already in must not jump you elsewhere.
+    current = panel._active_inspector_tool
+    panel._open_inspector_mode("check")
+    assert panel._active_inspector_tool == current
+
+
+def test_subtabs_show_only_the_active_mode(panel):
+    panel._select_inspector_tool(0)
+    shown = {
+        panel._inspector_subtab_layout.itemAt(i).widget()
+        for i in range(panel._inspector_subtab_layout.count())
+        if panel._inspector_subtab_layout.itemAt(i).widget() is not None
+    }
+    edit_buttons = {
+        panel._inspector_tool_buttons[i]
+        for i, mode in enumerate(panel._inspector_pane_modes) if mode == "edit"
+    }
+    assert shown == edit_buttons
+
+
+def test_edit_panes_cover_the_whole_track_inspector(panel):
+    """Fields, artwork, lyrics, ReplayGain and properties are now siblings."""
+    for name in ("_insp_fields", "_insp_artwork_add_btn", "_insp_lyrics",
+                 "_insp_rg_track_btn", "_insp_properties"):
+        assert hasattr(panel, name), f"edit panes lost {name}"
+
+
+def test_auto_arrange_page_lists_what_it_will_run(panel):
+    """The button is otherwise a black box that edits files by unseen rules."""
+    from ui.i18n import t
+
+    panel._auto_ops = {"title_strip", "track_num"}
+    panel._refresh_auto_enabled_list()
+    text = panel._auto_enabled_list.text()
+    assert t("meta_op_title_strip_label") in text
+    assert t("meta_op_track_num_label") in text
+
+    panel._auto_ops = set()
+    panel._refresh_auto_enabled_list()
+    assert panel._auto_enabled_list.text() == t("meta_auto_none_enabled")
+
+
+def test_auto_arrange_settings_button_survives_the_move(panel):
+    """Per the review the page keeps both buttons, not just the action."""
+    assert hasattr(panel, "_auto_btn")
+    assert hasattr(panel, "_auto_cfg_btn")
+    assert hasattr(panel, "_auto_container")
+
+
+def test_check_pending_page_reports_apply_scope(panel, tmp_path):
+    from ui.i18n import t
+
+    _load(panel, tmp_path, count=3, changed=2)
+    assert panel._pending_summary.text() == t(
+        "meta_pending_summary", files=2, applying=2)
+    assert panel._pending_review_btn.isEnabled()
+
+
+def test_check_pending_page_is_empty_when_nothing_is_queued(panel, tmp_path):
+    from ui.i18n import t
+
+    _load(panel, tmp_path, count=2)
+    assert panel._pending_summary.text() == t("meta_pending_none")
+    assert not panel._pending_review_btn.isEnabled()
+
+
+def test_check_external_page_separates_changed_from_blocking(panel, tmp_path):
+    """Not every disk change blocks Apply, and the page must not imply it does.
+
+    A file that changed on disk is reported but still writable; it only blocks
+    once the change collides with local proposals (stale_with_proposals).
+    Conflating the two would either cry wolf or hide a real blocker.
+    """
+    from ui.i18n import t
+
+    tracks = _load(panel, tmp_path, count=2, changed=1)
+    tracks[0].external_state = "changed_on_disk"
+    panel._refresh_checked_scope_state()
+
+    assert panel._external_summary.text() == t(
+        "meta_external_summary", stale=1, blocked=0)
+    assert panel._external_review_all_btn.isEnabled()
+
+    tracks[0].external_state = "stale_with_proposals"
+    panel._refresh_checked_scope_state()
+
+    assert panel._external_summary.text() == t(
+        "meta_external_summary", stale=1, blocked=1)
+    # A blocked file is also out of the apply batch entirely.
+    assert tracks[0] not in panel._workspace.apply_candidates()
+
+
+def test_check_external_page_is_quiet_when_the_disk_agrees(panel, tmp_path):
+    from ui.i18n import t
+
+    _load(panel, tmp_path, count=2, changed=1)
+    assert panel._external_summary.text() == t("meta_external_none")
+    assert not panel._external_review_all_btn.isEnabled()

@@ -338,6 +338,9 @@ class MetadataEditorPanel(
         self._last_tree_width = self._DEFAULT_SPLITTER_SIZES[0]
         self._last_inspector_width = self._DEFAULT_SPLITTER_SIZES[2]
         self._active_inspector_tool = 0
+        self._inspector_rail_buttons: dict[str, QPushButton] = {}
+        self._inspector_mode_buttons: dict[str, QPushButton] = {}
+        self._inspector_pane_modes: list[str] = []
         self._apply_refresh_counter = 0
         self._is_scanning = False
         self._is_applying = False
@@ -942,10 +945,6 @@ class MetadataEditorPanel(
         self._refresh_menu = refresh_menu
         self._manual_refresh_btn.setMenu(refresh_menu)
         layout.addWidget(self._manual_refresh_btn)
-
-        # Auto-arrange still lives here; it moves into Tools > Auto arrange
-        # together with the rest of the inspector rework.
-        layout.addWidget(self._make_auto_toolbar_action())
 
         self._search_edit = QLineEdit()
         self._search_edit.setClearButtonEnabled(True)
@@ -1706,75 +1705,64 @@ class MetadataEditorPanel(
         self._inspector.addWidget(self._build_inspector_empty())   # 0
         self._inspector.addWidget(self._build_inspector_folder())  # 1
         self._inspector.addWidget(self._build_inspector_tracks())  # 2
-        # Four purpose-built categories (manual edit / derive from filename /
-        # cleanup & clear tags / rename the physical file) — each op appears
-        # in exactly one place, so the rail maps 1:1 onto "what am I trying
-        # to do" instead of leftover groupings from earlier iterations.
-        inspector_tools = [
-            ("details", t("meta_edit_tags_group"), FluentIcon.EDIT, self._inspector),
-            (
-                "actions",
-                t("meta_action_engine_title"),
-                FluentIcon.TAG,
-                self._build_action_engine_page(),
-            ),
-            (
-                "from_filename",
-                t("meta_group_from_filename"),
-                FluentIcon.PASTE,
-                self._build_inspector_actions(
-                    ("title_strip", "title_full", "track_num", "split_at"),
-                ),
-            ),
-            (
-                "cleanup",
-                t("meta_group_cleanup"),
-                FluentIcon.ERASE_TOOL,
-                self._build_inspector_actions(
-                    None,
-                    sections=(
-                        ("meta_section_text_cleanup", ("normalize_spaces", "strip_junk", "album_artist")),
-                        ("meta_section_clear_fields", (
-                            "clear_title", "clear_artist", "clear_album", "clear_album_artist",
-                            "clear_track_num", "clear_year", "clear_genre", "clear_comments",
-                        )),
-                    ),
-                ),
-            ),
-            (
-                "files",
-                t("meta_rename_group"),
-                FluentIcon.DOCUMENT,
-                self._build_inspector_actions(
-                    ("clean_filename", "strip_filename_numbering"),
-                ),
-            ),
-            (
-                "duplicates",
-                t("meta_duplicates_tools_title"),
-                FluentIcon.FINGERPRINT,
-                self._build_duplicate_tools_page(),
-            ),
-            (
-                "online",
-                t("meta_online_title"),
-                FluentIcon.SEARCH,
-                self._build_online_metadata_page(),
-            ),
-            (
-                "problems",
-                t("meta_problems_title"),
-                FluentIcon.INFO,
-                self._build_problems_page(),
-            ),
+
+        # Three modes answering three different questions — what are these
+        # files, what do I want done to them, what is wrong with them — each
+        # with its own sub-tabs. The flat page list below is deliberately
+        # ordered so its first eight entries are the eight tools the old rail
+        # exposed, in the same order: _select_inspector_tool() is part of the
+        # panel's API and indices 0..7 have to keep meaning what they meant.
+        inspector_panes = [
+            # (mode, title, icon, page)
+            ("edit",  t("meta_edit_tags_group"),        FluentIcon.EDIT,        self._inspector),
+            ("tools", t("meta_action_engine_title"),    FluentIcon.TAG,         self._build_action_engine_page()),
+            ("tools", t("meta_group_from_filename"),    FluentIcon.PASTE,
+             self._build_inspector_actions(("title_strip", "title_full", "track_num", "split_at"))),
+            ("tools", t("meta_group_cleanup"),          FluentIcon.ERASE_TOOL,
+             self._build_inspector_actions(
+                 None,
+                 sections=(
+                     ("meta_section_text_cleanup", ("normalize_spaces", "strip_junk", "album_artist")),
+                     ("meta_section_clear_fields", (
+                         "clear_title", "clear_artist", "clear_album", "clear_album_artist",
+                         "clear_track_num", "clear_year", "clear_genre", "clear_comments",
+                     )),
+                 ),
+             )),
+            ("tools", t("meta_rename_group"),           FluentIcon.DOCUMENT,
+             self._build_inspector_actions(("clean_filename", "strip_filename_numbering"))),
+            ("check", t("meta_duplicates_tools_title"), FluentIcon.FINGERPRINT, self._build_duplicate_tools_page()),
+            ("tools", t("meta_online_title"),           FluentIcon.SEARCH,      self._build_online_metadata_page()),
+            ("check", t("meta_problems_title"),         FluentIcon.INFO,        self._build_problems_page()),
+            # Everything past here is new to the redesign.
+            ("edit",  t("meta_inspector_artwork_section"),         FluentIcon.PHOTO,   self._build_edit_artwork_page()),
+            ("edit",  t("meta_inspector_lyrics_section"),          FluentIcon.FONT,    self._build_edit_lyrics_page()),
+            ("edit",  t("meta_inspector_replaygain_section"),      FluentIcon.VOLUME,  self._build_edit_gain_page()),
+            ("edit",  t("meta_inspector_file_properties_section"), FluentIcon.INFO,    self._build_edit_properties_page()),
+            ("tools", t("meta_auto_btn").strip(),                  FluentIcon.BRUSH,   self._build_tools_auto_page()),
+            ("check", t("meta_pending_tab"),                       FluentIcon.VIEW,    self._build_check_pending_page()),
+            ("check", t("meta_external_tab"),                      FluentIcon.SYNC,    self._build_check_external_page()),
         ]
+
+        self._inspector_pane_modes: list[str] = []
         self._inspector_tool_titles: list[str] = []
         self._inspector_tool_buttons: list[QPushButton] = []
         self._inspector_tool_kinds: list = []
-        for _tool_id, title, icon, page in inspector_tools:
+        for index, (mode, title, icon, page) in enumerate(inspector_panes):
+            self._inspector_pane_modes.append(mode)
             self._inspector_tool_titles.append(title)
             self._inspector_tool_kinds.append(icon)
             self._inspector_pages.addWidget(page)
+
+            chip = QPushButton(title)
+            chip.setObjectName("tagEditorSubtab")
+            chip.setCheckable(True)
+            a11y.describe(chip, title, tooltip=title)
+            chip.clicked.connect(lambda _=False, i=index: self._toggle_inspector_tool(i))
+            self._inspector_tool_buttons.append(chip)
+
+        content_layout.addWidget(self._build_inspector_mode_tabs())
+        content_layout.addWidget(self._build_inspector_subtabs())
         content_layout.addWidget(self._inspector_pages, stretch=1)
 
         self._inspector_rail = QFrame()
@@ -1783,16 +1771,18 @@ class MetadataEditorPanel(
         rail_layout.setContentsMargins(5, 6, 5, 6)
         rail_layout.setSpacing(6)
 
-        for index, title in enumerate(self._inspector_tool_titles):
+        # Collapsed, the rail offers the three modes rather than every pane:
+        # a 40px strip cannot carry twelve legible targets.
+        for mode, icon in (("edit", FluentIcon.EDIT), ("tools", FluentIcon.DEVELOPER_TOOLS),
+                           ("check", FluentIcon.CERTIFICATE)):
             btn = QPushButton()
             btn.setFixedSize(30, 30)
-            self._set_tool_button_icon(btn, self._inspector_tool_kinds[index])
-            # Icon-only: without an explicit name a screen reader announces
-            # nothing at all for the whole inspector rail.
-            a11y.describe(btn, title, tooltip=title)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _=False, i=index: self._toggle_inspector_tool(i))
-            self._inspector_tool_buttons.append(btn)
+            self._set_tool_button_icon(btn, icon)
+            label = self._inspector_mode_label(mode)
+            a11y.describe(btn, label, tooltip=label)
+            btn.clicked.connect(
+                lambda _=False, m=mode: self._open_inspector_mode(m))
+            self._inspector_rail_buttons[mode] = btn
             rail_layout.addWidget(btn)
         rail_layout.addStretch()
 
@@ -2173,6 +2163,73 @@ class MetadataEditorPanel(
     def on_problem_fix_preview_failed(self, message: str) -> None:
         prompts.show_warning(self, t("meta_problems_title"), message)
 
+    _INSPECTOR_MODE_KEYS = {
+        "edit": "meta_inspector_mode_edit",
+        "tools": "meta_inspector_mode_tools",
+        "check": "meta_inspector_mode_check",
+    }
+
+    @classmethod
+    def _inspector_mode_label(cls, mode: str) -> str:
+        return t(cls._INSPECTOR_MODE_KEYS[mode])
+
+    def _build_inspector_mode_tabs(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("tagEditorModeTabs")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 6, 8, 4)
+        layout.setSpacing(3)
+        self._inspector_mode_buttons: dict[str, QPushButton] = {}
+        for mode in ("edit", "tools", "check"):
+            label = self._inspector_mode_label(mode)
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setObjectName("tagEditorModeTab")
+            a11y.describe(btn, label, tooltip=label)
+            btn.clicked.connect(lambda _=False, m=mode: self._open_inspector_mode(m))
+            self._inspector_mode_buttons[mode] = btn
+            layout.addWidget(btn, stretch=1)
+        return bar
+
+    def _build_inspector_subtabs(self) -> QScrollArea:
+        """Chips for the panes of the active mode; rebuilt whenever it changes."""
+        self._inspector_subtab_host = QWidget()
+        self._inspector_subtab_layout = QHBoxLayout(self._inspector_subtab_host)
+        self._inspector_subtab_layout.setContentsMargins(8, 0, 8, 6)
+        self._inspector_subtab_layout.setSpacing(5)
+        self._inspector_subtab_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setObjectName("tagEditorSubtabs")
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(38)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(self._inspector_subtab_host)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._inspector_subtab_scroll = scroll
+        return scroll
+
+    def _open_inspector_mode(self, mode: str) -> None:
+        """Switch modes, landing on that mode's first pane."""
+        if self._right_collapsed:
+            self._set_inspector_collapsed(False)
+        if self._inspector_pane_modes[self._active_inspector_tool] == mode:
+            return
+        self._select_inspector_tool(self._inspector_pane_modes.index(mode))
+
+    def _rebuild_inspector_subtabs(self) -> None:
+        active_mode = self._inspector_pane_modes[self._active_inspector_tool]
+        while self._inspector_subtab_layout.count():
+            item = self._inspector_subtab_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().setParent(None)
+        for index, mode in enumerate(self._inspector_pane_modes):
+            if mode != active_mode:
+                continue
+            self._inspector_subtab_layout.addWidget(self._inspector_tool_buttons[index])
+            self._inspector_tool_buttons[index].setVisible(True)
+        self._inspector_subtab_layout.addStretch()
+
     def _select_inspector_tool(self, index: int) -> None:
         self._active_inspector_tool = index
         if hasattr(self, "_inspector_pages"):
@@ -2182,6 +2239,8 @@ class MetadataEditorPanel(
             self._inspector_title_lbl.setText(titles[index] if 0 <= index < len(titles) else "")
         if self._right_collapsed:
             self._set_inspector_collapsed(False)
+        if hasattr(self, "_inspector_subtab_layout"):
+            self._rebuild_inspector_subtabs()
         self._refresh_tool_button_states()
 
     def _toggle_inspector_tool(self, index: int) -> None:
@@ -2209,6 +2268,10 @@ class MetadataEditorPanel(
                 # reader and in high contrast; the stylesheet above still owns
                 # the appearance, so nothing changes visually.
                 btn.setChecked(active)
+        if getattr(self, "_inspector_mode_buttons", None) and self._inspector_pane_modes:
+            active_mode = self._inspector_pane_modes[self._active_inspector_tool]
+            for mode, btn in self._inspector_mode_buttons.items():
+                btn.setChecked(mode == active_mode and not self._right_collapsed)
                 icon = self._inspector_tool_kinds[idx] if idx < len(self._inspector_tool_kinds) else FluentIcon.EDIT
                 self._set_tool_button_icon(btn, icon)
         if hasattr(self, "_tree_toggle_btn"):
@@ -3090,6 +3153,8 @@ class MetadataEditorPanel(
             if self._cfg:
                 self._cfg.magic_auto_ops = list(self._auto_ops)
                 self._cfg.save()
+            # The Tools > Auto arrange page lists what the button will run.
+            self._refresh_auto_enabled_list()
 
 
     # ── Public slots (wired by AppWindow) ─────────────────────────────────────
@@ -3799,6 +3864,7 @@ class MetadataEditorPanel(
             )
         self._refresh_path_chip()
         self._refresh_footer()
+        self._refresh_check_pages()
         self._refresh_toolbar_action_styles()
 
     def _refresh_path_chip(self) -> None:

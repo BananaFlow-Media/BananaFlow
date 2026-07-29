@@ -70,6 +70,7 @@ from core.metadata_models import (
     REPLAYGAIN_TRACK_GAIN,
     REPLAYGAIN_TRACK_PEAK,
 )
+from core.filesystem_monitoring import is_external_change
 from ui import a11y
 from ui.i18n import t
 from ui.theme_manager import get_colors
@@ -130,11 +131,18 @@ class InspectorBuildMixin:
         return scroll
 
     def _build_inspector_tracks(self) -> QScrollArea:
+        """The Edit > Fields page.
+
+        Artwork, lyrics, ReplayGain and properties used to be stacked below
+        this in one long scroll; they are now sibling tabs, so this page is
+        the fields alone.
+        """
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
+
 
         self._insp_tracks_title = QLabel(t("meta_tracks_selected_count", n=0))
         self._insp_tracks_title.setStyleSheet("font-weight: bold; font-size: 13px;")
@@ -145,6 +153,23 @@ class InspectorBuildMixin:
         self._insp_capability.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(self._insp_capability)
 
+        layout.addWidget(self._build_fields_group())
+        layout.addStretch()
+        return self._inspector_scroll(w)
+
+    @staticmethod
+    def _inspector_scroll(inner: QWidget) -> QScrollArea:
+        """Every inspector page scrolls the same way."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        return scroll
+
+    def _build_fields_group(self) -> QGroupBox:
+        """The 21 metadata fields, their per-field Clear buttons, and the button
+        that turns the draft into proposals."""
         fields_grp = QGroupBox(t("meta_inspector_metadata_section"))
         fields_layout = QVBoxLayout(fields_grp)
         fields_layout.setSpacing(6)
@@ -219,8 +244,14 @@ class InspectorBuildMixin:
         btn_apply_fields.clicked.connect(self._on_insp_apply_fields)
         self._selection_scope_buttons.append(btn_apply_fields)
         fields_layout.addWidget(btn_apply_fields)
-        layout.addWidget(fields_grp)
+        return fields_grp
 
+    def _build_lyrics_group(self) -> QGroupBox:
+        """Embedded lyrics with their language and descriptor.
+
+        An empty editor never clears lyrics on its own -- removing them is an
+        explicit action, so a stray keystroke cannot silently discard a file's
+        words."""
         lyrics_grp = QGroupBox(t("meta_inspector_lyrics_section"))
         lyrics_layout = QVBoxLayout(lyrics_grp)
         self._insp_lyrics_state = QLabel()
@@ -251,8 +282,12 @@ class InspectorBuildMixin:
             lyrics_buttons.addWidget(button)
             self._selection_scope_buttons.append(button)
         lyrics_layout.addLayout(lyrics_buttons)
-        layout.addWidget(lyrics_grp)
+        return lyrics_grp
 
+    def _build_artwork_group(self) -> QGroupBox:
+        """Current and proposed cover art. Add and Replace stay distinct: one
+        appends a picture, the other overwrites, and merging them would make
+        the destructive case the default."""
         artwork_grp = QGroupBox(t("meta_inspector_artwork_section"))
         artwork_layout = QVBoxLayout(artwork_grp)
         self._insp_artwork_current_label = QLabel(t("meta_artwork_current"))
@@ -291,8 +326,14 @@ class InspectorBuildMixin:
             artwork_buttons.addWidget(button)
             self._selection_scope_buttons.append(button)
         artwork_layout.addLayout(artwork_buttons)
-        layout.addWidget(artwork_grp)
+        return artwork_grp
 
+    def _build_replaygain_group(self) -> QGroupBox:
+        """ReplayGain values and analysis.
+
+        Analysis never touches the audio -- it only produces pending tags.
+        Track and album are cleared separately because an album value is
+        shared across files and a track value is not."""
         replay_grp = QGroupBox(t("meta_inspector_replaygain_section"))
         replay_layout = QVBoxLayout(replay_grp)
         replay_note = QLabel(t("meta_replaygain_plain_explanation"))
@@ -341,8 +382,11 @@ class InspectorBuildMixin:
         self._insp_rg_progress = QProgressBar()
         self._insp_rg_progress.setVisible(False)
         replay_layout.addWidget(self._insp_rg_progress)
-        layout.addWidget(replay_grp)
+        return replay_grp
 
+    def _build_properties_group(self) -> QGroupBox:
+        """Read-only file facts, plus the entry point for reviewing a file that
+        changed on disk."""
         props_grp = QGroupBox(t("meta_inspector_file_properties_section"))
         props_layout = QVBoxLayout(props_grp)
         self._insp_properties = QLabel()
@@ -359,8 +403,11 @@ class InspectorBuildMixin:
             self._review_selected_external_conflict)
         self._insp_external_review_btn.setVisible(False)
         props_layout.addWidget(self._insp_external_review_btn)
-        layout.addWidget(props_grp)
+        return props_grp
 
+    def _build_rename_group(self) -> QGroupBox:
+        """Physical rename derived from the title. Still only a proposal: nothing
+        reaches the filesystem before Apply."""
         rename_grp = QGroupBox(t("meta_rename_group"))
         rename_layout = QVBoxLayout(rename_grp)
         rename_layout.setSpacing(6)
@@ -375,16 +422,183 @@ class InspectorBuildMixin:
         btn_rename.clicked.connect(self._on_insp_rename_from_title)
         self._selection_scope_buttons.append(btn_rename)
         rename_layout.addWidget(btn_rename)
-        layout.addWidget(rename_grp)
+        return rename_grp
+
+    def _build_edit_artwork_page(self) -> QScrollArea:
+        """Edit > Artwork."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(self._build_artwork_group())
+        layout.addStretch()
+        return self._inspector_scroll(w)
+
+    def _build_edit_lyrics_page(self) -> QScrollArea:
+        """Edit > Lyrics."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(self._build_lyrics_group())
+        layout.addStretch()
+        return self._inspector_scroll(w)
+
+    def _build_edit_gain_page(self) -> QScrollArea:
+        """Edit > ReplayGain."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(self._build_replaygain_group())
+        layout.addStretch()
+        return self._inspector_scroll(w)
+
+    def _build_edit_properties_page(self) -> QScrollArea:
+        """Edit > File properties."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(self._build_properties_group())
+        layout.addStretch()
+        return self._inspector_scroll(w)
+    def _build_tools_auto_page(self) -> QScrollArea:
+        """Tools > Auto arrange.
+
+        Auto arrange runs only the operations explicitly enabled in its
+        settings, so the page lists them: the button is otherwise a black box
+        that edits files by rules the user cannot see from here.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+
+        note = QLabel(t("meta_auto_header"))
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
+        layout.addWidget(note)
+
+        layout.addWidget(self._make_auto_toolbar_action(), alignment=Qt.AlignHCenter)
+
+        album_note = QLabel(t("meta_auto_album_note"))
+        album_note.setWordWrap(True)
+        album_note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
+        layout.addWidget(album_note)
+
+        heading = QLabel(t("meta_auto_enabled_heading"))
+        heading.setStyleSheet(
+            f"color: {get_colors().text_tertiary}; font-size: 11px; font-weight: bold;")
+        layout.addWidget(heading)
+
+        self._auto_enabled_list = QLabel("")
+        self._auto_enabled_list.setWordWrap(True)
+        self._auto_enabled_list.setStyleSheet("font-size: 11px;")
+        layout.addWidget(self._auto_enabled_list)
+        self._refresh_auto_enabled_list()
 
         layout.addStretch()
+        return self._inspector_scroll(w)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        return scroll
+    def _refresh_auto_enabled_list(self) -> None:
+        """Mirror the auto-arrange settings into the page that runs them."""
+        if not hasattr(self, "_auto_enabled_list"):
+            return
+        labels = [
+            t(label_key)
+            for op_id, label_key, _desc in MAGIC_OP_DEFS
+            if op_id in self._auto_ops
+        ]
+        self._auto_enabled_list.setText(
+            "\n".join(f"•  {label}" for label in labels)
+            if labels else t("meta_auto_none_enabled")
+        )
+
+    def _build_check_pending_page(self) -> QScrollArea:
+        """Check > Pending changes.
+
+        A summary and a way into the full review. Apply covers every included,
+        unblocked change regardless of what is selected or filtered, so the
+        page says so rather than letting the table imply otherwise.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+
+        note = QLabel(t("meta_pending_scope_note"))
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
+        layout.addWidget(note)
+
+        self._pending_summary = QLabel("")
+        self._pending_summary.setWordWrap(True)
+        layout.addWidget(self._pending_summary)
+
+        self._pending_review_btn = QPushButton(t("meta_review_changes").strip())
+        self._pending_review_btn.setStyleSheet(btn_style())
+        self._pending_review_btn.clicked.connect(self._on_review_changes)
+        layout.addWidget(self._pending_review_btn)
+
+        layout.addStretch()
+        return self._inspector_scroll(w)
+
+    def _build_check_external_page(self) -> QScrollArea:
+        """Check > External changes and blockers.
+
+        A file that changed on disk since the scan is never written silently:
+        it stays pending and out of the batch until the conflict is resolved.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
+
+        note = QLabel(t("meta_external_blockers_note"))
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
+        layout.addWidget(note)
+
+        self._external_summary = QLabel("")
+        self._external_summary.setWordWrap(True)
+        layout.addWidget(self._external_summary)
+
+        self._external_review_all_btn = QPushButton(t("meta_external_review_action"))
+        self._external_review_all_btn.setStyleSheet(btn_style())
+        self._external_review_all_btn.clicked.connect(
+            self._review_selected_external_conflict)
+        layout.addWidget(self._external_review_all_btn)
+
+        layout.addStretch()
+        return self._inspector_scroll(w)
+
+    def _refresh_check_pages(self) -> None:
+        """Keep the Check tabs honest about the current workspace."""
+        if hasattr(self, "_pending_summary"):
+            changed = self._workspace.changed_tracks()
+            candidates = self._workspace.apply_candidates()
+            self._pending_summary.setText(
+                t("meta_pending_summary", files=len(changed), applying=len(candidates))
+                if changed else t("meta_pending_none")
+            )
+            self._pending_review_btn.setEnabled(bool(changed))
+        if hasattr(self, "_external_summary"):
+            blockers = self._workspace.apply_blockers()
+            stale = [item for item in self._workspace.tracks
+                     if is_external_change(getattr(item, "external_state", "current"))]
+            self._external_summary.setText(
+                t("meta_external_summary", stale=len(stale), blocked=len(blockers))
+                if stale else t("meta_external_none")
+            )
+            self._external_review_all_btn.setEnabled(bool(stale))
 
     def _make_op_side_button(self, glyph: str, tooltip: str, accent: bool = False) -> QPushButton:
         """Small icon button shown on the trailing edge of an op row.
