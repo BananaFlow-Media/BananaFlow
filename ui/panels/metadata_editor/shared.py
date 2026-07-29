@@ -16,7 +16,7 @@ from ui.models.metadata_table_model import (
     COL_ARTIST_CUR, COL_ARTIST_NEW, COL_ALBUM_CUR, COL_ALBUM_NEW,
     COL_TRACK_CUR, COL_TRACK_NEW,
     COL_FILENAME_NEW, COL_GENRE_CUR, COL_GENRE_NEW,
-    COL_COMMENT_CUR, COL_COMMENT_NEW,
+    COL_COMMENT_CUR, COL_COMMENT_NEW, COL_STATUS,
 )
 from ui.theme_manager import get_colors
 
@@ -81,6 +81,7 @@ DEFAULT_COL_WIDTHS: dict[int, int] = {
     COL_GENRE_NEW:    100,
     COL_COMMENT_CUR:  150,
     COL_COMMENT_NEW:  150,
+    COL_STATUS:       120,
 }
 
 

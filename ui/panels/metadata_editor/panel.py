@@ -1091,6 +1091,73 @@ class MetadataEditorPanel(
             notes.append(t("meta_footer_excluded_note", n=len(excluded)))
         self._footer_desc.setText(" · ".join(notes))
 
+    def _columns_button(self) -> QToolButton:
+        """Direct access to the column picker.
+
+        It was previously only reachable by right-clicking the header, which
+        is not a discoverable place to look for "show me a different field".
+        The header menu stays exactly as it was — this is an additional door.
+        """
+        self._columns_btn = QToolButton()
+        self._columns_btn.setIcon(FluentIcon.LAYOUT.icon())
+        self._columns_btn.setIconSize(QSize(14, 14))
+        self._columns_btn.setFixedSize(26, 26)
+        a11y.describe(self._columns_btn, t("mt_more_columns"),
+                      description=t("mt_search_columns"),
+                      tooltip=t("mt_more_columns"))
+        self._columns_btn.clicked.connect(self._on_more_columns)
+        return self._columns_btn
+
+    def _build_table_status_bar(self) -> QFrame:
+        """Counts that describe the listing, pinned under the table."""
+        bar = QFrame()
+        bar.setObjectName("tagEditorTableStatus")
+        self._table_status_bar = bar
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 3, 12, 3)
+        layout.setSpacing(10)
+
+        self._table_info_lbl = QLabel("")
+        layout.addWidget(self._table_info_lbl)
+
+        self._apply_scope_lbl = QLabel("")
+        self._apply_scope_lbl.setAccessibleName(t("meta_apply_scope_label"))
+        layout.addWidget(self._apply_scope_lbl)
+
+        layout.addStretch()
+
+        self._exclude_apply_btn = QToolButton()
+        self._exclude_apply_btn.clicked.connect(self._toggle_selected_apply_exclusion)
+        layout.addWidget(self._exclude_apply_btn)
+
+        self._scope_hint_lbl = QLabel(t("meta_scope_hint"))
+        self._scope_hint_lbl.setObjectName("tagEditorScopeHint")
+        layout.addWidget(self._scope_hint_lbl)
+        return bar
+
+    @staticmethod
+    def _migrate_saved_column_order(saved_order) -> list[int] | None:
+        """Widen a column order saved before the status column existed.
+
+        The restore path only accepts an order of exactly COLUMN_COUNT entries.
+        Adding a column would therefore make every previously saved order fail
+        that check and silently reset the user's arrangement on first launch of
+        the new version. Appending the columns they have never seen keeps the
+        order they chose and leaves the new one at the end.
+        """
+        if not saved_order:
+            return None
+        order = list(saved_order)
+        if len(order) == COLUMN_COUNT:
+            return order
+        if len(order) > COLUMN_COUNT:
+            return None
+        missing = [col for col in range(COLUMN_COUNT) if col not in order]
+        if len(order) + len(missing) != COLUMN_COUNT:
+            # Duplicate or out-of-range entries: not a layout we can trust.
+            return None
+        return order + missing
+
     def _build_more_button(self) -> QToolButton:
         """The data-management actions, kept as real buttons inside a menu.
 
@@ -1322,12 +1389,31 @@ class MetadataEditorPanel(
         self._breadcrumbs_layout.setSpacing(2)
         nav_bar.addWidget(self._breadcrumbs_widget, stretch=1)
         # Search now lives in the toolbar, beside the folder it searches.
-        table_content_layout.addLayout(nav_bar)
         self._refresh_navigation_arrow_direction()
 
-        tbl_head = QHBoxLayout()
-        tbl_head.setContentsMargins(12, 0, 12, 0)
-        
+        # Filters, zoom and column choice share the breadcrumb row because they
+        # all answer "what am I looking at". What will be *written* is the
+        # footer's job, and keeping the two rows apart keeps that distinction
+        # visible rather than implied.
+        self._excluded_chip = QToolButton()
+        self._excluded_chip.setCheckable(True)
+        a11y.describe_filter_toggle(
+            self._excluded_chip, t("meta_excluded_filter_chip", n=0),
+            t("meta_a11y_excluded_filter_desc"))
+        self._excluded_chip.toggled.connect(self._on_excluded_chip_toggled)
+        nav_bar.addWidget(self._excluded_chip)
+
+        self._stale_chip = QToolButton()
+        self._stale_chip.setCheckable(True)
+        self._stale_chip.setText(t("meta_external_filter", n=0))
+        a11y.describe_filter_toggle(
+            self._stale_chip, t("meta_external_filter", n=0),
+            t("meta_a11y_external_filter_desc"))
+        self._stale_chip.toggled.connect(self._on_stale_chip_toggled)
+        nav_bar.addWidget(self._stale_chip)
+
+        tbl_head = nav_bar
+
         # Zoom controls — the magnifying-glass +/- icons say "zoom" on their
         # own, so no separate leading icon is needed alongside them.
         self._zoom_minus_btn = QPushButton()
@@ -1354,32 +1440,8 @@ class MetadataEditorPanel(
         tbl_head.addWidget(self._zoom_plus_btn)
         
         tbl_head.addSpacing(10)
-        tbl_head.addStretch()
-
-        self._table_info_lbl = QLabel("")
-        tbl_head.addWidget(self._table_info_lbl)
-        self._apply_scope_lbl = QLabel("")
-        self._apply_scope_lbl.setAccessibleName(t("meta_apply_scope_label"))
-        tbl_head.addWidget(self._apply_scope_lbl)
-        self._exclude_apply_btn = QToolButton()
-        self._exclude_apply_btn.clicked.connect(self._toggle_selected_apply_exclusion)
-        tbl_head.addWidget(self._exclude_apply_btn)
-        self._excluded_chip = QToolButton()
-        self._excluded_chip.setCheckable(True)
-        a11y.describe_filter_toggle(
-            self._excluded_chip, t("meta_excluded_filter_chip", n=0),
-            t("meta_a11y_excluded_filter_desc"))
-        self._excluded_chip.toggled.connect(self._on_excluded_chip_toggled)
-        tbl_head.addWidget(self._excluded_chip)
-        self._stale_chip = QToolButton()
-        self._stale_chip.setCheckable(True)
-        self._stale_chip.setText(t("meta_external_filter", n=0))
-        a11y.describe_filter_toggle(
-            self._stale_chip, t("meta_external_filter", n=0),
-            t("meta_a11y_external_filter_desc"))
-        self._stale_chip.toggled.connect(self._on_stale_chip_toggled)
-        tbl_head.addWidget(self._stale_chip)
-        table_content_layout.addLayout(tbl_head)
+        tbl_head.addWidget(self._columns_button())
+        table_content_layout.addLayout(nav_bar)
 
         self._table = ExplorerDetailsView()
         self._table.setAccessibleName(t("meta_a11y_details_table"))
@@ -1459,7 +1521,8 @@ class MetadataEditorPanel(
 
         saved_order = None
         if self._cfg:
-            saved_order = self._cfg.tag_editor_column_order
+            saved_order = self._migrate_saved_column_order(
+                self._cfg.tag_editor_column_order)
 
         hdr.blockSignals(True)
         try:
@@ -1515,6 +1578,7 @@ class MetadataEditorPanel(
         self._model.modelReset.connect(self._refresh_checked_scope_state)
 
         table_content_layout.addWidget(self._table)
+        table_content_layout.addWidget(self._build_table_status_bar())
         self._table_stack.addWidget(self._table_content)
         self._table_empty_page = self._build_table_empty_page()
         self._table_loading_page = self._build_table_loading_page()

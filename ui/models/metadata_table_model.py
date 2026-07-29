@@ -42,7 +42,11 @@ COL_GENRE_CUR    = 11
 COL_GENRE_NEW    = 12
 COL_COMMENT_CUR  = 13
 COL_COMMENT_NEW  = 14
-COLUMN_COUNT     = 15
+# Row state (changed on disk / read-only / N pending changes). Previously this
+# only ever reached the user as a row tint and a tooltip, which cannot be
+# sorted, filtered or read by a screen reader.
+COL_STATUS       = 15
+COLUMN_COUNT     = 16
 EXTERNAL_STATE_ROLE = int(Qt.UserRole) + 13
 
 
@@ -66,6 +70,7 @@ _HEADER_KEYS: list[str] = [
     "mt_col_filename_new",
     "mt_col_genre",        "mt_col_genre_new",
     "mt_col_comment",      "mt_col_comment_new",
+    "mt_col_status",
 ]
 
 
@@ -137,6 +142,41 @@ def _file_status_label(item: AudioTrackItem) -> str:
     return ""
 
 
+def _pending_change_count(item: AudioTrackItem) -> int:
+    count = len(item.proposed.changed_fields(item.original))
+    return count + 1 if item.proposed_filename else count
+
+
+def _row_status_label(item: AudioTrackItem) -> str:
+    """One phrase for the row's state, in order of what blocks the user first.
+
+    A file that changed on disk matters more than the edits queued against it,
+    and a read-only format matters more than having nothing queued at all.
+    """
+    external = _file_status_label(item)
+    if external:
+        return external
+    pending = _pending_change_count(item)
+    if pending:
+        return t("mt_status_pending_changes", n=pending)
+    if not item.metadata_editable:
+        return t("mt_status_read_only")
+    return ""
+
+
+def _row_status_rank(item: AudioTrackItem) -> tuple:
+    """Sort order: what needs attention first, then alphabetically."""
+    if _file_status_label(item):
+        rank = 0
+    elif _pending_change_count(item):
+        rank = 1
+    elif not item.metadata_editable:
+        rank = 2
+    else:
+        rank = 3
+    return (rank, -_pending_change_count(item), _fold(_row_status_label(item)))
+
+
 def _file_tooltip(item: AudioTrackItem) -> str:
     lines = [
         t("mt_file_tooltip_path", path=str(item.path)),
@@ -165,6 +205,7 @@ _SORT_KEYS = {
     COL_GENRE_NEW:    lambda t: _fold((t.proposed.genre   if t.proposed.genre   is not None else t.original.genre)   or ""),
     COL_COMMENT_CUR:  lambda t: _fold(t.original.comment or ""),
     COL_COMMENT_NEW:  lambda t: _fold((t.proposed.comment if t.proposed.comment is not None else t.original.comment) or ""),
+    COL_STATUS:       _row_status_rank,
 }
 
 
@@ -267,6 +308,8 @@ class MetadataTableModel(QAbstractTableModel):
                 return o.comment
             if col == COL_COMMENT_NEW:
                 return p.comment if p.comment is not None else ""
+            if col == COL_STATUS:
+                return _row_status_label(item)
             return None
 
         # ── BackgroundRole ────────────────────────────────────────────────────

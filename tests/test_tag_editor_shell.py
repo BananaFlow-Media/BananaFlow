@@ -199,3 +199,86 @@ def test_footer_reports_excluded_changes(panel, tmp_path):
 def test_footer_keeps_the_review_shortcut_discoverable(panel):
     assert panel._review_btn.shortcut().toString() == "Ctrl+Shift+R"
     assert "Ctrl+Shift+R" in panel._review_btn.toolTip()
+
+
+# --------------------------------------------------------------------------- #
+# Status column
+# --------------------------------------------------------------------------- #
+
+def test_status_column_reports_pending_changes(panel, tmp_path):
+    from PySide6.QtCore import Qt
+    from ui.i18n import t
+    from ui.models.metadata_table_model import COL_STATUS
+
+    tracks = _load(panel, tmp_path, count=2, changed=1)
+    labels = [
+        panel._model.data(panel._model.index(row, COL_STATUS), Qt.DisplayRole)
+        for row in range(panel._model.rowCount())
+    ]
+    assert t("mt_status_pending_changes", n=1) in labels
+    # A clean, editable row says nothing rather than inventing a state.
+    assert "" in labels
+
+
+def test_status_column_prefers_disk_state_over_pending_edits(panel, tmp_path):
+    """A file that moved under you matters more than the edits queued on it."""
+    from PySide6.QtCore import Qt
+    from ui.i18n import t
+    from ui.models.metadata_table_model import COL_STATUS
+
+    tracks = _load(panel, tmp_path, count=1, changed=1)
+    tracks[0].external_state = "changed_on_disk"
+    panel._model.refresh_all()
+
+    label = panel._model.data(panel._model.index(0, COL_STATUS), Qt.DisplayRole)
+    assert label == t("meta_external_state_changed_on_disk")
+
+
+def test_status_column_is_user_hideable(panel):
+    """Per the review it is a real column, not a fixed decoration."""
+    from ui.models.metadata_table_model import COL_STATUS, _HEADER_KEYS
+
+    assert _HEADER_KEYS[COL_STATUS] == "mt_col_status"
+    panel._set_column_hidden(COL_STATUS, True)
+    assert panel._table.isColumnHidden(COL_STATUS)
+    panel._set_column_hidden(COL_STATUS, False)
+    assert not panel._table.isColumnHidden(COL_STATUS)
+
+
+def test_status_column_sorts_attention_first(panel, tmp_path):
+    from ui.models.metadata_table_model import _row_status_rank
+
+    tracks = _load(panel, tmp_path, count=3, changed=1)
+    tracks[2].external_state = "changed_on_disk"
+
+    ranks = [_row_status_rank(track)[0] for track in tracks]
+    # changed-on-disk (0) before pending edits (1) before clean (3)
+    assert ranks[2] < ranks[0] < ranks[1]
+
+
+# --------------------------------------------------------------------------- #
+# Saved column layout must survive the new column
+# --------------------------------------------------------------------------- #
+
+def test_saved_column_order_is_widened_not_discarded(panel):
+    """An existing user's arrangement must not silently reset on upgrade."""
+    from ui.models.metadata_table_model import COLUMN_COUNT
+
+    saved_fifteen = [14, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    migrated = panel._migrate_saved_column_order(saved_fifteen)
+
+    assert len(migrated) == COLUMN_COUNT
+    assert migrated[:15] == saved_fifteen      # their order, untouched
+    assert migrated[15] == 15                  # the column they have not seen
+
+
+def test_current_column_order_passes_through_unchanged(panel):
+    from ui.models.metadata_table_model import COLUMN_COUNT
+
+    current = list(range(COLUMN_COUNT))
+    assert panel._migrate_saved_column_order(current) == current
+
+
+@pytest.mark.parametrize("bad", [[], None, [0, 0, 1], list(range(99))])
+def test_untrustworthy_column_order_falls_back_to_defaults(panel, bad):
+    assert panel._migrate_saved_column_order(bad) is None
