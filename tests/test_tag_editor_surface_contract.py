@@ -218,6 +218,46 @@ def test_every_contract_method_survives(panel):
     assert missing == [], f"Tag Editor lost method contract: {missing}"
 
 
+def test_reference_apply_and_move_dialogs_are_real_tag_editor_modals(panel, tmp_path):
+    """The prototype's modal functions are production dialogs, not mock JS."""
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QFrame
+
+    from ui.panels.metadata_editor.dialogs import (
+        ApplyConfirmationDialog,
+        ApplyResultDialog,
+        MovePathDialog,
+        PropertiesDialog,
+    )
+
+    summary = SimpleNamespace(
+        changed_fields=4,
+        filename_changes=1,
+        excluded_files=0,
+    )
+    dialogs = [
+        ApplyConfirmationDialog(
+            summary, candidate_count=2, blocker_count=0, parent=panel),
+        ApplyResultDialog(error_message="write failed", parent=panel),
+        MovePathDialog(tmp_path / "song.mp3", [tmp_path], parent=panel),
+        PropertiesDialog(
+            [("song.mp3", [("Path", str(tmp_path / "song.mp3"))])],
+            parent=panel,
+        ),
+    ]
+    try:
+        for dialog in dialogs:
+            assert dialog.property("tagEditorDialog") is True
+            assert dialog.findChild(QFrame, "dialogHeaderFrame") is not None
+        move_dialog = dialogs[2]
+        move_dialog._combo.setCurrentIndex(0)
+        move_dialog._accept_destination()
+        assert move_dialog.destination == tmp_path
+    finally:
+        for dialog in dialogs:
+            dialog.deleteLater()
+
+
 # --------------------------------------------------------------------------- #
 # 2. Signals — the entire controller-facing API
 # --------------------------------------------------------------------------- #

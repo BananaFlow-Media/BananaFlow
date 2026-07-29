@@ -8,6 +8,8 @@ used by both the header 'Select All' toggle and the per-row checkboxes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 
@@ -19,6 +21,67 @@ from ui.models.metadata_table_model import (
     COL_COMMENT_CUR, COL_COMMENT_NEW, COL_STATUS,
 )
 from ui.theme_manager import get_colors
+
+
+@dataclass(frozen=True)
+class TagEditorColors:
+    """The HTML prototype's design tokens, with a dark-theme counterpart.
+
+    The light values intentionally match
+    ``docs/design/tag-editor/BananaFlow_Tag_Editor_FINAL_COMPLETE.html``.
+    The accent remains the user's live application accent, whose fresh-install
+    default is the prototype green.
+    """
+
+    bg: str
+    surface: str
+    surface2: str
+    surface3: str
+    border: str
+    text_primary: str
+    text_secondary: str
+    text_tertiary: str
+    accent: str
+    accent_dark: str
+    accent_soft: str
+    warn: str
+    warn_soft: str
+    danger: str
+    danger_soft: str
+    info: str
+    info_soft: str
+
+
+def tag_editor_colors() -> TagEditorColors:
+    """Return the exact light prototype palette or an equivalent dark one."""
+    c = get_colors()
+    is_dark = c.bg.lower() == "#0d0d12"
+    accent_color = QColor(c.accent)
+    accent_dark = (
+        "#0B7A5F" if c.accent.upper() == "#10A37F"
+        else accent_color.darker(125).name() if accent_color.isValid()
+        else c.accent
+    )
+    if is_dark:
+        return TagEditorColors(
+            bg=c.bg, surface=c.surface, surface2=c.surface2, surface3="#191923",
+            border=c.border, text_primary=c.text_primary,
+            text_secondary=c.text_secondary, text_tertiary=c.text_tertiary,
+            accent=c.accent, accent_dark=accent_dark,
+            accent_soft=f"rgba({accent_color.red()}, {accent_color.green()}, {accent_color.blue()}, 0.14)",
+            warn="#F2A640", warn_soft="rgba(242, 166, 64, 0.14)",
+            danger="#E06B54", danger_soft="rgba(224, 107, 84, 0.14)",
+            info="#6F9FD1", info_soft="rgba(111, 159, 209, 0.14)",
+        )
+    return TagEditorColors(
+        bg="#EAEEEC", surface="#FFFFFF", surface2="#F5F7F6", surface3="#F1F4F2",
+        border="#E1E7E3", text_primary="#16201C", text_secondary="#66706A",
+        text_tertiary="#9AA49D", accent=c.accent, accent_dark=accent_dark,
+        accent_soft=f"rgba({accent_color.red()}, {accent_color.green()}, {accent_color.blue()}, 0.10)",
+        warn="#C77700", warn_soft="rgba(199, 119, 0, 0.10)",
+        danger="#B54832", danger_soft="rgba(181, 72, 50, 0.10)",
+        info="#3A6EA5", info_soft="rgba(58, 110, 165, 0.10)",
+    )
 
 
 def dim_hex(hex_color: str, factor: float = 0.85) -> str:
@@ -87,27 +150,103 @@ DEFAULT_COL_WIDTHS: dict[int, int] = {
 
 def btn_style() -> str:
     """Standard op-button style (theme-aware, called fresh each time)."""
-    c = get_colors()
+    c = tag_editor_colors()
     return (
         f"QPushButton {{ background: {c.surface}; color: {c.text_primary};"
         f"  border: 1px solid {c.border};"
-        f"  border-radius: 8px; padding: 7px 10px; text-align: left; font-size: 12px; }}"
-        f"QPushButton:hover {{ background: {c.surface2}; border-color: {c.accent}; }}"
+        f"  border-radius: 9px; padding: 6px 10px; text-align: center; font-size: 12px;"
+        f"  min-height: 18px; font-weight: 600; }}"
+        f"QPushButton:hover {{ background: {c.surface3}; border-color: {c.border}; }}"
         f"QPushButton:pressed {{ background: {c.border}; }}"
         f"QPushButton:disabled {{ background: {c.bg}; color: {c.text_tertiary}; border-color: {c.border}; }}"
     )
 
 
 def primary_btn_style() -> str:
-    c = get_colors()
-    accent_dim = dim_hex(c.accent)
+    c = tag_editor_colors()
     return (
-        f"QPushButton {{ background: {c.accent}; color: #000; font-weight: bold;"
-        f"  border-radius: 8px; padding: 7px 10px; font-size: 12px; }}"
-        f"QPushButton:hover {{ background: {accent_dim}; }}"
+        f"QPushButton {{ background: {c.accent}; color: #ffffff; font-weight: 800;"
+        f"  border: 1px solid {c.accent}; border-radius: 9px; padding: 7px 11px; font-size: 12px; }}"
+        f"QPushButton:hover {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
         f"QPushButton:disabled {{ background: {c.bg}; color: {c.text_tertiary};"
         f"  border: 1px solid {c.border}; }}"
     )
+
+
+def tag_dialog_qss() -> str:
+    """Component-level dialog styling copied from the reference prototype."""
+    c = tag_editor_colors()
+    return (
+        f"QDialog[tagEditorDialog=\"true\"] {{ background: {c.surface}; color: {c.text_primary};"
+        f" border: 1px solid {c.border}; border-radius: 16px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QWidget {{ color: {c.text_primary}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogHeaderFrame {{ background: {c.surface};"
+        f" border: none; border-bottom: 1px solid {c.border}; padding-bottom: 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogHeaderIcon {{ background: {c.accent_soft};"
+        f" color: {c.accent}; border: none; border-radius: 10px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogTitle {{ color: {c.text_primary};"
+        " font-size: 16px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogSubtitle {{ color: {c.text_secondary};"
+        " font-size: 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogSection {{ background: {c.surface};"
+        f" border: 1px solid {c.border}; border-radius: 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogSectionTitle {{ color: {c.text_primary};"
+        " font-size: 12px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogSettingRow:hover {{ background: {c.surface3};"
+        f" border-color: {c.border}; border-radius: 8px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogFooter {{ background: {c.surface};"
+        f" border: none; border-top: 1px solid {c.border}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLineEdit,"
+        f"QDialog[tagEditorDialog=\"true\"] QComboBox,"
+        f"QDialog[tagEditorDialog=\"true\"] QTextEdit,"
+        f"QDialog[tagEditorDialog=\"true\"] QPlainTextEdit,"
+        f"QDialog[tagEditorDialog=\"true\"] QSpinBox {{ background: {c.surface}; color: {c.text_primary};"
+        f" border: 1px solid {c.border}; border-radius: 8px; padding: 6px 9px; min-height: 20px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLineEdit:focus,"
+        f"QDialog[tagEditorDialog=\"true\"] QComboBox:focus,"
+        f"QDialog[tagEditorDialog=\"true\"] QTextEdit:focus {{ border-color: {c.accent}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton {{ background: {c.surface};"
+        f" color: {c.text_primary}; border: 1px solid {c.border}; border-radius: 9px;"
+        " padding: 0 11px; min-height: 34px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton:hover {{ background: {c.surface3}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton[dialogRole=\"primary\"],"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton[accentRole=\"primary\"] {{"
+        f" background: {c.accent}; color: #ffffff; border-color: {c.accent}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton[dialogRole=\"danger\"] {{"
+        f" background: {c.danger}; color: #ffffff; border-color: {c.danger}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QTableView,"
+        f"QDialog[tagEditorDialog=\"true\"] QTableWidget {{ background: {c.surface};"
+        f" alternate-background-color: {c.surface2}; color: {c.text_primary};"
+        f" border: 1px solid {c.border}; border-radius: 11px; gridline-color: {c.surface3}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QHeaderView::section {{ background: {c.surface3};"
+        f" color: {c.text_secondary}; border: none; border-bottom: 1px solid {c.border};"
+        " padding: 7px; font-size: 10.5px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QTabBar::tab {{ background: transparent;"
+        f" color: {c.text_secondary}; border: none; border-bottom: 2px solid transparent;"
+        " min-height: 34px; padding: 0 13px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QTabBar::tab:selected {{ color: {c.accent_dark};"
+        f" border-bottom-color: {c.accent}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogFormLabel {{ color: {c.text_secondary};"
+        " font-size: 11.5px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogFormValue {{ color: {c.text_primary};"
+        " font-size: 11.5px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogResultSuccess {{ background: {c.accent_soft};"
+        f" color: {c.accent_dark}; border: none; border-radius: 11px; padding: 12px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogResultWarning {{ background: {c.warn_soft};"
+        f" color: {c.warn}; border: none; border-radius: 11px; padding: 12px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogResultError {{ background: {c.danger_soft};"
+        f" color: {c.danger}; border: none; border-radius: 11px; padding: 12px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogHint {{ background: {c.surface3};"
+        f" color: {c.text_secondary}; border: none; border-radius: 9px; padding: 9px 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QScrollArea {{ background: {c.surface}; border: none; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QScrollArea > QWidget > QWidget {{ background: {c.surface}; }}"
+    )
+
+
+def mark_tag_editor_dialog(dialog) -> None:
+    """Opt a raw or StyledDialog instance into the Tag Editor modal skin."""
+    dialog.setProperty("tagEditorDialog", True)
+    dialog.setStyleSheet(dialog.styleSheet() + tag_dialog_qss())
 
 
 def op_row_qss() -> str:
@@ -116,7 +255,7 @@ def op_row_qss() -> str:
     Clean, minimal rows separated by a thin divider — no card outline or
     rounded corners — with a subtle hover highlight.
     """
-    c = get_colors()
+    c = tag_editor_colors()
     return (
         f"QFrame#metaOpRow {{ background: {c.surface}; border: 1px solid {c.border};"
         f"  border-radius: 9px; }}"

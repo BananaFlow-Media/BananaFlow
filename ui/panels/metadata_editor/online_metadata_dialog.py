@@ -8,17 +8,21 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QProgressBar, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout,
 )
+from qfluentwidgets import FluentIcon
 
 from core.metadata_lookup import (
     AcceptedFieldSelection, FieldDifference, LookupState,
 )
 from ui.i18n import t
+from ui.dialogs.styled_dialog import add_header, make_footer
+from .shared import mark_tag_editor_dialog
 
 
 class OnlineMetadataDialog(QDialog):
     """Renders provider values but never performs HTTP or proposal mutation."""
     def __init__(self, workspace, item_ids, *, search, cancel, preview, artwork, accept, parent=None) -> None:
         super().__init__(parent)
+        mark_tag_editor_dialog(self)
         self.workspace = workspace
         self.item_ids = tuple(sorted(item_ids))
         self._search = search; self._cancel = cancel; self._preview = preview
@@ -30,6 +34,12 @@ class OnlineMetadataDialog(QDialog):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 13, 16, 10)
+        layout.setSpacing(10)
+        add_header(
+            layout, t("meta_online_title"), t("meta_online_explicit_search_hint"),
+            icon=FluentIcon.SEARCH.icon(),
+        )
         self.scope_label = QLabel(t("meta_online_scope", n=len(self.item_ids)))
         layout.addWidget(self.scope_label)
         search_row = QHBoxLayout()
@@ -64,16 +74,18 @@ class OnlineMetadataDialog(QDialog):
         self.attribution.setAccessibleName(t("meta_online_attribution")); layout.addWidget(self.attribution)
         self.artwork_preview = QLabel(t("meta_online_artwork_not_selected")); self.artwork_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.artwork_preview.setMinimumHeight(96); self.artwork_preview.setAccessibleName(t("meta_online_artwork_preview")); layout.addWidget(self.artwork_preview)
-        actions = QHBoxLayout()
         self.recommended = QPushButton(t("meta_online_select_recommended")); self.recommended.setAccessibleName(t("meta_online_select_recommended")); self.recommended.clicked.connect(self._select_recommended)
         self.clear_selection = QPushButton(t("meta_online_clear_selection")); self.clear_selection.setAccessibleName(t("meta_online_clear_selection")); self.clear_selection.clicked.connect(self._clear_fields)
         self.artwork_button = QPushButton(t("meta_online_artwork_preview")); self.artwork_button.setAccessibleName(t("meta_online_artwork_preview")); self.artwork_button.clicked.connect(self._request_artwork); self.artwork_button.setEnabled(False)
         self.artwork_use = QPushButton(t("meta_online_use_artwork")); self.artwork_use.setCheckable(True); self.artwork_use.setEnabled(False); self.artwork_use.setAccessibleName(t("meta_online_use_artwork"))
         self.artwork_use.toggled.connect(self._update_add_enabled)
         self.add_button = QPushButton(t("meta_online_add_pending")); self.add_button.setAccessibleName(t("meta_online_add_pending")); self.add_button.clicked.connect(self._add_pending); self.add_button.setEnabled(False)
+        self.add_button.setProperty("accentRole", "primary")
         close = QPushButton(t("cancel_btn")); close.clicked.connect(self.reject)
-        for widget in (self.recommended, self.clear_selection, self.artwork_button, self.artwork_use, self.add_button, close): actions.addWidget(widget)
-        layout.addLayout(actions)
+        layout.addWidget(make_footer(
+            close, self.add_button,
+            leading=(self.recommended, self.clear_selection, self.artwork_button, self.artwork_use),
+        ))
 
     def _populate_terms(self) -> None:
         tracks = [self.workspace.track_for_id(identity) for identity in self.item_ids]

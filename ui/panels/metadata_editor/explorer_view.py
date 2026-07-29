@@ -46,13 +46,11 @@ from PySide6.QtWidgets import (
 )
 
 from ui.models.metadata_table_model import COL_CHECK, COL_FILENAME, COL_FILENAME_NEW
-from ui.theme_manager import get_colors
-
-from .shared import CB_SIZE, paint_check_mark
+from .shared import CB_SIZE, paint_check_mark, tag_editor_colors
 
 
 def _accent_color() -> QColor:
-    accent = QColor(get_colors().accent)
+    accent = QColor(tag_editor_colors().accent)
     if not accent.isValid():
         return QColor(0, 120, 212)
     return accent
@@ -99,7 +97,7 @@ class ExplorerFileListDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.State_Selected
         opt.state &= ~QStyle.State_HasFocus
         opt.backgroundBrush = QBrush(Qt.NoBrush)
-        text_color = QColor(get_colors().text_primary)
+        text_color = QColor(tag_editor_colors().text_primary)
         opt.palette.setColor(QPalette.Text, text_color)
         opt.palette.setColor(QPalette.HighlightedText, text_color)
 
@@ -185,7 +183,7 @@ class FilenameDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.State_HasFocus
         opt.backgroundBrush = QBrush(Qt.NoBrush)
 
-        text_color = QColor(get_colors().text_primary)
+        text_color = QColor(tag_editor_colors().text_primary)
         opt.palette.setColor(QPalette.Text, text_color)
         opt.palette.setColor(QPalette.HighlightedText, text_color)
 
@@ -381,7 +379,7 @@ class MetadataHeaderView(QHeaderView):
             return
 
         is_rtl = self.isRightToLeft()
-        colors = get_colors()
+        colors = tag_editor_colors()
         line = QColor(colors.border)
         line.setAlpha(185)
         
@@ -414,7 +412,7 @@ class MetadataHeaderView(QHeaderView):
 
     def paintSection(self, painter, rect, logicalIndex):
         if logicalIndex == COL_CHECK:
-            colors = get_colors()
+            colors = tag_editor_colors()
             painter.save()
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(colors.bg))
@@ -433,7 +431,7 @@ class MetadataHeaderView(QHeaderView):
         if not cb_rect.isValid():
             return
         
-        colors = get_colors()
+        colors = tag_editor_colors()
         is_rtl = self.isRightToLeft()
 
         # --- Step 1: Clear the text/overlap area with normal header background ---
@@ -597,15 +595,15 @@ class ExplorerDetailsView(QTableView):
 
         # Win11 Details View row geometry — 40 px tall, no grid.
         vh = self.verticalHeader()
-        vh.setDefaultSectionSize(40)
-        vh.setMinimumSectionSize(40)
+        vh.setDefaultSectionSize(42)
+        vh.setMinimumSectionSize(42)
 
         # Win11-style inset: small margins around the content area so the row
         # capsule visually floats inside the panel (left/right/bottom gutter).
-        self.setViewportMargins(4, 0, 4, 4)
+        self.setViewportMargins(0, 0, 0, 0)
 
         # Make the empty area follow the theme by default
-        bg = QColor(get_colors().bg)
+        bg = QColor(tag_editor_colors().surface)
         pal = self.viewport().palette()
         pal.setColor(QPalette.Base, bg)
         pal.setColor(QPalette.Window, bg)
@@ -619,7 +617,7 @@ class ExplorerDetailsView(QTableView):
             _tm.theme_changed.connect(self._refresh_viewport_palette)
 
     def _refresh_viewport_palette(self) -> None:
-        bg = QColor(get_colors().bg)
+        bg = QColor(tag_editor_colors().surface)
         pal = self.viewport().palette()
         pal.setColor(QPalette.Base, bg)
         pal.setColor(QPalette.Window, bg)
@@ -637,7 +635,7 @@ class ExplorerDetailsView(QTableView):
     def paintEvent(self, event) -> None:
         # Fill the entire viewport with the theme background first
         painter = QPainter(self.viewport())
-        painter.fillRect(self.viewport().rect(), QColor(get_colors().bg))
+        painter.fillRect(self.viewport().rect(), QColor(tag_editor_colors().surface))
         
         # Draw custom selection/hover row backgrounds before drawing cells on top
         model = self.model()
@@ -991,17 +989,17 @@ class ExplorerDetailsView(QTableView):
         no inter-row separator lines. ``hover_border`` is transparent too —
         Win11 hover has fill only, no outline.
         """
-        colors = get_colors()
-        is_dark = QColor(colors.bg).lightness() < 128
-        bg = QColor(colors.bg)
+        colors = tag_editor_colors()
+        is_dark = QColor(colors.surface).lightness() < 128
+        bg = QColor(colors.surface)
         transparent = QColor(0, 0, 0, 0)
         accent = _accent_color()
         if is_dark:
             # Selected fill at ~50 % opacity over dark bg gives clearly visible blue.
-            sel_fill = _with_alpha(accent, 60)
-            sel_fill_ia = _with_alpha(accent, 35)   # inactive
-            sel_border = _with_alpha(accent, 220)
-            sel_border_ia = _with_alpha(accent, 90)
+            sel_fill = _with_alpha(accent, 32)
+            sel_fill_ia = _with_alpha(accent, 24)
+            sel_border = transparent
+            sel_border_ia = transparent
             hover_fill = QColor(255, 255, 255, 18)
             return {
                 "base": bg, "row_alt": bg,
@@ -1009,21 +1007,21 @@ class ExplorerDetailsView(QTableView):
                 "selected": sel_fill, "selected_inactive": sel_fill_ia,
                 "selected_border": sel_border,
                 "selected_inactive_border": sel_border_ia,
-                "separator": transparent,
+                "separator": QColor(colors.border),
             }
         # Light mode
-        sel_fill = _with_alpha(accent, 60)
-        sel_fill_ia = _with_alpha(accent, 35)   # inactive
-        sel_border = _with_alpha(accent.darker(145), 180)
-        sel_border_ia = _with_alpha(accent.darker(145), 90)
-        hover_fill = QColor(0, 0, 0, 12)
+        sel_fill = _with_alpha(accent, 19)
+        sel_fill_ia = _with_alpha(accent, 16)
+        sel_border = transparent
+        sel_border_ia = transparent
+        hover_fill = QColor("#F8FAF9")
         return {
             "base": bg, "row_alt": bg,
             "hover": hover_fill, "hover_border": transparent,
             "selected": sel_fill, "selected_inactive": sel_fill_ia,
             "selected_border": sel_border,
             "selected_inactive_border": sel_border_ia,
-            "separator": transparent,
+            "separator": QColor("#EEF2EF"),
         }
 
     def _content_row_rect(self, row_rect: QRect, row: int) -> QRect:
@@ -1111,7 +1109,7 @@ class ExplorerDetailsView(QTableView):
                 return index.column() == logical
         return False
 
-    # IDE-style details view geometry — inset from row edges, square corners.
+    # Prototype details-table geometry: full-width flat rows.
     _CAPSULE_INSET_X = 0
     _CAPSULE_INSET_Y = 2
     _CAPSULE_RADIUS  = 0
@@ -1153,11 +1151,23 @@ class ExplorerDetailsView(QTableView):
             painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(colors[fill_key]))
         painter.drawRect(capsule)
+        if is_selected:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(_accent_color())
+            if QApplication.layoutDirection() == Qt.RightToLeft:
+                painter.drawRect(capsule.right() - 3, capsule.top(), 4, capsule.height())
+            else:
+                painter.drawRect(capsule.left(), capsule.top(), 4, capsule.height())
         painter.restore()
 
     def _paint_explorer_row_separator(self, painter: QPainter, row_rect: QRect) -> None:
-        # Win11 Details View has no inter-row separator lines.
-        return
+        color = self._explorer_palette()["separator"]
+        if color.alpha() <= 0:
+            return
+        painter.save()
+        painter.setPen(QPen(color, 1))
+        painter.drawLine(row_rect.left(), row_rect.bottom(), row_rect.right(), row_rect.bottom())
+        painter.restore()
 
     def _is_empty_viewport_area(self, pos: QPoint) -> bool:
         if not self.viewport().rect().contains(pos):

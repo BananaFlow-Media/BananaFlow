@@ -171,10 +171,21 @@ class TreeOpsMixin:
     def _move_tree_path(self, path: Path) -> None:
         if not self._root_folder:
             return
-        folder = QFileDialog.getExistingDirectory(self, t("meta_move_choose_folder"), str(self._root_folder))
-        if not folder:
+        from .dialogs import MovePathDialog
+        destinations = []
+        for folder in sorted(self._folder_items, key=lambda value: str(value).casefold()):
+            if folder == path or folder == path.parent:
+                continue
+            try:
+                folder.relative_to(path)
+                continue
+            except ValueError:
+                pass
+            destinations.append(folder)
+        dialog = MovePathDialog(path, destinations, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.destination is None:
             return
-        destination = Path(folder) / path.name
+        destination = Path(dialog.destination) / path.name
         self._on_tree_item_moved(path, destination)
 
     def _copy_tree_path(self, path: Path) -> None:
@@ -189,7 +200,24 @@ class TreeOpsMixin:
         except FileOperationError as exc:
             prompts.show_warning(self, t("meta_error_title"), str(exc))
             return
-        prompts.show_info(self, t("meta_properties"), t("meta_properties_item", name=props.path.name, path=str(props.path), size=isolate_number(f"{props.size_bytes:,}"), modified=isolate_number(display_timestamp(props.modified_at))))
+        from .dialogs import PropertiesDialog
+        rows = [
+            (t("meta_property_path"), str(props.path)),
+            (t("meta_property_format"), t("meta_property_folder") if props.is_directory else path.suffix.lstrip(".").upper()),
+            (t("meta_property_size"), isolate_number(f"{props.size_bytes:,}")),
+            (t("meta_property_modified"), isolate_number(display_timestamp(props.modified_at))),
+        ]
+        PropertiesDialog(
+            [(props.path.name, rows)],
+            self,
+            open_callback=(
+                None if props.is_directory
+                else lambda: self._perform_path_operation(
+                    [path], self._file_operations.open_file)),
+            reveal_callback=lambda: self._perform_path_operation(
+                [path], self._file_operations.reveal_in_explorer),
+            copy_callback=lambda: self._copy_tree_path(path),
+        ).exec()
 
     def _perform_path_operation(self, paths: list[Path], operation) -> None:
         errors: list[str] = []

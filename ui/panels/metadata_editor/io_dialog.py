@@ -23,8 +23,11 @@ from core.preset_transfer import (
 )
 from core.tag_action_presets import PresetStore
 from core.tag_actions import builtin_registry
+from qfluentwidgets import FluentIcon
+from ui.dialogs.styled_dialog import add_header, make_footer
 from ui.i18n import current_language, t
 from utils.paths import get_tag_action_presets_path
+from .shared import mark_tag_editor_dialog
 
 
 _OPERATIONS = (
@@ -45,6 +48,7 @@ class MetadataIODialog(QDialog):
                  ordered_item_ids=(), problem_issue_ids=(), parent=None,
                  preset_path: Path | None = None) -> None:
         super().__init__(parent)
+        mark_tag_editor_dialog(self)
         self.setWindowTitle(t("meta_io_title"))
         self.setAccessibleName(t("meta_io_title"))
         self.resize(980, 680)
@@ -69,9 +73,10 @@ class MetadataIODialog(QDialog):
         )
 
         layout = QVBoxLayout(self)
-        title = QLabel(t("meta_io_title")); title.setStyleSheet("font-size:18px;font-weight:600")
-        subtitle = QLabel(t("meta_io_subtitle")); subtitle.setWordWrap(True)
-        layout.addWidget(title); layout.addWidget(subtitle)
+        layout.setContentsMargins(16, 13, 16, 10)
+        layout.setSpacing(10)
+        add_header(layout, t("meta_io_title"), t("meta_io_subtitle"),
+                   icon=FluentIcon.DOCUMENT.icon())
         splitter = QSplitter(Qt.Horizontal, self)
         self.operation_list = QListWidget(splitter)
         self.operation_list.setObjectName("metadataIOOperations")
@@ -99,13 +104,11 @@ class MetadataIODialog(QDialog):
         self.operation_list.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.operation_list.setCurrentRow(0)
 
-        bottom = QHBoxLayout()
         self.status_label = QLabel(t("meta_io_state_initial"))
         self.status_label.setObjectName("metadataIOStatus")
         self.status_label.setWordWrap(True)
-        bottom.addWidget(self.status_label, 1)
         close = QPushButton(t("close")); close.setAccessibleName(t("close")); close.clicked.connect(self.reject)
-        bottom.addWidget(close); layout.addLayout(bottom)
+        layout.addWidget(make_footer(close, leading=(self.status_label,)))
 
     @staticmethod
     def _scope_combo(*, playlist: bool = False) -> QComboBox:

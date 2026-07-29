@@ -63,6 +63,33 @@ def _load(panel, tmp_path, *, count=2, changed=0):
 # Toolbar
 # --------------------------------------------------------------------------- #
 
+def test_reference_light_palette_tokens_are_exact(panel, monkeypatch):
+    from types import SimpleNamespace
+    from ui.panels.metadata_editor import shared
+
+    monkeypatch.setattr(
+        shared,
+        "get_colors",
+        lambda: SimpleNamespace(bg="#fbfaff", accent="#10A37F"),
+    )
+
+    colors = shared.tag_editor_colors()
+    assert (
+        colors.bg,
+        colors.surface,
+        colors.surface2,
+        colors.surface3,
+        colors.border,
+        colors.text_primary,
+        colors.text_secondary,
+        colors.text_tertiary,
+        colors.accent,
+        colors.accent_dark,
+    ) == (
+        "#EAEEEC", "#FFFFFF", "#F5F7F6", "#F1F4F2", "#E1E7E3",
+        "#16201C", "#66706A", "#9AA49D", "#10A37F", "#0B7A5F",
+    )
+
 def test_more_menu_hosts_the_data_actions(panel):
     """Import/export, backups and restore left the bar but stayed reachable."""
     hosted = {
@@ -106,8 +133,8 @@ def test_rescan_is_disabled_until_a_folder_is_loaded(panel, tmp_path):
     assert panel._rescan_action.isEnabled()
 
 
-def test_scanning_is_always_recursive(panel, tmp_path, monkeypatch):
-    """Subfolders are always included; there is no toggle to get this wrong."""
+def test_subfolder_toggle_controls_browse_and_rescan(panel, tmp_path, monkeypatch):
+    """The permanent toolbar checkbox has the prototype's real scan effect."""
     from PySide6.QtWidgets import QFileDialog
 
     scans = []
@@ -118,9 +145,11 @@ def test_scanning_is_always_recursive(panel, tmp_path, monkeypatch):
     panel._on_browse()
 
     _load(panel, tmp_path)
+    panel._subdirs_check.setChecked(False)
     panel._on_scan()
 
-    assert scans == [True, True]
+    assert scans == [True, False]
+    assert panel._include_subdirs is False
 
 
 def test_path_chip_stays_ltr_and_shows_the_full_path_on_hover(panel, tmp_path):
@@ -531,6 +560,29 @@ def test_layout_holds_at_supported_window_sizes(panel, tmp_path, width, height):
         assert panel.width() <= width
     finally:
         panel.hide()
+
+
+def test_responsive_panes_restore_after_returning_from_narrow_width(panel, tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    _load(panel, tmp_path, count=3)
+    panel.resize(1440, 900)
+    panel.show()
+    QApplication.processEvents()
+    panel._apply_body_sizes([220, 678, 370], save=False)
+
+    panel.resize(980, 680)
+    QApplication.processEvents()
+    narrow = panel._body_splitter.sizes()
+    assert narrow[0] <= panel._TREE_RAIL_WIDTH + 1
+    assert narrow[2] <= 300
+
+    panel.resize(1440, 900)
+    QApplication.processEvents()
+    wide = panel._body_splitter.sizes()
+    assert wide[0] >= panel._TREE_OPEN_MIN
+    assert wide[2] >= panel._INSPECTOR_OPEN_MIN
+    panel.hide()
 
 
 def test_collapsing_a_pane_gives_its_width_to_the_table(panel, tmp_path):

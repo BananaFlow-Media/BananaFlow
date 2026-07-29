@@ -12,6 +12,9 @@ from core.file_refresh_service import ConflictResolutionAction
 from ui import a11y
 from ui.direction import isolate_ltr, isolate_value_for_field
 from ui.i18n import t
+from ui.panels.metadata_editor.shared import mark_tag_editor_dialog
+from ui.dialogs.styled_dialog import add_header
+from qfluentwidgets import FluentIcon
 
 #: Columns holding a raw field value.  What they contain depends on the field:
 #: a filename or codec must read left-to-right inside Hebrew, but a Hebrew
@@ -22,6 +25,7 @@ _VALUE_COLUMNS = frozenset({1, 2, 3})
 class ExternalChangeReviewDialog(QDialog):
     def __init__(self, conflict, parent=None) -> None:
         super().__init__(parent)
+        mark_tag_editor_dialog(self)
         self.conflict = conflict
         self.selected_action = ConflictResolutionAction.CANCEL
         self.setWindowTitle(t("meta_external_review_title"))
@@ -35,7 +39,9 @@ class ExternalChangeReviewDialog(QDialog):
             path=isolate_ltr(conflict.observed_path.name)))
         description.setWordWrap(True)
         description.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(description)
+        add_header(layout, t("meta_external_review_title"), description.text(),
+                   icon=FluentIcon.SYNC.icon())
+        description.setVisible(False)
 
         classification = QLabel(t(
             "meta_external_safe_rebase" if conflict.safe_rebase

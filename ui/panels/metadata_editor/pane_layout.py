@@ -150,6 +150,8 @@ class PaneLayoutMixin:
             self._tree_frame.setMaximumWidth(self._TREE_RAIL_WIDTH if left_collapsed else 16777215)
         if hasattr(self, "_inspector_content"):
             self._inspector_content.setVisible(not right_collapsed)
+        if hasattr(self, "_inspector_rail"):
+            self._inspector_rail.setVisible(right_collapsed)
         if hasattr(self, "_inspector_shell"):
             self._inspector_shell.setMaximumWidth(self._INSPECTOR_RAIL_WIDTH if right_collapsed else 16777215)
         self._refresh_tool_button_states()

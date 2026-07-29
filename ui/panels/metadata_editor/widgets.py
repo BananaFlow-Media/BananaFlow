@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
 
 
@@ -32,6 +33,25 @@ class ArtworkDropPreview(QLabel):
         else:
             event.ignore()
 
+
+class VerticalLabel(QLabel):
+    """Compact vertical caption used by the prototype's collapsed panes."""
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.transpose()
+        return hint
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.transpose()
+        return hint
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.translate(self.width(), 0)
+        painter.rotate(90)
+        painter.drawText(0, 0, self.height(), self.width(), self.alignment(), self.text())
 
 class OpRow(QFrame):
     """Clickable, card-style action row with a wrapping label.

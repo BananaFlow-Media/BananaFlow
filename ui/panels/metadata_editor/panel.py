@@ -47,6 +47,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QComboBox,
     QFileDialog,
@@ -56,6 +57,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMenu,
     QProgressBar,
@@ -114,9 +116,16 @@ from ui.controllers.tag_editor_workspace_state import TagEditorWorkspaceState
 from ui.controllers.tag_editor_navigation_state import TagEditorNavigationState
 from ui.services.file_operation_service import FileOperationError, FileOperationService
 from ui.theme_manager import get_colors
+from ui.dialogs.styled_dialog import add_header
 from ui.workers.artwork_thumbnail_worker import ArtworkThumbnailCache, ArtworkThumbnailWorker
 
-from .dialogs import AutoArrangeSettingsDialog, CleanSettingsDialog, MoreColumnsDialog
+from .dialogs import (
+    ApplyConfirmationDialog,
+    ApplyResultDialog,
+    AutoArrangeSettingsDialog,
+    CleanSettingsDialog,
+    MoreColumnsDialog,
+)
 from .action_dialog import TagActionDialog
 from .action_diagnostics import format_action_diagnostic
 from .online_metadata_dialog import OnlineMetadataDialog
@@ -137,13 +146,15 @@ from .shared import (
     bold_font,
     btn_style,
     dim_hex,
+    mark_tag_editor_dialog,
     op_row_qss,
     primary_btn_style,
+    tag_editor_colors,
 )
 from .tree import ExplorerTreeWidget
 # ArtworkDropPreview is re-exported: it used to be defined here, and external
 # importers (including tests) still reach for it on this module.
-from .widgets import ArtworkDropPreview, OpRow
+from .widgets import ArtworkDropPreview, OpRow, VerticalLabel
 
 # Panel behaviour split across mixins purely to keep each file readable. They
 # are not independent components: every method still runs on the panel and
@@ -270,16 +281,17 @@ class MetadataEditorPanel(
     online_accept_requested = Signal(object)
     delete_files_requested      = Signal(list)           # list[Path] (Delete key)
     manual_refresh_requested    = Signal()
+    scan_cancel_requested       = Signal()
     conflict_resolution_requested = Signal(object, str, object)
 
-    _TREE_RAIL_WIDTH = 38
-    _INSPECTOR_RAIL_WIDTH = 40
-    _TREE_OPEN_MIN = 210
+    _TREE_RAIL_WIDTH = 42
+    _INSPECTOR_RAIL_WIDTH = 58
+    _TREE_OPEN_MIN = 160
     _TABLE_OPEN_MIN = 340
-    _INSPECTOR_OPEN_MIN = 240
+    _INSPECTOR_OPEN_MIN = 270
     _COLLAPSE_DRAG_MARGIN = 46
 
-    _DEFAULT_SPLITTER_SIZES = [240, 720, 280]
+    _DEFAULT_SPLITTER_SIZES = [220, 688, 370]
 
     def __init__(self, config: Optional[AppConfig] = None, parent=None) -> None:
         super().__init__(parent)
@@ -337,6 +349,8 @@ class MetadataEditorPanel(
         self._right_collapsed = False
         self._last_tree_width = self._DEFAULT_SPLITTER_SIZES[0]
         self._last_inspector_width = self._DEFAULT_SPLITTER_SIZES[2]
+        self._responsive_mode = "wide"
+        self._responsive_forced_tree_collapse = False
         self._active_inspector_tool = 0
         self._inspector_rail_buttons: dict[str, QPushButton] = {}
         self._inspector_mode_buttons: dict[str, QPushButton] = {}
@@ -345,6 +359,7 @@ class MetadataEditorPanel(
         self._is_scanning = False
         self._is_applying = False
         self._is_restoring = False
+        self._include_subdirs = True
         self._op_rows: list[OpRow] = []
         self._checked_scope_buttons: list[QPushButton] = []
         self._selection_scope_buttons: list[QPushButton] = []
@@ -440,6 +455,7 @@ class MetadataEditorPanel(
 
     def _build(self) -> None:
         root_layout = QVBoxLayout(self)
+        root_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
@@ -469,20 +485,14 @@ class MetadataEditorPanel(
 
     def _apply_theme(self) -> None:
         """Re-apply theme-dependent styles for the toolbar, tree, table, buttons."""
-        c = get_colors()
+        c = tag_editor_colors()
         accent = c.accent
         accent_dim = dim_hex(accent)
         self.setStyleSheet(
-            "QWidget#metadataEditorPage { border: none; border-radius: 0px; }"
-            "QWidget#metadataEditorPage QFrame,"
-            "QWidget#metadataEditorPage QGroupBox,"
-            "QWidget#metadataEditorPage QLineEdit,"
-            "QWidget#metadataEditorPage QTableView,"
-            "QWidget#metadataEditorPage QTreeWidget,"
-            "QWidget#metadataEditorPage QScrollArea { border-radius: 0px; }"
-            "QWidget#metadataEditorPage QPushButton { border-radius: 8px; }"
-            "QWidget#metadataEditorPage QTreeWidget::item { border-radius: 0px; }"
-            "QWidget#metadataEditorPage QCheckBox::indicator { border-radius: 0px; }"
+            f"QWidget#metadataEditorPage {{ background: {c.bg}; color: {c.text_primary};"
+            " border: none; border-radius: 0px; font-family: 'Segoe UI'; font-size: 13px; }}"
+            f"QWidget#metadataEditorPage QToolTip {{ background: {c.surface}; color: {c.text_primary};"
+            f" border: 1px solid {c.border}; border-radius: 8px; padding: 5px 8px; }}"
         )
 
         # Toolbar
@@ -534,20 +544,7 @@ class MetadataEditorPanel(
         auto_text = accent if accent_color.isValid() else c.text_primary
         if hasattr(self, "_auto_container"):
             self._auto_container.setStyleSheet(
-                "QFrame#autoOrderSplitButton {"
-                f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-                f" stop:0 {accent_glow_1}, stop:0.46 {accent_glow_2}, stop:1 {accent_glow_3});"
-                f" border: 1px solid {accent_border}; border-radius: 7px;"
-                "}"
-                "QFrame#autoOrderSplitButton:hover {"
-                f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-                f" stop:0 {accent_glow_hover_1}, stop:0.46 {accent_glow_hover_2}, stop:1 {accent_glow_hover_3});"
-                "}"
-                "QFrame#autoOrderSplitButton:disabled {"
-                f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-                f" stop:0 rgba({r}, {g}, {b}, 0.05), stop:0.46 rgba({r}, {g}, {b}, 0.08), stop:1 rgba({r}, {g}, {b}, 0.14));"
-                f" border: 1px solid rgba({r}, {g}, {b}, 0.24); border-radius: 7px;"
-                "}"
+                "QFrame#autoOrderSplitButton { background: transparent; border: none; }"
             )
         if hasattr(self, "_auto_separator"):
             self._auto_separator.setStyleSheet(f"background: {accent_border}; border: none;")
@@ -555,16 +552,16 @@ class MetadataEditorPanel(
             self._auto_btn.setIcon(self._make_magic_wand_icon(color=auto_text))
             self._auto_cfg_btn.setIcon(FluentIcon.SETTING.icon(color=auto_text))
             self._auto_btn.setStyleSheet(
-                f"QToolButton {{ background: transparent; border: none; color: {auto_text};"
-                " font-size: 12px; font-weight: 700; padding: 3px 6px 4px 6px; }"
-                f"QToolButton:hover {{ background: {accent_soft}; }}"
-                f"QToolButton:pressed {{ background: {accent_magic_2}; }}"
-                f"QToolButton:disabled {{ color: {auto_text}; }}"
+                f"QToolButton {{ background: {c.accent}; color: #ffffff; border: 1px solid {c.accent};"
+                " border-radius: 9px; padding: 0 10px; font-size: 11.5px; font-weight: 800; }"
+                f"QToolButton:hover {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
+                f"QToolButton:disabled {{ background: {c.surface3}; color: {c.text_tertiary}; border-color: {c.border}; }}"
             )
             self._auto_cfg_btn.setStyleSheet(
-                f"QToolButton {{ background: transparent; border: none; color: {auto_text}; padding: 0; }}"
-                f"QToolButton:hover {{ background: {accent_soft}; }}"
-                f"QToolButton:pressed {{ background: {accent_magic_2}; }}"
+                f"QToolButton {{ background: {c.surface}; color: {c.text_primary}; border: 1px solid {c.border};"
+                " border-radius: 9px; padding: 0 10px; font-size: 11px; font-weight: 700; }"
+                f"QToolButton:hover {{ background: {c.surface3}; }}"
+                f"QToolButton:disabled {{ color: {c.text_tertiary}; }}"
             )
         if hasattr(self, "_dupes_btn"):
             self._dupes_btn.setStyleSheet(btn_style())
@@ -577,19 +574,19 @@ class MetadataEditorPanel(
                 f"QSplitter::handle:pressed {{ background: {accent_dim}; }}"
             )
         if hasattr(self, "_tree_rail"):
-            rail_qss = f"QFrame {{ background: {c.surface}; border-right: 1px solid {c.border}; border-radius: 0px; }}"
+            rail_qss = f"QFrame {{ background: {c.surface2}; border-right: 1px solid {c.border}; border-radius: 0px; }}"
             self._tree_rail.setStyleSheet(rail_qss)
         if hasattr(self, "_tree_frame"):
             self._tree_frame.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface2}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_tree_body"):
             self._tree_body.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface2}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_table_frame"):
             self._table_frame.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface2}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_table_empty_page"):
             empty_qss = f"QWidget {{ background: {c.bg}; color: {c.text_primary}; }}"
@@ -599,10 +596,11 @@ class MetadataEditorPanel(
                 self._table_error_page.setStyleSheet(empty_qss)
         if hasattr(self, "_empty_state_card"):
             card_qss = (
-                "QFrame { background: transparent; border: none; border-radius: 0px; }"
+                f"QFrame#metadataStateCard {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 13px; }}"
                 "QLabel { background: transparent; border: none; }"
             )
-            title_qss = f"color: {c.text_primary}; font-size: 15px; font-weight: bold;"
+            title_qss = f"color: {c.text_primary}; font-size: 20px; font-weight: 800;"
             body_qss = f"color: {c.text_secondary}; font-size: 13px;"
             self._empty_state_card.setStyleSheet(card_qss)
             self._loading_state_card.setStyleSheet(card_qss)
@@ -626,30 +624,30 @@ class MetadataEditorPanel(
             )
         if hasattr(self, "_inspector_shell"):
             self._inspector_shell.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border-left: 1px solid {c.border}; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface}; border-left: 1px solid {c.border}; border-radius: 0px; }}"
             )
         if hasattr(self, "_inspector_content"):
             self._inspector_content.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_inspector_header"):
             self._inspector_header.setStyleSheet(
-                f"QFrame {{ background: {c.surface}; border-bottom: 1px solid {c.border}; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface3}; border-bottom: 1px solid {c.border}; border-radius: 0px; }}"
             )
         self._refresh_tool_button_states()
 
         # Tree widget
         if hasattr(self, "_tree"):
             self._tree.setStyleSheet(
-                f"QTreeWidget {{ border: none; border-radius: 0; background: {c.bg}; color: {c.text_primary}; }}"
-                f"QTreeWidget::viewport {{ background: {c.bg}; }}"
-                f"QTreeWidget::item {{ padding: 4px 3px; border-radius: 0px; }}"
+                f"QTreeWidget {{ border: none; border-radius: 0; background: {c.surface2}; color: {c.text_primary}; }}"
+                f"QTreeWidget::viewport {{ background: {c.surface2}; }}"
+                f"QTreeWidget::item {{ min-height: 28px; padding: 0 7px; border-radius: 7px; }}"
                 f"QTreeWidget::item:selected {{ background: {accent}33; color: {c.text_primary}; }}"
-                f"QTreeWidget::item:hover {{ background: {c.surface2}; }}"
+                f"QTreeWidget::item:hover {{ background: {c.surface3}; }}"
             )
             tree_pal = self._tree.viewport().palette()
-            tree_pal.setColor(QPalette.Base, QColor(c.bg))
-            tree_pal.setColor(QPalette.Window, QColor(c.bg))
+            tree_pal.setColor(QPalette.Base, QColor(c.surface2))
+            tree_pal.setColor(QPalette.Window, QColor(c.surface2))
             self._tree.viewport().setPalette(tree_pal)
             self._tree.viewport().setAutoFillBackground(True)
 
@@ -686,11 +684,11 @@ class MetadataEditorPanel(
 
         # Also explicitly paint the table viewport so the empty area follows theme
         if hasattr(self, "_table"):
-            tc = get_colors()
-            self._table.viewport().setStyleSheet(f"background: {tc.bg};")
+            tc = tag_editor_colors()
+            self._table.viewport().setStyleSheet(f"background: {tc.surface};")
             pal = self._table.viewport().palette()
-            pal.setColor(QPalette.Base, QColor(tc.bg))
-            pal.setColor(QPalette.Window, QColor(tc.bg))
+            pal.setColor(QPalette.Base, QColor(tc.surface))
+            pal.setColor(QPalette.Window, QColor(tc.surface))
             self._table.viewport().setPalette(pal)
             self._table.viewport().setAutoFillBackground(True)
             self._table.viewport().update()
@@ -701,101 +699,190 @@ class MetadataEditorPanel(
         for btn in getattr(self, "_checked_scope_buttons", []):
             btn.setStyleSheet(primary_qss)
         for btn in getattr(self, "_selection_scope_buttons", []):
-            btn.setStyleSheet(primary_qss if btn.property("accentRole") == "primary" else btn_style())
+            if btn.property("accentRole") == "primary":
+                style = primary_qss
+            elif btn.property("dangerRole"):
+                c = tag_editor_colors()
+                style = (
+                    btn_style()
+                    + f"QPushButton {{ color: {c.danger}; border-color: {c.danger}; }}"
+                    + f"QPushButton:hover {{ background: {c.danger_soft}; border-color: {c.danger}; }}"
+                )
+            else:
+                style = btn_style()
+            btn.setStyleSheet(style)
         if hasattr(self, "_table_info_lbl"):
             self._refresh_checked_scope_state()
             self._refresh_selection_scope_state()
 
     def _apply_shell_theme(self, c) -> None:
-        """Theme the pieces the redesign introduced.
-
-        Kept separate from _apply_theme's original body only so the two are
-        legible; it runs on every theme change exactly the same way.
-        """
-        accent = QColor(c.accent)
-        accent_soft = "transparent"
-        if accent.isValid():
-            r, g, b, _ = accent.getRgb()
-            accent_soft = f"rgba({r}, {g}, {b}, 0.12)"
-
+        """Apply the HTML prototype's component-level tokens."""
         if hasattr(self, "_path_chip"):
             self._path_chip.setStyleSheet(
-                f"QLabel {{ background: {c.surface2}; color: {c.text_secondary};"
-                f" border-radius: 8px; padding: 5px 9px; font-size: 11px; }}"
-            )
-        if hasattr(self, "_monitoring_status"):
-            self._monitoring_status.setStyleSheet(
-                f"QLabel {{ background: {accent_soft}; color: {c.accent};"
-                f" border-radius: 7px; padding: 4px 8px;"
-                f" font-size: 11px; font-weight: bold; }}"
-            )
+                f"QLabel {{ background: {c.surface3}; color: {c.text_secondary};"
+                " border: none; border-radius: 9px; padding: 0 10px; font-size: 12px; }}")
+        if hasattr(self, "_subdirs_check"):
+            self._subdirs_check.setStyleSheet(
+                f"QCheckBox {{ color: {c.text_secondary}; spacing: 7px; font-weight: 600; }}"
+                f"QCheckBox::indicator {{ width: 16px; height: 16px; background: {c.surface};"
+                f" border: 1px solid {c.border}; border-radius: 5px; }}"
+                f"QCheckBox::indicator:checked {{ background: {c.accent}; border-color: {c.accent}; }}")
+        if hasattr(self, "_monitor_badge"):
+            self._monitor_badge.setStyleSheet(
+                f"QFrame#tagEditorMonitorBadge {{ background: {c.accent_soft}; border: none;"
+                " border-radius: 8px; }}"
+                f"QLabel {{ background: transparent; color: {c.accent_dark}; border: none;"
+                " padding: 0; font-size: 11px; font-weight: 800; }}")
+        if hasattr(self, "_search_edit"):
+            self._search_edit.setStyleSheet(
+                f"QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 10px; padding: 0 9px; }}"
+                f"QLineEdit:focus {{ border: 1px solid {c.accent}; }}")
+        if hasattr(self, "_more_btn"):
+            self._more_btn.setStyleSheet(self._toolbar_button_style("neutral"))
+        if hasattr(self, "_tree_header"):
+            self._tree_header.setStyleSheet(
+                f"QFrame#tagEditorTreeHeader {{ background: {c.surface2};"
+                f" border-bottom: 1px solid {c.border}; border-radius: 0; }}"
+                f"QToolButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 8px; padding: 0; }}"
+                f"QToolButton:hover {{ background: {c.surface3}; }}")
+        if hasattr(self, "_tree_hint"):
+            self._tree_hint.setStyleSheet(
+                f"QLabel#tagEditorTreeHint {{ background: {c.surface3}; color: {c.text_secondary};"
+                " border: none; border-radius: 9px; margin: 8px 5px; font-size: 10.5px; }}")
+
         if hasattr(self, "_footer_bar"):
             self._footer_bar.setStyleSheet(
-                f"QFrame#tagEditorFooter {{ background: {c.surface};"
-                f" border: none; border-radius: 0px; }}"
-            )
+                f"QFrame#tagEditorFooter {{ background: {c.surface}; border: none;"
+                " border-radius: 0px; }}")
             self._footer_sep.setStyleSheet(f"background: {c.border}; border: none;")
             self._footer_count.setStyleSheet(
-                f"QLabel {{ background: {accent_soft}; color: {c.accent};"
-                f" border-radius: 9px; font-weight: bold; font-size: 13px; }}"
-            )
+                f"QLabel {{ background: {c.accent_soft}; color: {c.accent}; border-radius: 9px;"
+                " font-weight: 900; font-size: 13px; }}")
             self._footer_title.setStyleSheet(
-                f"color: {c.text_primary}; font-size: 12px; font-weight: bold;")
-            self._footer_desc.setStyleSheet(
-                f"color: {c.text_secondary}; font-size: 11px;")
+                f"color: {c.text_primary}; font-size: 12px; font-weight: 800;")
+            self._footer_desc.setStyleSheet(f"color: {c.text_secondary}; font-size: 10.5px;")
+
+        if hasattr(self, "_table_card"):
+            self._table_card.setStyleSheet(
+                f"QFrame#tagEditorTableCard {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 13px; }}")
         if hasattr(self, "_table_status_bar"):
             self._table_status_bar.setStyleSheet(
-                f"QFrame#tagEditorTableStatus {{ background: {c.surface2};"
+                f"QFrame#tagEditorTableStatus {{ background: {c.surface3};"
                 f" border-top: 1px solid {c.border}; border-radius: 0px; }}"
-                f"QLabel {{ color: {c.text_secondary}; font-size: 11px; }}"
-            )
+                f"QLabel {{ color: {c.text_secondary}; font-size: 10.5px; font-weight: 600; }}")
+        if hasattr(self, "_nav_host"):
+            nav_qss = (
+                f"QToolButton, QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; }}"
+                f"QToolButton:hover, QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QToolButton#tagEditorExcludedChip {{ padding: 0 8px; border-radius: 7px;"
+                " font-size: 10.5px; font-weight: 800; }}"
+                f"QToolButton#tagEditorStaleChip {{ padding: 0 8px; border-radius: 7px;"
+                f" background: {c.warn_soft}; color: {c.warn}; border-color: {c.warn};"
+                " font-size: 10.5px; font-weight: 800; }}")
+            self._nav_host.setStyleSheet(nav_qss)
+        if hasattr(self, "_zoom_frame"):
+            self._zoom_frame.setStyleSheet(
+                f"QFrame#tagEditorZoom {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 8px; }}"
+                f"QPushButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 6px; padding: 0; }}"
+                f"QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QLineEdit {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " padding: 0; font-size: 10.5px; font-weight: 800; }}")
+
+        if hasattr(self, "_inspector_header"):
+            self._inspector_header.setStyleSheet(
+                f"QFrame#tagEditorInspectorHeader {{ background: {c.surface3};"
+                f" border-bottom: 1px solid {c.border}; border-radius: 0; }}"
+                f"QToolButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 8px; padding: 0; }}"
+                f"QToolButton:hover {{ background: {c.surface}; }}")
         if getattr(self, "_inspector_mode_buttons", None):
             mode_qss = (
-                f"QPushButton {{ background: transparent; color: {c.text_secondary};"
-                f" border: none; border-radius: 7px; padding: 5px 8px;"
-                f" font-weight: bold; font-size: 12px; }}"
-                f"QPushButton:hover {{ background: {c.surface2}; }}"
-                f"QPushButton:checked {{ background: {c.accent}; color: #ffffff; }}"
-            )
+                f"QPushButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 7px; padding: 0 8px; font-weight: 800; font-size: 11.5px; }}"
+                f"QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QPushButton:checked {{ background: {c.accent}; color: #ffffff; }}")
             for btn in self._inspector_mode_buttons.values():
                 btn.setStyleSheet(mode_qss)
         if hasattr(self, "_inspector_pages"):
-            # Splitting the one long inspector scroll into sibling pages put the
-            # groups inside fresh containers that the page-level rules no longer
-            # reached, so each page painted its own default background and the
-            # field labels kept an opaque one. State it explicitly here.
             self._inspector_pages.setStyleSheet(
-                f"QScrollArea {{ background: {c.surface}; border: none; }}"
+                f"QStackedWidget, QScrollArea {{ background: {c.surface}; border: none; }}"
                 f"QScrollArea > QWidget > QWidget {{ background: {c.surface}; }}"
-                f"QGroupBox {{ background: transparent; color: {c.text_primary};"
-                f" border: 1px solid {c.border}; border-radius: 8px; }}"
+                f"QGroupBox {{ background: transparent; color: {c.text_primary}; border: none;"
+                " margin: 0; padding: 0; }}"
+                f"QGroupBox::title {{ color: transparent; height: 0; }}"
                 f"QLabel {{ background: transparent; color: {c.text_primary}; }}"
-            )
+                f"QLabel#tagEditorInspectorNote {{ background: {c.surface3}; color: {c.text_secondary};"
+                " border-radius: 9px; padding: 8px 10px; font-size: 10.5px; }}"
+                f"QLabel#tagEditorDialogNote {{ background: {c.surface3}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; padding: 7px 9px; font-size: 10.5px; }}"
+                f"QLabel#tagEditorSectionTitle {{ color: {c.text_primary}; font-size: 11.5px; font-weight: 800; }}"
+                f"QLabel#tagEditorCoverCurrent {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 10px; padding: 8px; font-size: 10.5px; }}"
+                f"QLabel#tagEditorCoverProposed {{ background: {c.accent_soft}; color: {c.accent_dark};"
+                f" border: 1px dashed {c.accent}; border-radius: 10px; padding: 8px; font-size: 10.5px; }}"
+                f"QTextEdit#tagEditorLyrics {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 10px; padding: 9px; font-size: 11px; }}"
+                f"QWidget#tagEditorFieldRow QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0 9px; }}"
+                f"QWidget#tagEditorFieldRow QLabel#tagEditorReadOnlyValue {{ background: {c.surface};"
+                f" color: {c.text_primary}; border: 1px solid {c.border}; border-radius: 8px; padding: 5px 9px; }}"
+                f"QWidget#tagEditorFieldRow QLineEdit:focus {{ border-color: {c.accent}; }}"
+                f"QWidget#tagEditorFieldRow QToolButton {{ background: {c.surface}; color: {c.text_tertiary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; font-size: 9.5px; }}"
+                f"QToolButton#tagEditorAdvancedFields {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px dashed {c.border}; border-radius: 9px; padding: 0 9px;"
+                " font-size: 10.5px; font-weight: 800; text-align: left; }}"
+                f"QFrame#tagEditorPropertyTable {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 10px; }}"
+                f"QFrame#tagEditorPropertyRow {{ background: transparent; border-bottom: 1px solid {c.surface3}; }}"
+                f"QLabel#tagEditorPropertyName {{ color: {c.text_secondary}; font-size: 10.5px; font-weight: 800; }}"
+                f"QLabel#tagEditorPropertyValue {{ color: {c.text_primary}; font-size: 10.5px; }}"
+                f"QFrame#tagEditorPendingItem, QFrame#tagEditorProblemItem {{ background: {c.surface};"
+                f" border: 1px solid {c.border}; border-radius: 9px; }}"
+                f"QLabel#tagEditorPendingFile {{ color: {c.text_tertiary}; font-size: 9.5px; }}"
+                f"QLabel#tagEditorPendingChange, QLabel#tagEditorProblemCopy {{ color: {c.text_primary}; font-size: 10.5px; }}"
+                f"QLabel#tagEditorSeverityError {{ background: {c.danger_soft}; color: {c.danger};"
+                " border-radius: 6px; padding: 4px 6px; font-size: 9px; font-weight: 900; }}"
+                f"QPushButton {{ background: {c.surface}; color: {c.text_primary}; border: 1px solid {c.border};"
+                " border-radius: 9px; min-height: 30px; padding: 0 9px; font-size: 10.5px; font-weight: 700; }}"
+                f"QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QPushButton[accentRole=\"primary\"] {{ background: {c.accent}; color: #ffffff; border-color: {c.accent}; }}"
+                f"QPushButton[dangerRole=\"true\"] {{ color: {c.danger}; border-color: {c.danger}; }}"
+                f"QToolButton {{ background: {c.surface}; color: {c.text_secondary}; border: 1px solid {c.border};"
+                " border-radius: 8px; }}")
         if getattr(self, "_inspector_tool_buttons", None):
             chip_qss = (
                 f"QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
-                f" border: 1px solid {c.border}; border-radius: 7px;"
-                f" padding: 4px 9px; font-size: 11px; font-weight: bold; }}"
+                f" border: 1px solid {c.border}; border-radius: 7px; padding: 0 9px;"
+                " font-size: 10.5px; font-weight: 800; }}"
                 f"QPushButton:hover {{ border-color: {c.accent}; }}"
-                f"QPushButton:checked {{ background: {accent_soft};"
-                f" border-color: {c.accent}; color: {c.accent}; }}"
-            )
+                f"QPushButton:checked {{ background: {c.accent_soft}; border-color: {c.accent};"
+                f" color: {c.accent_dark}; }}")
             for btn in self._inspector_tool_buttons:
                 btn.setStyleSheet(chip_qss)
 
     def _toolbar_button_style(self, role: str) -> str:
-        c = get_colors()
-        accent_dim = dim_hex(c.accent)
+        c = tag_editor_colors()
         accent_color = QColor(c.accent)
         primary_text = "#ffffff" if not accent_color.isValid() or accent_color.lightness() < 170 else "#111827"
 
         if role == "primary":
+            primary_bg = (
+                f"rgba({accent_color.red()}, {accent_color.green()}, {accent_color.blue()}, 1.0)"
+                if accent_color.isValid() else c.accent
+            )
             return (
-                f"QToolButton {{ background: {c.accent}; color: {primary_text};"
-                f"  border: 1px solid {c.accent}; border-radius: 8px;"
-                f"  padding: 5px 8px; font-weight: 800; }}"
-                f"QToolButton:hover {{ background: {accent_dim}; border-color: {accent_dim}; }}"
-                f"QToolButton:pressed {{ background: {accent_dim}; border-color: {accent_dim}; }}"
+                f"QToolButton {{ background: {primary_bg}; color: {primary_text};"
+                f"  border: 1px solid {c.accent}; border-radius: 9px;"
+                f"  padding: 0 12px; font-weight: 800; }}"
+                f"QToolButton:hover {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
+                f"QToolButton:pressed {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
                 f"QToolButton:disabled {{ background: {c.bg}; color: {c.text_tertiary};"
                 f"  border: 1px solid {c.border}; }}"
             )
@@ -810,8 +897,8 @@ class MetadataEditorPanel(
                 hover_bg = c.border
             return (
                 f"QToolButton {{ background: {bg}; color: {c.accent};"
-                f"  border: 1px solid transparent; border-radius: 8px;"
-                f"  padding: 5px 8px; font-weight: 700; }}"
+                f"  border: 1px solid transparent; border-radius: 9px;"
+                f"  padding: 0 12px; font-weight: 700; }}"
                 f"QToolButton:hover {{ background: {hover_bg}; border-color: {c.accent}; }}"
                 f"QToolButton:pressed {{ background: {hover_bg}; }}"
                 f"QToolButton:disabled {{ background: {c.bg}; color: {c.text_tertiary};"
@@ -820,15 +907,15 @@ class MetadataEditorPanel(
 
         return (
             f"QToolButton {{ background: {c.surface}; color: {c.text_primary};"
-            f"  border: 1px solid {c.border}; border-radius: 8px;"
-            f"  padding: 5px 8px; font-weight: 600; }}"
-            f"QToolButton:hover {{ background: {c.surface2}; border-color: {c.accent}; }}"
+            f"  border: 1px solid {c.border}; border-radius: 9px;"
+            f"  padding: 0 12px; font-weight: 700; }}"
+            f"QToolButton:hover {{ background: {c.surface3}; border-color: {c.border}; }}"
             f"QToolButton:disabled {{ background: {c.surface}; color: {c.text_tertiary};"
             f"  border-color: {c.border}; }}"
         )
 
     def _toolbar_icon_color(self, role: str, *, enabled: bool = True) -> str:
-        c = get_colors()
+        c = tag_editor_colors()
         if not enabled:
             return c.text_tertiary
         if role == "primary":
@@ -840,7 +927,7 @@ class MetadataEditorPanel(
 
     def _refresh_toolbar_action_styles(self) -> None:
         if hasattr(self, "_browse_btn"):
-            browse_role = "secondary" if self._root_folder else "primary"
+            browse_role = "primary"
             self._browse_btn.setStyleSheet(self._toolbar_button_style(browse_role))
             self._browse_btn.setIcon(FluentIcon.FOLDER.icon(color=self._toolbar_icon_color(browse_role)))
 
@@ -922,13 +1009,10 @@ class MetadataEditorPanel(
         btn = QToolButton()
         btn.setText(self._toolbar_text(text_key))
         btn.setIcon(icon.icon())
-        btn.setIconSize(QSize(20, 20))
-        btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        # A minimum rather than a fixed size: the label is translated and must
-        # be free to grow for a long Hebrew string or a 200% scale factor —
-        # Qt's own High-DPI scaling already maps this logical size to the
-        # physical screen, so it is not multiplied by DPI here.
-        btn.setMinimumSize(92, 46)
+        btn.setIconSize(QSize(18, 18))
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setFixedHeight(32)
+        btn.setMinimumWidth(32)
         btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setEnabled(enabled)
@@ -941,39 +1025,43 @@ class MetadataEditorPanel(
     def _make_auto_toolbar_action(self) -> QWidget:
         container = QFrame()
         container.setObjectName("autoOrderSplitButton")
-        container.setFixedSize(136, 46)
+        container.setFixedHeight(74)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._auto_container = container
 
-        layout = QHBoxLayout(container)
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(6)
 
         self._auto_cfg_btn = QToolButton()
+        self._auto_cfg_btn.setText(t("meta_auto_configure_actions"))
         self._auto_cfg_btn.setIcon(FluentIcon.SETTING.icon(color=get_colors().text_primary))
-        self._auto_cfg_btn.setIconSize(QSize(20, 20))
+        self._auto_cfg_btn.setIconSize(QSize(16, 16))
+        self._auto_cfg_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         a11y.describe(self._auto_cfg_btn, t("meta_auto_cfg_tooltip"),
                       tooltip=t("meta_auto_cfg_tooltip"))
-        self._auto_cfg_btn.setFixedSize(36, 46)
+        self._auto_cfg_btn.setFixedHeight(34)
+        self._auto_cfg_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._auto_cfg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_cfg_btn.setEnabled(False)
         self._auto_cfg_btn.clicked.connect(self._on_auto_arrange_settings)
 
         self._auto_separator = QFrame()
-        self._auto_separator.setFixedSize(2, 30)
+        self._auto_separator.setVisible(False)
 
         self._auto_btn = QToolButton()
         self._auto_btn.setText(self._toolbar_text("meta_auto_btn"))
         self._auto_btn.setIcon(self._make_magic_wand_icon(color=get_colors().text_primary))
-        self._auto_btn.setIconSize(QSize(21, 21))
-        self._auto_btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self._auto_btn.setIconSize(QSize(17, 17))
+        self._auto_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_btn.setEnabled(False)
         self._auto_btn.clicked.connect(self._on_auto_arrange)
-        self._auto_btn.setFixedSize(99, 46)
+        self._auto_btn.setFixedHeight(34)
+        self._auto_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        layout.addWidget(self._auto_cfg_btn)
-        layout.addWidget(self._auto_separator, alignment=Qt.AlignVCenter)
         layout.addWidget(self._auto_btn)
+        layout.addWidget(self._auto_cfg_btn)
 
         return container
 
@@ -987,16 +1075,17 @@ class MetadataEditorPanel(
         """
         bar = QFrame()
         bar.setObjectName("tagEditorToolbar")
-        bar.setFixedHeight(56)
+        bar.setFixedHeight(54)
         self._toolbar_bar = bar
 
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(12, 9, 12, 9)
         layout.setSpacing(8)
 
         self._browse_btn = self._make_toolbar_action(
             "meta_browse_folder", FluentIcon.FOLDER, self._on_browse
         )
+        self._browse_btn.setFixedHeight(36)
         layout.addWidget(self._browse_btn)
 
         # A path is not prose: it stays LTR and elides from the left so the
@@ -1005,15 +1094,37 @@ class MetadataEditorPanel(
         self._path_chip.setObjectName("tagEditorPathChip")
         self._path_chip.setLayoutDirection(Qt.LeftToRight)
         self._path_chip.setTextFormat(Qt.PlainText)
-        self._path_chip.setMaximumWidth(260)
+        self._path_chip.setFixedHeight(32)
+        self._path_chip.setMaximumWidth(240)
+        self._path_chip.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         a11y.describe(self._path_chip, t("meta_shell_active_folder"))
         layout.addWidget(self._path_chip)
 
+        self._subdirs_check = QCheckBox(t("meta_include_subdirs"))
+        self._subdirs_check.setObjectName("tagEditorSubdirs")
+        self._subdirs_check.setChecked(True)
+        self._subdirs_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        a11y.describe(self._subdirs_check, t("meta_include_subdirs"),
+                      description=t("meta_include_subdirs_tooltip"))
+        self._subdirs_check.toggled.connect(self._on_include_subdirs_toggled)
+        layout.addWidget(self._subdirs_check)
+
+        self._monitor_badge = QFrame()
+        self._monitor_badge.setObjectName("tagEditorMonitorBadge")
+        self._monitor_badge.setFixedHeight(26)
+        monitor_layout = QHBoxLayout(self._monitor_badge)
+        monitor_layout.setContentsMargins(9, 0, 9, 0)
+        monitor_layout.setSpacing(6)
+        self._monitor_dot = QLabel("●")
+        self._monitor_dot.setObjectName("tagEditorMonitorDot")
+        monitor_layout.addWidget(self._monitor_dot)
         self._monitoring_status = QLabel(t("meta_monitoring_disabled"))
         self._monitoring_status.setObjectName("tagEditorMonitorBadge")
+        self._monitoring_status.setFixedHeight(26)
         self._monitoring_status.setAccessibleName(t("meta_monitoring_status"))
         self._monitoring_status.setToolTip(t("meta_monitoring_status_tooltip"))
-        layout.addWidget(self._monitoring_status)
+        monitor_layout.addWidget(self._monitoring_status)
+        layout.addWidget(self._monitor_badge)
 
         # Two different refreshes behind one control: the click is the cheap
         # incremental reconcile people press often; the full rescan re-reads
@@ -1021,6 +1132,9 @@ class MetadataEditorPanel(
         self._manual_refresh_btn = self._make_toolbar_action(
             "meta_manual_refresh", FluentIcon.SYNC,
             self.manual_refresh_requested.emit, enabled=False)
+        self._manual_refresh_btn.setText("")
+        self._manual_refresh_btn.setFixedSize(36, 32)
+        self._manual_refresh_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self._manual_refresh_btn.setAccessibleName(t("meta_manual_refresh"))
         self._manual_refresh_btn.setPopupMode(QToolButton.MenuButtonPopup)
         refresh_menu = QMenu(self._manual_refresh_btn)
@@ -1033,13 +1147,14 @@ class MetadataEditorPanel(
         layout.addWidget(self._manual_refresh_btn)
 
         self._search_edit = QLineEdit()
+        self._search_edit.addAction(FluentIcon.SEARCH.icon(), QLineEdit.LeadingPosition)
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.setPlaceholderText(t("meta_search_tracks"))
         # Filtering changes what is listed, never what Apply writes, so the
         # description says so rather than leaving it to be inferred.
         a11y.describe(self._search_edit, t("meta_search_tracks"),
                       description=t("meta_a11y_search_scope_note"))
-        self._search_edit.setMaximumWidth(250)
+        self._search_edit.setFixedSize(230, 34)
         # Qt builds the inline clear button itself and leaves it unnamed, so a
         # screen reader reaches an anonymous button at the end of the field.
         for clear_button in self._search_edit.findChildren(QToolButton):
@@ -1079,6 +1194,7 @@ class MetadataEditorPanel(
         """
         footer = QFrame()
         footer.setObjectName("tagEditorFooter")
+        footer.setFixedHeight(56)
         self._footer_bar = footer
         a11y.describe(footer, t("meta_footer_a11y"))
 
@@ -1105,12 +1221,18 @@ class MetadataEditorPanel(
         self._undo_btn = self._make_toolbar_action(
             "meta_undo_changes", FluentIcon.RETURN, self.undo_requested.emit, enabled=False
         )
+        self._undo_btn.setText("")
+        self._undo_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._undo_btn.setFixedSize(32, 32)
         self._undo_btn.setShortcut("Ctrl+Z")
         layout.addWidget(self._undo_btn)
 
         self._redo_btn = self._make_toolbar_action(
             "meta_redo_changes", FluentIcon.SYNC, self.redo_requested.emit, enabled=False
         )
+        self._redo_btn.setText("")
+        self._redo_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._redo_btn.setFixedSize(32, 32)
         self._redo_btn.setShortcut("Ctrl+Y")
         layout.addWidget(self._redo_btn)
 
@@ -1131,6 +1253,8 @@ class MetadataEditorPanel(
         self._apply_btn = self._make_toolbar_action(
             "meta_apply_changes", FluentIcon.SAVE, self._on_apply, enabled=False
         )
+        self._apply_btn.setMinimumWidth(92)
+        self._apply_btn.setFixedHeight(36)
         layout.addWidget(self._apply_btn)
 
         return footer
@@ -1155,12 +1279,14 @@ class MetadataEditorPanel(
             widget.setVisible(has_work)
 
         if not has_work:
+            self._footer_bar.setFixedHeight(30)
             total = len(self._model.get_all_tracks())
             self._footer_title.setText(t("meta_footer_ready"))
             self._footer_desc.setText(
                 t("meta_footer_loaded", total=total) if total else "")
             return
 
+        self._footer_bar.setFixedHeight(56)
         self._footer_count.setText(isolate_number(str(len(candidates))))
         self._footer_count.setAccessibleName(
             t("meta_footer_count_a11y", n=len(candidates)))
@@ -1175,6 +1301,7 @@ class MetadataEditorPanel(
         if excluded:
             notes.append(t("meta_footer_excluded_note", n=len(excluded)))
         self._footer_desc.setText(" · ".join(notes))
+        self._apply_btn.setText(t("meta_apply_count", n=change_count))
 
     def _columns_button(self) -> QToolButton:
         """Direct access to the column picker.
@@ -1197,6 +1324,7 @@ class MetadataEditorPanel(
         """Counts that describe the listing, pinned under the table."""
         bar = QFrame()
         bar.setObjectName("tagEditorTableStatus")
+        bar.setFixedHeight(26)
         self._table_status_bar = bar
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(12, 3, 12, 3)
@@ -1213,6 +1341,7 @@ class MetadataEditorPanel(
 
         self._exclude_apply_btn = QToolButton()
         self._exclude_apply_btn.clicked.connect(self._toggle_selected_apply_exclusion)
+        self._exclude_apply_btn.setVisible(False)
         layout.addWidget(self._exclude_apply_btn)
 
         self._scope_hint_lbl = QLabel(t("meta_scope_hint"))
@@ -1255,6 +1384,8 @@ class MetadataEditorPanel(
         self._more_btn.setText(self._toolbar_text("meta_shell_more"))
         self._more_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._more_btn.setPopupMode(QToolButton.InstantPopup)
+        self._more_btn.setFixedHeight(32)
+        self._more_btn.setMinimumWidth(64)
         a11y.describe(self._more_btn, t("meta_shell_more"),
                       description=t("meta_shell_more_tooltip"),
                       tooltip=t("meta_shell_more_tooltip"))
@@ -1291,17 +1422,16 @@ class MetadataEditorPanel(
 
     def _build_state_card(self, page: QWidget) -> tuple[QFrame, QVBoxLayout]:
         outer = QVBoxLayout(page)
-        outer.setContentsMargins(28, 28, 28, 28)
-        outer.setAlignment(Qt.AlignCenter)
+        outer.setContentsMargins(11, 0, 11, 10)
 
         card = QFrame()
         card.setObjectName("metadataStateCard")
-        card.setMaximumWidth(430)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(30, 30, 30, 30)
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(12)
-        outer.addWidget(card, alignment=Qt.AlignCenter)
+        outer.addWidget(card)
         return card, layout
 
     def _build_table_empty_page(self) -> QWidget:
@@ -1322,6 +1452,11 @@ class MetadataEditorPanel(
         body.setMaximumWidth(330)
         self._empty_body_lbl = body
         layout.addWidget(body)
+
+        self._empty_browse_btn = QPushButton(t("meta_browse_folder"))
+        self._empty_browse_btn.setStyleSheet(primary_btn_style())
+        self._empty_browse_btn.clicked.connect(self._on_browse)
+        layout.addWidget(self._empty_browse_btn, alignment=Qt.AlignCenter)
 
         return page
 
@@ -1388,6 +1523,11 @@ class MetadataEditorPanel(
         self._center_progress.setFixedSize(320, 8)
         layout.addWidget(self._center_progress, alignment=Qt.AlignCenter)
 
+        self._loading_cancel_btn = QPushButton(t("cancel"))
+        self._loading_cancel_btn.setStyleSheet(btn_style())
+        self._loading_cancel_btn.clicked.connect(self.scan_cancel_requested)
+        layout.addWidget(self._loading_cancel_btn, alignment=Qt.AlignCenter)
+
         return page
 
     def _show_table_content(self) -> None:
@@ -1395,6 +1535,14 @@ class MetadataEditorPanel(
             self._table_stack.setCurrentWidget(self._table_content)
 
     def _show_table_empty(self) -> None:
+        loaded_folder = self._root_folder is not None
+        if hasattr(self, "_empty_title_lbl"):
+            self._empty_title_lbl.setText(t(
+                "meta_empty_folder_title" if loaded_folder else "meta_empty_title"))
+            self._empty_body_lbl.setText(t(
+                "meta_empty_folder_body" if loaded_folder else "meta_empty_body"))
+            self._empty_browse_btn.setText(t(
+                "meta_change_folder" if loaded_folder else "meta_browse_folder"))
         if hasattr(self, "_table_stack"):
             self._table_stack.setCurrentWidget(self._table_empty_page)
 
@@ -1439,23 +1587,47 @@ class MetadataEditorPanel(
                       tooltip=t("meta_files_folders_header"))
         self._tree_toggle_btn.clicked.connect(self._toggle_tree_pane)
         tree_rail_layout.addWidget(self._tree_toggle_btn)
+        self._tree_rail_label = VerticalLabel(t("meta_files_folders_header"))
+        self._tree_rail_label.setAlignment(Qt.AlignCenter)
+        self._tree_rail_label.setStyleSheet(
+            f"color: {tag_editor_colors().text_tertiary}; font-size: 10px; font-weight: 800;")
+        tree_rail_layout.addWidget(self._tree_rail_label, stretch=1)
         tree_rail_layout.addStretch()
         tree_shell_layout.addWidget(self._tree_rail)
 
         self._tree_body = QFrame()
         self._tree_body.setMinimumWidth(self._TREE_OPEN_MIN)
         tree_layout = QVBoxLayout(self._tree_body)
-        tree_layout.setContentsMargins(4, 4, 0, 4)
-        tree_layout.setSpacing(4)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setSpacing(0)
 
-        tree_header = QLabel(t("meta_files_folders_header"))
-        tree_header.setStyleSheet("font-weight: bold; font-size: 12px; padding: 2px 0;")
-        tree_header_row = QHBoxLayout()
-        tree_header_row.setContentsMargins(0, 0, 4, 0)
+        self._tree_header = QFrame()
+        self._tree_header.setObjectName("tagEditorTreeHeader")
+        self._tree_header.setFixedHeight(38)
+        tree_header_row = QHBoxLayout(self._tree_header)
+        tree_header_row.setContentsMargins(9, 0, 9, 0)
         tree_header_row.setSpacing(4)
+        tree_header = QLabel(t("meta_files_folders_header"))
+        tree_header.setStyleSheet("font-weight: 800; font-size: 12px;")
         tree_header_row.addWidget(tree_header)
         tree_header_row.addStretch()
-        tree_layout.addLayout(tree_header_row)
+
+        self._tree_add_folder_btn = QToolButton()
+        self._tree_add_folder_btn.setIcon(FluentIcon.FOLDER_ADD.icon())
+        self._tree_add_folder_btn.setIconSize(QSize(16, 16))
+        self._tree_add_folder_btn.setFixedSize(28, 28)
+        a11y.describe(self._tree_add_folder_btn, t("meta_add_folder"), tooltip=t("meta_add_folder"))
+        self._tree_add_folder_btn.clicked.connect(self._on_tree_header_add_folder)
+        tree_header_row.addWidget(self._tree_add_folder_btn)
+
+        self._tree_header_collapse_btn = QToolButton()
+        self._tree_header_collapse_btn.setText("×")
+        self._tree_header_collapse_btn.setFixedSize(28, 28)
+        a11y.describe(self._tree_header_collapse_btn, t("meta_shell_collapse_tree"),
+                      tooltip=t("meta_shell_collapse_tree"))
+        self._tree_header_collapse_btn.clicked.connect(self._toggle_tree_pane)
+        tree_header_row.addWidget(self._tree_header_collapse_btn)
+        tree_layout.addWidget(self._tree_header)
 
         self._tree = ExplorerTreeWidget()
         self._tree.setAccessibleName(t("meta_a11y_file_tree"))
@@ -1470,7 +1642,13 @@ class MetadataEditorPanel(
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree.keyboardContextMenuRequested.connect(self._on_tree_context_menu)
-        tree_layout.addWidget(self._tree)
+        tree_layout.addWidget(self._tree, stretch=1)
+
+        self._tree_hint = QLabel(t("meta_shell_tree_hint"))
+        self._tree_hint.setObjectName("tagEditorTreeHint")
+        self._tree_hint.setWordWrap(True)
+        self._tree_hint.setContentsMargins(8, 8, 8, 8)
+        tree_layout.addWidget(self._tree_hint)
         tree_shell_layout.addWidget(self._tree_body, stretch=1)
 
         splitter.addWidget(tree_frame)
@@ -1486,12 +1664,15 @@ class MetadataEditorPanel(
         self._table_stack = QStackedWidget()
         self._table_content = QWidget()
         table_content_layout = QVBoxLayout(self._table_content)
-        table_content_layout.setContentsMargins(0, 0, 0, 0)
-        table_content_layout.setSpacing(4)
+        table_content_layout.setContentsMargins(11, 0, 11, 10)
+        table_content_layout.setSpacing(0)
 
-        nav_bar = QHBoxLayout()
-        nav_bar.setContentsMargins(12, 0, 12, 0)
-        nav_bar.setSpacing(4)
+        self._nav_host = QFrame()
+        self._nav_host.setObjectName("tagEditorNavigation")
+        self._nav_host.setFixedHeight(40)
+        nav_bar = QHBoxLayout(self._nav_host)
+        nav_bar.setContentsMargins(0, 6, 0, 6)
+        nav_bar.setSpacing(6)
         self._nav_back_btn = QToolButton()
         self._nav_back_btn.setToolTip(t("meta_nav_back"))
         self._nav_back_btn.setAccessibleName(t("meta_nav_back"))
@@ -1521,6 +1702,8 @@ class MetadataEditorPanel(
         # footer's job, and keeping the two rows apart keeps that distinction
         # visible rather than implied.
         self._excluded_chip = QToolButton()
+        self._excluded_chip.setObjectName("tagEditorExcludedChip")
+        self._excluded_chip.setFixedHeight(24)
         self._excluded_chip.setCheckable(True)
         a11y.describe_filter_toggle(
             self._excluded_chip, t("meta_excluded_filter_chip", n=0),
@@ -1529,6 +1712,8 @@ class MetadataEditorPanel(
         nav_bar.addWidget(self._excluded_chip)
 
         self._stale_chip = QToolButton()
+        self._stale_chip.setObjectName("tagEditorStaleChip")
+        self._stale_chip.setFixedHeight(24)
         self._stale_chip.setCheckable(True)
         self._stale_chip.setText(t("meta_external_filter", n=0))
         a11y.describe_filter_toggle(
@@ -1541,20 +1726,27 @@ class MetadataEditorPanel(
 
         # Zoom controls — the magnifying-glass +/- icons say "zoom" on their
         # own, so no separate leading icon is needed alongside them.
+        self._zoom_frame = QFrame()
+        self._zoom_frame.setObjectName("tagEditorZoom")
+        self._zoom_frame.setFixedHeight(28)
+        zoom_layout = QHBoxLayout(self._zoom_frame)
+        zoom_layout.setContentsMargins(2, 2, 2, 2)
+        zoom_layout.setSpacing(0)
+
         self._zoom_minus_btn = QPushButton()
         self._zoom_minus_btn.setIcon(FluentIcon.ZOOM_OUT.icon())
         self._zoom_minus_btn.setIconSize(QSize(12, 12))
         self._zoom_minus_btn.setFixedSize(24, 24)
         self._zoom_minus_btn.setAccessibleName(t("meta_a11y_zoom_out"))
         self._zoom_minus_btn.clicked.connect(self._on_zoom_minus)
-        tbl_head.addWidget(self._zoom_minus_btn)
+        zoom_layout.addWidget(self._zoom_minus_btn)
 
         self._zoom_val_lbl = QLineEdit("100%")
         self._zoom_val_lbl.setFixedSize(48, 24)
         self._zoom_val_lbl.setAlignment(Qt.AlignCenter)
         self._zoom_val_lbl.setAccessibleName(t("meta_a11y_zoom_value"))
         self._zoom_val_lbl.editingFinished.connect(self._on_zoom_custom)
-        tbl_head.addWidget(self._zoom_val_lbl)
+        zoom_layout.addWidget(self._zoom_val_lbl)
 
         self._zoom_plus_btn = QPushButton()
         self._zoom_plus_btn.setIcon(FluentIcon.ZOOM_IN.icon())
@@ -1562,11 +1754,12 @@ class MetadataEditorPanel(
         self._zoom_plus_btn.setFixedSize(24, 24)
         self._zoom_plus_btn.setAccessibleName(t("meta_a11y_zoom_in"))
         self._zoom_plus_btn.clicked.connect(self._on_zoom_plus)
-        tbl_head.addWidget(self._zoom_plus_btn)
+        zoom_layout.addWidget(self._zoom_plus_btn)
+        tbl_head.addWidget(self._zoom_frame)
         
         tbl_head.addSpacing(10)
         tbl_head.addWidget(self._columns_button())
-        table_content_layout.addLayout(nav_bar)
+        table_content_layout.addWidget(self._nav_host)
 
         self._table = ExplorerDetailsView()
         self._table.setAccessibleName(t("meta_a11y_details_table"))
@@ -1610,7 +1803,7 @@ class MetadataEditorPanel(
         # Filename columns get their own delegate: LTR, ElideMiddle, icon, checkbox.
         self._table.setItemDelegateForColumn(
             COL_FILENAME,
-            FilenameDelegate(self._table, icon_provider=self._track_icon, show_checkbox=True),
+            FilenameDelegate(self._table, icon_provider=self._track_icon, show_checkbox=False),
         )
         self._table.setItemDelegateForColumn(
             COL_FILENAME_NEW,
@@ -1633,7 +1826,9 @@ class MetadataEditorPanel(
         if self._cfg:
             saved_visibility = self._cfg.tag_editor_column_visibility
         for col in range(COLUMN_COUNT):
-            if col == COL_CHECK or col == COL_FILENAME:
+            if col == COL_CHECK:
+                self._table.setColumnHidden(col, True)
+            elif col == COL_FILENAME:
                 self._table.setColumnHidden(col, False)
             elif saved_visibility is not None:
                 self._table.setColumnHidden(col, col in saved_visibility)
@@ -1702,8 +1897,14 @@ class MetadataEditorPanel(
         self._model.rowsRemoved.connect(lambda *_: self._refresh_checked_scope_state())
         self._model.modelReset.connect(self._refresh_checked_scope_state)
 
-        table_content_layout.addWidget(self._table)
-        table_content_layout.addWidget(self._build_table_status_bar())
+        self._table_card = QFrame()
+        self._table_card.setObjectName("tagEditorTableCard")
+        table_card_layout = QVBoxLayout(self._table_card)
+        table_card_layout.setContentsMargins(1, 1, 1, 1)
+        table_card_layout.setSpacing(0)
+        table_card_layout.addWidget(self._table, stretch=1)
+        table_card_layout.addWidget(self._build_table_status_bar())
+        table_content_layout.addWidget(self._table_card, stretch=1)
         self._table_stack.addWidget(self._table_content)
         self._table_empty_page = self._build_table_empty_page()
         self._table_loading_page = self._build_table_loading_page()
@@ -1733,7 +1934,13 @@ class MetadataEditorPanel(
                 handle.setProperty("metadata_handle_index", handle_index)
                 handle.installEventFilter(self)
 
-        self._apply_body_sizes(self._restore_body_sizes(), save=False)
+        self._initial_body_sizes = self._restore_body_sizes()
+        self._apply_body_sizes(self._initial_body_sizes, save=False)
+        # QSplitter is constructed before the panel receives its real window
+        # width.  Qt otherwise compresses both side panes to their old minima
+        # and keeps those accidental widths after the first resize.  Reapply
+        # the reference allocation once actual geometry is available.
+        QTimer.singleShot(0, self._restore_initial_body_layout)
 
         # Set initial table zoom level
         self._set_zoom(self._zoom_level)
@@ -1743,6 +1950,12 @@ class MetadataEditorPanel(
         self._ignore_header_resize = False
 
         return splitter
+
+    def _restore_initial_body_layout(self) -> None:
+        if not hasattr(self, "_body_splitter"):
+            return
+        self._apply_body_sizes(list(self._initial_body_sizes), save=False)
+        self._apply_responsive_layout(self.width())
 
     def _restore_body_sizes(self) -> list[int]:
         """Restore pane widths as one allocation, tolerating stale/malformed data.
@@ -1810,16 +2023,31 @@ class MetadataEditorPanel(
         content_layout.setSpacing(0)
 
         header = QFrame()
-        header.setFixedHeight(34)
+        header.setObjectName("tagEditorInspectorHeader")
         self._inspector_header = header
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 4, 6, 4)
-        header_layout.setSpacing(6)
-        self._inspector_title_lbl = QLabel(t("meta_edit_tags_group"))
-        self._inspector_title_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
-        header_layout.addWidget(self._inspector_title_lbl)
-        header_layout.addStretch()
-        content_layout.addWidget(header)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(11, 9, 11, 0)
+        header_layout.setSpacing(0)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(7)
+        self._inspector_title_lbl = QLabel(t("meta_inspector_no_selection_header"))
+        self._inspector_title_lbl.setStyleSheet("font-weight: 800; font-size: 12px;")
+        title_row.addWidget(self._inspector_title_lbl)
+        self._inspector_selection_lbl = QLabel("")
+        self._inspector_selection_lbl.setStyleSheet(
+            f"color: {tag_editor_colors().text_secondary}; font-size: 10.5px;")
+        title_row.addWidget(self._inspector_selection_lbl)
+        title_row.addStretch()
+        self._inspector_collapse_btn = QToolButton()
+        self._inspector_collapse_btn.setText("‹" if QApplication.layoutDirection() == Qt.RightToLeft else "›")
+        self._inspector_collapse_btn.setFixedSize(28, 28)
+        a11y.describe(self._inspector_collapse_btn, t("meta_shell_collapse_inspector"),
+                      tooltip=t("meta_shell_collapse_inspector"))
+        self._inspector_collapse_btn.clicked.connect(lambda: self._set_inspector_collapsed(True))
+        title_row.addWidget(self._inspector_collapse_btn)
+        header_layout.addLayout(title_row)
+        header_layout.addSpacing(8)
 
         self._inspector_pages = QStackedWidget()
         self._inspector = QStackedWidget()
@@ -1887,12 +2115,14 @@ class MetadataEditorPanel(
             chip = QPushButton(title)
             chip.setObjectName("tagEditorSubtab")
             chip.setCheckable(True)
+            chip.setFixedHeight(25)
             a11y.describe(chip, title, tooltip=title)
             chip.clicked.connect(lambda _=False, i=index: self._toggle_inspector_tool(i))
             self._inspector_tool_buttons.append(chip)
 
-        content_layout.addWidget(self._build_inspector_mode_tabs())
-        content_layout.addWidget(self._build_inspector_subtabs())
+        header_layout.addWidget(self._build_inspector_mode_tabs())
+        header_layout.addWidget(self._build_inspector_subtabs())
+        content_layout.addWidget(header)
         content_layout.addWidget(self._inspector_pages, stretch=1)
 
         self._inspector_rail = QFrame()
@@ -1914,6 +2144,11 @@ class MetadataEditorPanel(
                 lambda _=False, m=mode: self._open_inspector_mode(m))
             self._inspector_rail_buttons[mode] = btn
             rail_layout.addWidget(btn)
+            rail_label = QLabel(label)
+            rail_label.setAlignment(Qt.AlignCenter)
+            rail_label.setStyleSheet(
+                f"color: {tag_editor_colors().text_secondary}; font-size: 9px; font-weight: 800;")
+            rail_layout.addWidget(rail_label)
         rail_layout.addStretch()
 
         shell_layout.addWidget(self._inspector_content, stretch=1)
@@ -1956,7 +2191,9 @@ class MetadataEditorPanel(
             self._model.refresh_all()
             self._update_summary()
             self._refresh_checked_scope_state()
-            self._populate_track_inspector()
+            tracks = self._get_selected_tracks()
+            if tracks:
+                self._populate_track_inspector(tracks)
 
     def _ordered_io_item_ids(self) -> tuple[int, ...]:
         visible = list(self._proxy.visible_tracks())
@@ -2258,8 +2495,11 @@ class MetadataEditorPanel(
 
     def on_problem_fix_preview(self, preview) -> None:
         """Render the immutable Phase 9 action preview; never reconstruct it."""
-        dialog = QDialog(self); dialog.setWindowTitle(t("meta_problems_preview_title")); dialog.resize(760, 430)
+        dialog = QDialog(self); mark_tag_editor_dialog(dialog)
+        dialog.setWindowTitle(t("meta_problems_preview_title")); dialog.resize(760, 430)
         layout = QVBoxLayout(dialog)
+        add_header(layout, t("meta_problems_preview_title"),
+                   t("meta_problems_preview_subtitle"), icon=FluentIcon.EDIT.icon())
         action = getattr(preview, "action_preview", None)
         deltas = () if action is None else action.deltas
         changed = sum(delta.status is ActionResultStatus.CHANGED for delta in deltas)
@@ -2309,8 +2549,9 @@ class MetadataEditorPanel(
     def _build_inspector_mode_tabs(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("tagEditorModeTabs")
+        bar.setFixedHeight(35)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 6, 8, 4)
+        layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(3)
         self._inspector_mode_buttons: dict[str, QPushButton] = {}
         for mode in ("edit", "tools", "check"):
@@ -2318,6 +2559,7 @@ class MetadataEditorPanel(
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setObjectName("tagEditorModeTab")
+            btn.setFixedHeight(27)
             a11y.describe(btn, label, tooltip=label)
             btn.clicked.connect(lambda _=False, m=mode: self._open_inspector_mode(m))
             self._inspector_mode_buttons[mode] = btn
@@ -2328,14 +2570,14 @@ class MetadataEditorPanel(
         """Chips for the panes of the active mode; rebuilt whenever it changes."""
         self._inspector_subtab_host = QWidget()
         self._inspector_subtab_layout = QHBoxLayout(self._inspector_subtab_host)
-        self._inspector_subtab_layout.setContentsMargins(8, 0, 8, 6)
+        self._inspector_subtab_layout.setContentsMargins(0, 8, 0, 9)
         self._inspector_subtab_layout.setSpacing(5)
         self._inspector_subtab_layout.addStretch()
 
         scroll = QScrollArea()
         scroll.setObjectName("tagEditorSubtabs")
         scroll.setWidgetResizable(True)
-        scroll.setFixedHeight(38)
+        scroll.setFixedHeight(42)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(self._inspector_subtab_host)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
@@ -2348,7 +2590,8 @@ class MetadataEditorPanel(
             self._set_inspector_collapsed(False)
         if self._inspector_pane_modes[self._active_inspector_tool] == mode:
             return
-        self._select_inspector_tool(self._inspector_pane_modes.index(mode))
+        first_for_mode = {"edit": 0, "tools": 12, "check": 13}
+        self._select_inspector_tool(first_for_mode[mode])
 
     def _rebuild_inspector_subtabs(self) -> None:
         active_mode = self._inspector_pane_modes[self._active_inspector_tool]
@@ -2356,9 +2599,12 @@ class MetadataEditorPanel(
             item = self._inspector_subtab_layout.takeAt(0)
             if item.widget() is not None:
                 item.widget().setParent(None)
-        for index, mode in enumerate(self._inspector_pane_modes):
-            if mode != active_mode:
-                continue
+        visual_order = {
+            "edit": (0, 8, 9, 10, 11),
+            "tools": (12, 1, 2, 3, 4, 6),
+            "check": (13, 7, 5, 14),
+        }
+        for index in visual_order[active_mode]:
             self._inspector_subtab_layout.addWidget(self._inspector_tool_buttons[index])
             self._inspector_tool_buttons[index].setVisible(True)
         self._inspector_subtab_layout.addStretch()
@@ -2367,9 +2613,6 @@ class MetadataEditorPanel(
         self._active_inspector_tool = index
         if hasattr(self, "_inspector_pages"):
             self._inspector_pages.setCurrentIndex(index)
-        if hasattr(self, "_inspector_title_lbl"):
-            titles = getattr(self, "_inspector_tool_titles", [])
-            self._inspector_title_lbl.setText(titles[index] if 0 <= index < len(titles) else "")
         if self._right_collapsed:
             self._set_inspector_collapsed(False)
         if hasattr(self, "_inspector_subtab_layout"):
@@ -2421,6 +2664,15 @@ class MetadataEditorPanel(
 
     # ── Toolbar handlers ──────────────────────────────────────────────────────
 
+    def _on_include_subdirs_toggled(self, enabled: bool) -> None:
+        """Use the prototype's explicit recursive-scan choice on the next scan."""
+        self._include_subdirs = bool(enabled)
+
+    def _on_tree_header_add_folder(self) -> None:
+        parent = self._navigation.current or self._root_folder
+        if parent is not None:
+            self._on_tree_add_folder(Path(parent))
+
     def _on_browse(self) -> None:
         saved_folder = getattr(self._cfg, "tag_editor_last_folder", "") if self._cfg else ""
         if self._root_folder and self._root_folder.is_dir():
@@ -2440,12 +2692,12 @@ class MetadataEditorPanel(
             self, t("meta_choose_music_folder"), str(start_folder)
         )
         if path:
-            self.scan_requested.emit(Path(path), True)
+            self.scan_requested.emit(Path(path), self._include_subdirs)
 
     def _on_scan(self) -> None:
         if not self._root_folder:
             return
-        self.scan_requested.emit(self._root_folder, True)
+        self.scan_requested.emit(self._root_folder, self._include_subdirs)
 
     def on_workspace_replacement_started(self, folder: Path) -> None:
         """Update the visible root only after the controller accepts replacement."""
@@ -2491,9 +2743,21 @@ class MetadataEditorPanel(
             return
         if ApplyReviewPolicy.requires_full_review(self._workspace.change_set):
             self._on_review_changes()
-        # The always-visible Apply-scope label already shows this exact count
-        # before the action is invoked. Keep Apply a single toolbar action;
-        # confirmation dialogs here hide that scope and break keyboard flow.
+            # Review may exclude files or revert proposals.  Never apply the
+            # stale pre-review list merely because it was safe a moment ago.
+            candidates = self._workspace.apply_candidates()
+            if not candidates:
+                self._refresh_checked_scope_state()
+                return
+        if self.isVisible():
+            confirmation = ApplyConfirmationDialog(
+                self._workspace.change_set.summary(),
+                candidate_count=len(candidates),
+                blocker_count=len(self._workspace.apply_blockers()),
+                parent=self,
+            )
+            if confirmation.exec() != QDialog.DialogCode.Accepted:
+                return
         self._apply_refresh_counter = 0
         self.apply_requested.emit(backup_dir, candidates)
 
@@ -2515,9 +2779,12 @@ class MetadataEditorPanel(
         if not records:
             return
         dialog = QDialog(self)
+        mark_tag_editor_dialog(dialog)
         dialog.setWindowTitle(t("meta_pending_changes"))
         dialog.setMinimumSize(860, 420)
         layout = QVBoxLayout(dialog)
+        add_header(layout, t("meta_pending_changes"), t("meta_review_subtitle"),
+                   icon=FluentIcon.VIEW.icon())
         summary_label = QLabel(dialog)
         layout.addWidget(summary_label)
         filters = QHBoxLayout()
@@ -2965,8 +3232,12 @@ class MetadataEditorPanel(
             # Default back to "apply to all checked" panel
             visible = self._proxy.rowCount()
             self._insp_folder_title.setText(t("meta_n_files_checked", n=visible))
+            self._inspector_title_lbl.setText(t("meta_inspector_no_selection_header"))
+            self._inspector_selection_lbl.clear()
             self._inspector.setCurrentIndex(PAGE_FOLDER)
         else:
+            self._inspector_title_lbl.setText(t("meta_inspector_no_selection_header"))
+            self._inspector_selection_lbl.clear()
             self._inspector.setCurrentIndex(PAGE_EMPTY)
 
 
@@ -3141,6 +3412,15 @@ class MetadataEditorPanel(
     def _on_artwork_replace_choose(self) -> None:
         self._on_artwork_choose(add=False)
 
+    def _on_artwork_choose_adaptive(self) -> None:
+        """Prototype's single Choose button: append only when nothing exists."""
+        tracks = self._get_selected_tracks()
+        if not tracks:
+            return
+        has_artwork = any(track.original.artwork.entries for track in tracks)
+        can_append = all(track.format_id != "m4a" for track in tracks)
+        self._on_artwork_choose(add=not has_artwork and can_append)
+
     def _on_artwork_choose(self, *, add: bool) -> None:
         tracks = self._get_selected_tracks()
         if not tracks:
@@ -3211,6 +3491,9 @@ class MetadataEditorPanel(
 
     def _on_replaygain_clear_album(self) -> None:
         self._propose_replaygain_clear({REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK})
+
+    def _on_replaygain_clear_all(self) -> None:
+        self._propose_replaygain_clear(set(REPLAYGAIN_FIELDS))
 
     def _propose_replaygain_clear(self, fields: set[str]) -> None:
         tracks = self._get_selected_tracks()
@@ -3506,6 +3789,8 @@ class MetadataEditorPanel(
             )
         except Exception:
             logger.debug("InfoBar notification failed", exc_info=True)
+        if self.isVisible():
+            ApplyResultDialog(error_message=message, parent=self).exec()
 
     def on_apply_batch_complete(self, result) -> None:
         """Render the structured batch result (backup-blocked / partial / done)."""
@@ -3571,6 +3856,8 @@ class MetadataEditorPanel(
             # Toast is a nice-to-have; the summary label above already shows
             # the result, so a themed-InfoBar failure must not crash apply.
             logger.debug("InfoBar notification failed", exc_info=True)
+        if self.isVisible():
+            ApplyResultDialog(result, parent=self).exec()
 
     def on_recovery_available(self, summary: dict) -> None:
         """Offer review-first recovery of a crashed Apply operation (TE-SAFE-11).
@@ -3584,6 +3871,7 @@ class MetadataEditorPanel(
 
         incomplete = summary.get("incomplete", 0)
         box = QMessageBox(self)
+        mark_tag_editor_dialog(box)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(t("md_recovery_prompt_title"))
         box.setText(t("md_recovery_prompt_msg", n=incomplete))
@@ -3641,6 +3929,7 @@ class MetadataEditorPanel(
         from PySide6.QtWidgets import QMessageBox
         root = Path(str(info.get("root") or ""))
         box = QMessageBox(self)
+        mark_tag_editor_dialog(box)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(t("meta_draft_available_title"))
         box.setText(t("meta_draft_available_message", n=info.get("affected_files", 0),
@@ -3669,6 +3958,7 @@ class MetadataEditorPanel(
         from PySide6.QtWidgets import QMessageBox
         operation = request.get("operation", "operation") if isinstance(request, dict) else str(request)
         box = QMessageBox(self)
+        mark_tag_editor_dialog(box)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(t("meta_draft_unsaved_title"))
         box.setText(t("meta_draft_unsaved_message", operation=operation))
@@ -4149,6 +4439,9 @@ class MetadataEditorPanel(
         self._insp_tracks_title.setText(
             t("meta_tracks_selected_summary", n=len(tracks), plural=plural)
         )
+        if hasattr(self, "_inspector_title_lbl"):
+            self._inspector_title_lbl.setText(
+                t("meta_tracks_selected_summary", n=len(tracks), plural=plural))
         field_names = tuple(self._insp_fields) + (LYRICS_FIELD, ARTWORK_FIELD) + tuple(REPLAYGAIN_FIELDS)
         snapshot = self._inspector_state.snapshot(tracks, field_names)
         pending_total = sum(track.has_changes for track in tracks)
@@ -4162,6 +4455,9 @@ class MetadataEditorPanel(
             )
         else:
             capability_text = t("meta_inspector_capability_none")
+        if hasattr(self, "_inspector_selection_lbl"):
+            self._inspector_selection_lbl.setText(
+                t("mt_status_read_only") if snapshot.editable_count == 0 else "")
         if pending_total:
             capability_text += " " + t("meta_inspector_pending_files", n=pending_total)
         self._insp_capability.setText(capability_text)
@@ -4260,10 +4556,13 @@ class MetadataEditorPanel(
         if artwork_state.value_state is ValueState.MIXED:
             artwork_text = t("meta_artwork_mixed")
             self._insp_artwork_preview.setPixmap(QPixmap())
+            self._insp_artwork_preview.setText(t("meta_artwork_mixed_short"))
         elif stored_primary is None:
             artwork_text = t("meta_artwork_none")
             self._insp_artwork_preview.setPixmap(QPixmap())
+            self._insp_artwork_preview.setText(t("meta_artwork_none_short"))
         else:
+            self._insp_artwork_preview.clear()
             self._request_artwork_thumbnail("current", stored_primary, track_ids)
             artwork_text = t("meta_artwork_present", n=len(common_stored.entries))
             artwork_text += f" \u2066{stored_primary.mime_type} · {stored_primary.width}×{stored_primary.height}\u2069"
@@ -4275,9 +4574,12 @@ class MetadataEditorPanel(
                 self._insp_artwork_proposed_preview.setPixmap(QPixmap())
                 self._insp_artwork_proposed_preview.setText(t("meta_artwork_pending_removal"))
         else:
-            self._insp_artwork_proposed_preview.clear()
-        self._insp_artwork_proposed_label.setVisible(artwork_state.pending)
-        self._insp_artwork_proposed_preview.setVisible(artwork_state.pending)
+            self._insp_artwork_proposed_preview.setPixmap(QPixmap())
+            self._insp_artwork_proposed_preview.setText(t("meta_artwork_drop_prompt"))
+        # The reference always shows both cover slots.  Hiding the proposed
+        # slot made the entire page jump sideways before/after an edit.
+        self._insp_artwork_proposed_label.setVisible(True)
+        self._insp_artwork_proposed_preview.setVisible(True)
         if artwork_state.supported_count == 0:
             artwork_text += " " + t("meta_artwork_read_only")
         if common_stored and common_stored.diagnostics:
@@ -4316,6 +4618,7 @@ class MetadataEditorPanel(
             self._insp_rg_album_btn.setEnabled(replay_supported)
         self._insp_rg_clear_track_btn.setEnabled(replay_supported)
         self._insp_rg_clear_album_btn.setEnabled(replay_supported)
+        self._insp_rg_clear_all_btn.setEnabled(replay_supported)
         self._insp_rg_revert_btn.setEnabled(
             any(snapshot.fields[field_name].pending for field_name in REPLAYGAIN_FIELDS)
         )
@@ -4337,6 +4640,35 @@ class MetadataEditorPanel(
                 if key in props:
                     prop_lines.append(t(label_key) + ": " + self._format_property_value(key, props[key]))
             self._insp_properties.setText("\n".join(prop_lines) or t("meta_property_unavailable"))
+            def display_property(key: str, value: object) -> str:
+                if value is None or value == "":
+                    return t("meta_inspector_empty_value")
+                return self._format_property_value(key, value)
+
+            property_values = {
+                "path": str(tracks[0].path),
+                "format_id": display_property(
+                    "format_id", props.get("format_id", tracks[0].format_id)),
+                "size_bytes": display_property("size_bytes", props.get("size_bytes")),
+                "duration_seconds": display_property(
+                    "duration_seconds", props.get("duration_seconds", 0)),
+                "bitrate": display_property("bitrate", props.get("bitrate")),
+                "sample_rate": display_property("sample_rate", props.get("sample_rate")),
+                "channels": display_property("channels", props.get("channels")),
+                "modified_time": display_property(
+                    "modified_time", props.get("modified_time")),
+                "capability": (
+                    t("meta_property_capability_full")
+                    if snapshot.editable_count else t("mt_status_read_only")
+                ),
+            }
+            for key, label in self._insp_property_values.items():
+                label.setText(str(property_values.get(key, "")))
+            self._insp_property_table.setVisible(True)
+            self._insp_properties.setVisible(False)
+            for button in (self._insp_property_open_btn, self._insp_property_reveal_btn,
+                           self._insp_property_copy_btn):
+                button.setEnabled(True)
             state = getattr(tracks[0], "external_state", "current")
             self._insp_external_status.setText(
                 t("meta_external_inspector_status",
@@ -4345,6 +4677,13 @@ class MetadataEditorPanel(
                 getattr(tracks[0], "external_conflict", None) is not None)
         else:
             self._insp_properties.setText(t("meta_property_single_selection_only"))
+            self._insp_properties.setVisible(True)
+            for label in self._insp_property_values.values():
+                label.clear()
+            self._insp_property_table.setVisible(False)
+            for button in (self._insp_property_open_btn, self._insp_property_reveal_btn,
+                           self._insp_property_copy_btn):
+                button.setEnabled(False)
             states = {getattr(track, "external_state", "current") for track in tracks}
             self._insp_external_status.setText(
                 t("meta_external_multiple_states", n=len(states)))
@@ -4443,24 +4782,24 @@ class MetadataEditorPanel(
         font_size = max(6, int(10 * (pct / 100.0)))
         factor = pct / 100.0
         
-        table_colors = get_colors()
+        table_colors = tag_editor_colors()
         # Win11 Details View: flat header (no per-section vertical borders,
         # no bold, muted color, single underline). Capsule paint handles
         # selection — keep selection-background-color transparent so Qt
         # doesn't overdraw it with a flat rectangle.
         self._table.setStyleSheet(
-            f"QTableView {{ background: {table_colors.bg}; color: {table_colors.text_primary};"
+            f"QTableView {{ background: {table_colors.surface}; color: {table_colors.text_primary};"
             f"  border: none; border-radius: 0;"
             f"  selection-background-color: transparent; selection-color: {table_colors.text_primary};"
             f"  font-size: {font_size}pt; }}"
             "QTableView::item { background: transparent; border: none; }"
-            f"QHeaderView::section {{ background: {table_colors.bg};"
+            f"QHeaderView::section {{ background: {table_colors.surface3};"
             f"  color: {table_colors.text_secondary};"
             f"  border: none;"
-            f"  padding: 0 12px; height: 32px;"
-            f"  font-size: {font_size}pt; font-weight: normal; }}"
+            f"  padding: 0 8px; height: 36px;"
+            f"  font-size: {font_size}pt; font-weight: 800; }}"
             f"QHeaderView::section:hover {{ color: {table_colors.text_primary}; }}"
-            f"QTableCornerButton::section {{ background: {table_colors.bg};"
+            f"QTableCornerButton::section {{ background: {table_colors.surface3};"
             f"  border: none; }}"
         )
 
@@ -4495,6 +4834,74 @@ class MetadataEditorPanel(
         # Restoring saved widths above can reopen a gap at the trailing edge
         # (or overshoot the viewport) — re-settle the filler column last.
         self._fill_leftover_space()
+
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout(event.size().width())
+
+    def _apply_responsive_layout(self, width: int) -> None:
+        """Mirror the prototype's 1180/1040 responsive breakpoints."""
+        if not hasattr(self, "_toolbar_bar"):
+            return
+        compact = width <= 1180
+        narrow = width <= 1040
+        mode = "narrow" if narrow else "compact" if compact else "wide"
+        for widget in (self._path_chip, self._monitor_badge, self._subdirs_check):
+            widget.setVisible(not compact)
+        self._search_edit.setFixedWidth(150 if narrow else 180 if compact else 230)
+        if hasattr(self, "_footer_desc"):
+            self._footer_desc.setVisible(not compact)
+
+        if not hasattr(self, "_body_splitter"):
+            return
+        sizes = self._body_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        changed = False
+
+        if narrow:
+            if sizes[0] > self._TREE_RAIL_WIDTH + 4:
+                self._last_tree_width = max(self._TREE_OPEN_MIN, sizes[0])
+                sizes[1] += sizes[0] - self._TREE_RAIL_WIDTH
+                sizes[0] = self._TREE_RAIL_WIDTH
+                self._responsive_forced_tree_collapse = True
+                changed = True
+        else:
+            tree_target = min(self._last_tree_width, 195) if compact else self._last_tree_width
+            if self._responsive_forced_tree_collapse:
+                available = max(0, sizes[1] - self._TABLE_OPEN_MIN)
+                take = min(available, max(0, tree_target - sizes[0]))
+                sizes[0] += take
+                sizes[1] -= take
+                if sizes[0] >= self._TREE_OPEN_MIN:
+                    self._responsive_forced_tree_collapse = False
+                changed = changed or take > 0
+            elif sizes[0] > self._TREE_RAIL_WIDTH + 4:
+                delta = tree_target - sizes[0]
+                if delta > 0:
+                    take = min(max(0, sizes[1] - self._TABLE_OPEN_MIN), delta)
+                    sizes[0] += take
+                    sizes[1] -= take
+                    changed = changed or take > 0
+                elif delta < 0:
+                    sizes[0] += delta
+                    sizes[1] -= delta
+                    changed = True
+
+        inspector_target = 300 if narrow else 330 if compact else self._last_inspector_width
+        if sizes[2] > inspector_target:
+            sizes[1] += sizes[2] - inspector_target
+            sizes[2] = inspector_target
+            changed = True
+        elif sizes[2] > self._INSPECTOR_RAIL_WIDTH + 4 and sizes[2] < inspector_target:
+            take = min(max(0, sizes[1] - self._TABLE_OPEN_MIN), inspector_target - sizes[2])
+            sizes[2] += take
+            sizes[1] -= take
+            changed = changed or take > 0
+        if changed:
+            self._apply_body_sizes(sizes, save=False)
+        self._responsive_mode = mode
 
 
     def closeEvent(self, event) -> None:

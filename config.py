@@ -97,7 +97,7 @@ _DEFAULTS: dict[str, Any] = {
 
     # ── Appearance ────────────────────────────────────────────────────────────
     "theme":                "light",
-    "accent_color":         "#0ea5e9",      # NEW v3 – custom accent
+    "accent_color":         "#10A37F",      # BananaFlow Tag Editor design accent
     "language":             _detect_system_language(),
     "accessibility_mode":   False,          # NEW – high-contrast / keyboard nav
 

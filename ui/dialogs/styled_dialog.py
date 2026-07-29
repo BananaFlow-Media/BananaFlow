@@ -171,6 +171,18 @@ def _apply_dialog_theme(dialog: QDialog) -> None:
     qss = _theme_qss_for_dialog(dialog)
     if not qss:
         return
+    is_tag_editor = bool(dialog.property("tagEditorDialog"))
+    parent = dialog.parentWidget()
+    while parent is not None and not is_tag_editor:
+        is_tag_editor = parent.objectName() == "metadataEditorPage"
+        parent = parent.parentWidget()
+    if is_tag_editor:
+        dialog.setProperty("tagEditorDialog", True)
+        try:
+            from ui.panels.metadata_editor.shared import tag_dialog_qss
+            qss += tag_dialog_qss()
+        except ImportError:
+            pass
     dialog.setStyleSheet(qss)
     _apply_dialog_palette(dialog, qss)
 

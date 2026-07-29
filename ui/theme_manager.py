@@ -49,6 +49,7 @@ from config import AppConfig
 # Accent palette  (name → hex)
 # ──────────────────────────────────────────────────────────────────────────────
 ACCENT_PALETTE: Final[dict[str, str]] = {
+    "BananaFlow": "#10A37F",
     "Amber": "#F5A623",  # original brand colour
     "Emerald": "#10b981",
     "Violet": "#7c3aed",
@@ -60,8 +61,8 @@ ACCENT_PALETTE: Final[dict[str, str]] = {
 }
 
 # Default accent (brand colour)
-ACCENT_COLOR: str = ACCENT_PALETTE["Ocean"]
-ACCENT_COLOR_DIM: str = "#0284c7"  # dimmed variant – recomputed on accent change
+ACCENT_COLOR: str = ACCENT_PALETTE["BananaFlow"]
+ACCENT_COLOR_DIM: str = "#0B7A5F"  # dimmed variant – recomputed on accent change
 
 # Semantic colours (theme-independent)
 SUCCESS_COLOR: str = "#10b981"
@@ -2679,4 +2680,3 @@ class ThemeManager(QObject):
             for widget in app.topLevelWidgets()
             if all(hasattr(widget, attr) for attr in _THEME_WINDOW_ATTRS)
         ]
-        

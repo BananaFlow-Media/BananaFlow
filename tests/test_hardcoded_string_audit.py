@@ -40,11 +40,11 @@ _TEXT_METHODS = {
 # _INTENTIONALLY_ENGLISH_IN_HEBREW already treats as not needing
 # translation (product names, platform names, technical terms).
 _ALLOWED = {
-    ("ui/panels/metadata_editor/io_dialog.py", 397, "HTML"),
-    ("ui/panels/metadata_editor/io_dialog.py", 397, "CSV"),
-    ("ui/panels/metadata_editor/io_dialog.py", 399, "English"),
-    ("ui/panels/metadata_editor/io_dialog.py", 465, "M3U8"),
-    ("ui/panels/metadata_editor/io_dialog.py", 465, "M3U"),
+    ("ui/panels/metadata_editor/io_dialog.py", 400, "HTML"),
+    ("ui/panels/metadata_editor/io_dialog.py", 400, "CSV"),
+    ("ui/panels/metadata_editor/io_dialog.py", 402, "English"),
+    ("ui/panels/metadata_editor/io_dialog.py", 468, "M3U8"),
+    ("ui/panels/metadata_editor/io_dialog.py", 468, "M3U"),
 }
 
 

@@ -55,6 +55,9 @@ from ui.direction import force_ltr_label, isolate_number
 from ui.dialogs.styled_dialog import CheckMarkBox, StyledDialog, confirm, set_button_role, show_info
 from ui.i18n import t
 from ui.theme_manager import get_colors
+from ui.panels.metadata_editor.shared import mark_tag_editor_dialog
+from ui.dialogs.styled_dialog import add_header
+from qfluentwidgets import FluentIcon
 
 
 def _dim_accent(hex_color: str, factor: float = 0.85) -> str:
@@ -115,6 +118,7 @@ class DuplicateFilesDialog(StyledDialog):
         parent=None,
     ) -> None:
         super().__init__(parent, minimum_size=(880, 560), resize_to=(1040, 720))
+        mark_tag_editor_dialog(self)
         self._result = groups if hasattr(groups, "groups") else None
         self._groups = ({group.id: [Path(path) for path in group.paths] for group in groups.groups}
                         if self._result is not None else groups)
@@ -148,7 +152,10 @@ class DuplicateFilesDialog(StyledDialog):
         layout.setContentsMargins(16, 16, 16, 12)
         layout.setSpacing(10)
 
-        layout.addWidget(self._make_header(c))
+        summary = self._make_header(c)
+        add_header(layout, t("duplicates_manage_title"), summary.text(),
+                   icon=FluentIcon.FINGERPRINT.icon())
+        summary.setVisible(False)
         if self._result is not None and self._result.partial:
             warning = QLabel(t("duplicates_partial_warning", n=len(self._result.warnings)))
             warning.setObjectName("duplicatePartialWarning")

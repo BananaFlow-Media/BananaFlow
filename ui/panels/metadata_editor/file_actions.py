@@ -174,12 +174,21 @@ class FileActionsMixin:
     def _move_tracks(self, tracks: list[AudioTrackItem]) -> None:
         if not self._root_folder:
             return
-        folder = QFileDialog.getExistingDirectory(self, t("meta_move_choose_folder"), str(self._root_folder))
-        if not folder:
+        from .dialogs import MovePathDialog
+        source_paths = {track.path for track in tracks}
+        source_parents = {path.parent for path in source_paths}
+        destinations = [
+            folder for folder in sorted(
+                self._folder_items, key=lambda value: str(value).casefold())
+            if folder not in source_parents and folder not in source_paths
+        ]
+        dialog = MovePathDialog(
+            tracks[0].path, destinations, self, item_count=len(tracks))
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.destination is None:
             return
         by_path = {track.path: track for track in tracks}
         result = self._run_file_operation(
-            "move_paths", list(by_path), Path(folder))
+            "move_paths", list(by_path), Path(dialog.destination))
         if result is None:
             return
         for outcome in result.succeeded:
@@ -191,16 +200,55 @@ class FileActionsMixin:
             self._refresh_checked_scope_state()
 
     def _show_properties(self, tracks: list[AudioTrackItem]) -> None:
-        lines: list[str] = []
+        from .dialogs import PropertiesDialog
+
+        files = []
         for track in tracks:
             try:
                 props = self._file_operations.properties(track.path)
             except FileOperationError as exc:
-                lines.append(str(exc))
+                files.append((track.path.name, [(t("meta_error_title"), str(exc))]))
                 continue
-            lines.append(t("meta_properties_item", name=props.path.name, path=str(props.path), size=isolate_number(f"{props.size_bytes:,}"), modified=isolate_number(display_timestamp(props.modified_at))))
-        if lines:
-            prompts.show_info(self, t("meta_properties"), "\n\n".join(lines))
+            metadata = track.original.file_properties
+            values = {
+                "path": str(props.path),
+                "format_id": metadata.get("format_id", track.format_id),
+                "duration_seconds": metadata.get("duration_seconds"),
+                "bitrate": metadata.get("bitrate"),
+                "sample_rate": metadata.get("sample_rate"),
+                "channels": metadata.get("channels"),
+                "size_bytes": metadata.get("size_bytes", props.size_bytes),
+                "modified_time": metadata.get(
+                    "modified_time", props.modified_at.timestamp()),
+                "capability": (
+                    t("meta_property_capability_full")
+                    if track.metadata_editable else t("mt_status_read_only")),
+            }
+            rows = []
+            for key, label_key in (
+                ("path", "meta_property_path"),
+                ("format_id", "meta_property_format"),
+                ("duration_seconds", "meta_property_duration"),
+                ("bitrate", "meta_property_bitrate"),
+                ("sample_rate", "meta_property_sample_rate"),
+                ("channels", "meta_property_channels"),
+                ("size_bytes", "meta_property_size"),
+                ("modified_time", "meta_property_modified"),
+                ("capability", "meta_property_capability"),
+            ):
+                value = values[key]
+                display = (t("meta_inspector_empty_value") if value in (None, "")
+                           else self._format_property_value(key, value))
+                rows.append((t(label_key), display))
+            files.append((track.path.name, rows))
+        if files:
+            PropertiesDialog(
+                files,
+                self,
+                open_callback=lambda: self._open_tracks(tracks),
+                reveal_callback=lambda: self._reveal_tracks(tracks),
+                copy_callback=lambda: self._copy_paths(tracks),
+            ).exec()
 
     def _perform_track_operation(self, tracks: list[AudioTrackItem], operation) -> None:
         errors: list[str] = []

@@ -46,6 +46,7 @@ from ui.i18n import t
 from utils.paths import get_tag_action_presets_path
 
 from .action_diagnostics import format_action_diagnostic
+from .shared import mark_tag_editor_dialog
 
 
 _FIELD_LABEL_KEYS = {
@@ -97,6 +98,7 @@ class TagActionDialog(StyledDialog):
                  preset_path: Path | None = None, accept_preview=None,
                  open_preset_transfer=None) -> None:
         super().__init__(parent, minimum_size=(860, 620), resize_to=(1040, 720))
+        mark_tag_editor_dialog(self)
         self.setWindowTitle(t("meta_action_engine_title"))
         self.setAccessibleName(t("meta_action_engine_title"))
         self._workspace = workspace
