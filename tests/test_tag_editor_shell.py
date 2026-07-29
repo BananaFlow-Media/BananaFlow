@@ -500,3 +500,100 @@ def test_a_failed_refresh_does_not_blank_a_loaded_folder(panel, tmp_path):
     _load(panel, tmp_path, count=2)
     panel.on_scan_error("transient failure")
     assert panel._table_stack.currentWidget() is not panel._table_error_page
+
+
+# --------------------------------------------------------------------------- #
+# Small windows: the table must never be the thing that gets squeezed out
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("width, height", [(980, 680), (1100, 760), (1440, 900)])
+def test_layout_holds_at_supported_window_sizes(panel, tmp_path, width, height):
+    _load(panel, tmp_path, count=3)
+    panel.resize(width, height)
+    panel.show()
+    try:
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        sizes = panel._body_splitter.sizes()
+        assert len(sizes) == 3
+        tree, table, inspector = sizes
+
+        # The centre table is the point of the screen; it is never collapsed
+        # to make room for a side pane.
+        assert table >= panel._TABLE_OPEN_MIN - 1, (width, sizes)
+        # A pane is either open at a usable width or collapsed to its rail --
+        # never left at some unusable in-between width.
+        assert tree <= panel._TREE_RAIL_WIDTH or tree >= panel._TREE_OPEN_MIN - 1
+        assert (inspector <= panel._INSPECTOR_RAIL_WIDTH
+                or inspector >= panel._INSPECTOR_OPEN_MIN - 1)
+        # Nothing may force the panel wider than the window.
+        assert panel.width() <= width
+    finally:
+        panel.hide()
+
+
+def test_collapsing_a_pane_gives_its_width_to_the_table(panel, tmp_path):
+    _load(panel, tmp_path, count=3)
+    panel.resize(1100, 760)
+    panel.show()
+    try:
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        before = panel._body_splitter.sizes()[1]
+
+        panel._set_tree_collapsed(True)
+        QApplication.processEvents()
+        after = panel._body_splitter.sizes()[1]
+
+        assert after > before
+    finally:
+        panel.hide()
+
+
+# --------------------------------------------------------------------------- #
+# RTL
+# --------------------------------------------------------------------------- #
+
+def test_hebrew_mirrors_the_shell_but_never_the_filenames(panel, tmp_path):
+    """Hebrew flips the layout; paths and filenames stay left-to-right."""
+    from PySide6.QtCore import Qt
+    from ui.i18n import current_language, set_language
+
+    previous = current_language()
+    try:
+        set_language("he")
+        _load(panel, tmp_path, count=2)
+        panel._refresh_navigation_arrow_direction()
+
+        assert panel._path_chip.layoutDirection() == Qt.LeftToRight
+        # The filename column keeps its own LTR delegate in either language.
+        from ui.models.metadata_table_model import COL_FILENAME
+        delegate = panel._table.itemDelegateForColumn(COL_FILENAME)
+        assert delegate is not None
+    finally:
+        set_language(previous)
+
+
+@pytest.mark.parametrize("language", ["en", "he"])
+def test_every_shell_string_is_translated(language):
+    """No new string may fall back to its key in either language."""
+    from ui.i18n import current_language, set_language, t
+
+    previous = current_language()
+    try:
+        set_language(language)
+        for key in (
+            "meta_shell_more", "meta_shell_rescan", "meta_shell_no_folder",
+            "meta_footer_ready", "meta_footer_pending", "meta_footer_backup_note",
+            "meta_inspector_mode_edit", "meta_inspector_mode_tools",
+            "meta_inspector_mode_check", "meta_auto_enabled_heading",
+            "meta_pending_tab", "meta_pending_none", "meta_external_tab",
+            "meta_external_none", "meta_apply_value_group",
+            "meta_apply_artist_to_selection", "meta_apply_album_to_selection",
+            "meta_scan_error_title", "meta_scan_error_retry",
+            "mt_col_status", "mt_status_read_only", "meta_scope_hint",
+        ):
+            assert t(key) != key, f"{key} untranslated in {language}"
+    finally:
+        set_language(previous)

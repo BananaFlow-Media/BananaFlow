@@ -595,17 +595,26 @@ class MetadataEditorPanel(
             empty_qss = f"QWidget {{ background: {c.bg}; color: {c.text_primary}; }}"
             self._table_empty_page.setStyleSheet(empty_qss)
             self._table_loading_page.setStyleSheet(empty_qss)
+            if hasattr(self, "_table_error_page"):
+                self._table_error_page.setStyleSheet(empty_qss)
         if hasattr(self, "_empty_state_card"):
             card_qss = (
                 "QFrame { background: transparent; border: none; border-radius: 0px; }"
                 "QLabel { background: transparent; border: none; }"
             )
+            title_qss = f"color: {c.text_primary}; font-size: 15px; font-weight: bold;"
+            body_qss = f"color: {c.text_secondary}; font-size: 13px;"
             self._empty_state_card.setStyleSheet(card_qss)
             self._loading_state_card.setStyleSheet(card_qss)
-            self._empty_title_lbl.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; font-weight: bold;")
-            self._loading_title_lbl.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; font-weight: bold;")
-            self._empty_body_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
-            self._loading_detail_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+            self._empty_title_lbl.setStyleSheet(title_qss)
+            self._loading_title_lbl.setStyleSheet(title_qss)
+            self._empty_body_lbl.setStyleSheet(body_qss)
+            self._loading_detail_lbl.setStyleSheet(body_qss)
+            if hasattr(self, "_error_state_card"):
+                self._error_state_card.setStyleSheet(card_qss)
+                self._error_title_lbl.setStyleSheet(title_qss)
+                self._error_body_lbl.setStyleSheet(body_qss)
+        self._apply_shell_theme(c)
         if hasattr(self, "_center_progress"):
             self._center_progress.setStyleSheet(
                 f"QProgressBar {{ background: {c.surface2}; border: none; border-radius: 4px; }}"
@@ -696,6 +705,71 @@ class MetadataEditorPanel(
         if hasattr(self, "_table_info_lbl"):
             self._refresh_checked_scope_state()
             self._refresh_selection_scope_state()
+
+    def _apply_shell_theme(self, c) -> None:
+        """Theme the pieces the redesign introduced.
+
+        Kept separate from _apply_theme's original body only so the two are
+        legible; it runs on every theme change exactly the same way.
+        """
+        accent = QColor(c.accent)
+        accent_soft = "transparent"
+        if accent.isValid():
+            r, g, b, _ = accent.getRgb()
+            accent_soft = f"rgba({r}, {g}, {b}, 0.12)"
+
+        if hasattr(self, "_path_chip"):
+            self._path_chip.setStyleSheet(
+                f"QLabel {{ background: {c.surface2}; color: {c.text_secondary};"
+                f" border-radius: 8px; padding: 5px 9px; font-size: 11px; }}"
+            )
+        if hasattr(self, "_monitoring_status"):
+            self._monitoring_status.setStyleSheet(
+                f"QLabel {{ background: {accent_soft}; color: {c.accent};"
+                f" border-radius: 7px; padding: 4px 8px;"
+                f" font-size: 11px; font-weight: bold; }}"
+            )
+        if hasattr(self, "_footer_bar"):
+            self._footer_bar.setStyleSheet(
+                f"QFrame#tagEditorFooter {{ background: {c.surface};"
+                f" border: none; border-radius: 0px; }}"
+            )
+            self._footer_sep.setStyleSheet(f"background: {c.border}; border: none;")
+            self._footer_count.setStyleSheet(
+                f"QLabel {{ background: {accent_soft}; color: {c.accent};"
+                f" border-radius: 9px; font-weight: bold; font-size: 13px; }}"
+            )
+            self._footer_title.setStyleSheet(
+                f"color: {c.text_primary}; font-size: 12px; font-weight: bold;")
+            self._footer_desc.setStyleSheet(
+                f"color: {c.text_secondary}; font-size: 11px;")
+        if hasattr(self, "_table_status_bar"):
+            self._table_status_bar.setStyleSheet(
+                f"QFrame#tagEditorTableStatus {{ background: {c.surface2};"
+                f" border-top: 1px solid {c.border}; border-radius: 0px; }}"
+                f"QLabel {{ color: {c.text_secondary}; font-size: 11px; }}"
+            )
+        if getattr(self, "_inspector_mode_buttons", None):
+            mode_qss = (
+                f"QPushButton {{ background: transparent; color: {c.text_secondary};"
+                f" border: none; border-radius: 7px; padding: 5px 8px;"
+                f" font-weight: bold; font-size: 12px; }}"
+                f"QPushButton:hover {{ background: {c.surface2}; }}"
+                f"QPushButton:checked {{ background: {c.accent}; color: #ffffff; }}"
+            )
+            for btn in self._inspector_mode_buttons.values():
+                btn.setStyleSheet(mode_qss)
+        if getattr(self, "_inspector_tool_buttons", None):
+            chip_qss = (
+                f"QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 7px;"
+                f" padding: 4px 9px; font-size: 11px; font-weight: bold; }}"
+                f"QPushButton:hover {{ border-color: {c.accent}; }}"
+                f"QPushButton:checked {{ background: {accent_soft};"
+                f" border-color: {c.accent}; color: {c.accent}; }}"
+            )
+            for btn in self._inspector_tool_buttons:
+                btn.setStyleSheet(chip_qss)
 
     def _toolbar_button_style(self, role: str) -> str:
         c = get_colors()
@@ -2297,6 +2371,13 @@ class MetadataEditorPanel(
         self._select_inspector_tool(index)
 
     def _refresh_tool_button_states(self) -> None:
+        """Track which pane is open.
+
+        Appearance for the mode tabs and sub-tab chips comes from their
+        stylesheets' :checked rule (see _apply_shell_theme), so this only sets
+        state. Checked state is also what carries "this one is open" to a
+        screen reader and in high contrast, where a background colour does not.
+        """
         c = get_colors()
         button_qss = (
             "QPushButton { background: transparent; border: none; border-radius: 8px; padding: 3px; }"
@@ -2306,21 +2387,21 @@ class MetadataEditorPanel(
             f"QPushButton {{ background: {c.surface2}; border: 1px solid {c.border};"
             " border-radius: 8px; padding: 3px; }"
         )
-        if hasattr(self, "_inspector_tool_buttons"):
-            for idx, btn in enumerate(self._inspector_tool_buttons):
-                active = idx == self._active_inspector_tool and not self._right_collapsed
-                btn.setStyleSheet(active_qss if active else button_qss)
-                # Which tool is open was previously shown by background colour
-                # alone.  The checked state carries the same meaning to a screen
-                # reader and in high contrast; the stylesheet above still owns
-                # the appearance, so nothing changes visually.
-                btn.setChecked(active)
-        if getattr(self, "_inspector_mode_buttons", None) and self._inspector_pane_modes:
-            active_mode = self._inspector_pane_modes[self._active_inspector_tool]
-            for mode, btn in self._inspector_mode_buttons.items():
-                btn.setChecked(mode == active_mode and not self._right_collapsed)
-                icon = self._inspector_tool_kinds[idx] if idx < len(self._inspector_tool_kinds) else FluentIcon.EDIT
-                self._set_tool_button_icon(btn, icon)
+        open_pane = self._active_inspector_tool
+        expanded = not self._right_collapsed
+        active_mode = (
+            self._inspector_pane_modes[open_pane]
+            if self._inspector_pane_modes else None
+        )
+
+        for idx, btn in enumerate(getattr(self, "_inspector_tool_buttons", [])):
+            btn.setChecked(idx == open_pane and expanded)
+        for mode, btn in getattr(self, "_inspector_mode_buttons", {}).items():
+            btn.setChecked(mode == active_mode and expanded)
+
+        # The collapsed rail is icon-only, so it keeps the icon-button styling.
+        for mode, btn in getattr(self, "_inspector_rail_buttons", {}).items():
+            btn.setStyleSheet(active_qss if mode == active_mode else button_qss)
         if hasattr(self, "_tree_toggle_btn"):
             self._tree_toggle_btn.setStyleSheet(button_qss)
             self._set_tool_button_icon(self._tree_toggle_btn, FluentIcon.FOLDER)
