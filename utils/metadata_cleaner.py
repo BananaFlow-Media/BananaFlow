@@ -64,7 +64,10 @@ def clean_title_and_artist(title: str, artist: str = "") -> tuple[str, str]:
     # Strip only promotional bracketed suffixes (Official/Audio/HD/...). We intentionally
     # do NOT strip every trailing "(...)" — that would also remove legitimate parts of a
     # title such as "(Live)", "(feat. X)" or any Hebrew parenthetical.
-    cleaned_title = re.sub(r'\s*[([].*?(Official|Video|Clip|Audio|Prod|By|Remaster|Lyrics|HD|4K|Direct|Studio).*?[)\]]', '', cleaned_title, flags=re.IGNORECASE).strip()
+    # "Remaster" identifies a different release/recording intent and must
+    # survive into Spotify-to-YouTube matching. Presentation labels are safe
+    # to remove; recording-version labels are not.
+    cleaned_title = re.sub(r'\s*[([].*?(Official|Video|Clip|Audio|Prod|By|Lyrics|HD|4K|Direct|Studio).*?[)\]]', '', cleaned_title, flags=re.IGNORECASE).strip()
     
     # Check if title is in "Artist - Title" format
     if "-" in cleaned_title:

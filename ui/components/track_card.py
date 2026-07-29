@@ -174,6 +174,9 @@ class TrackCard(QFrame):
         spotify_id:    str         = "",
         spotify_key_kind: str      = "spotify_id",
         match_status:  str         = "matched",
+        resolution_error: str      = "",
+        source_kind:    str         = "",
+        source_url:     str         = "",
         parent:       QWidget      = None,
     ) -> None:
         super().__init__(parent)
@@ -195,11 +198,21 @@ class TrackCard(QFrame):
         self.spotify_id       = spotify_id
         self.spotify_key_kind = spotify_key_kind
         self.match_status     = match_status
+        self.resolution_error = resolution_error
+        self.source_kind      = source_kind
+        self.source_url       = source_url
         # Ensure platform is a string
         if hasattr(platform, "value"):
             plat_str = platform.value
         else:
             plat_str = str(platform).lower()
+        # PR #63 briefly persisted valid Spotify strict misses as permanently
+        # disabled ``unresolved`` cards. They now resume through the broader
+        # fallback contract after restart; genuinely invalid metadata remains
+        # disabled and explicit.
+        if plat_str == "spotify" and self.match_status == "unresolved":
+            self.match_status = "pending"
+            self.resolution_error = ""
         self._platform = plat_str
         self._status   = "queued"
         # Caption state: which stage, its remaining time, and the live rate.
@@ -215,6 +228,10 @@ class TrackCard(QFrame):
 
         self._build(title, artist, duration, plat_str)
         self._apply_shadow()
+        if self.match_status == "metadata_invalid":
+            self.mark_metadata_invalid(
+                t(resolution_error) if resolution_error else t("spotify_metadata_invalid_card")
+            )
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -391,6 +408,20 @@ class TrackCard(QFrame):
 
     def set_selected(self, checked: bool) -> None:
         self._check.setChecked(checked)
+
+    def is_downloadable(self) -> bool:
+        """Whether ordinary queue construction may submit this card."""
+        return self.match_status not in ("metadata_invalid", "unresolved")
+
+    def mark_metadata_invalid(self, message: str = "") -> None:
+        """Make malformed Spotify source metadata explicit and non-downloadable."""
+        self.match_status = "metadata_invalid"
+        self.resolution_error = self.resolution_error or "spotify_metadata_invalid_card"
+        self._check.setChecked(False)
+        self._check.setEnabled(False)
+        self.set_status("error")
+        if message:
+            self._artist_lbl.setText(message)
 
     @property
     def platform(self) -> str:

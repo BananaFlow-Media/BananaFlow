@@ -108,7 +108,7 @@ class ChannelScrapeWorker(QThread):
     def _scrape_flat_tab(self, tab: TabInfo) -> list[VideoInfo]:
         """Scrape a non-playlist tab using yt-dlp flat-playlist."""
         import yt_dlp
-        from utils.yt_dlp_opts import build_parse_ydl_opts
+        from utils.yt_dlp_opts import build_parse_ydl_opts, private_cookie_ydl_opts
 
         opts = build_parse_ydl_opts(
             cookies_file=self._cookies_file,
@@ -119,8 +119,9 @@ class ChannelScrapeWorker(QThread):
         videos: list[VideoInfo] = []
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(tab.url, download=False)
+            with private_cookie_ydl_opts(opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(tab.url, download=False)
 
             if not info:
                 return videos
@@ -147,7 +148,7 @@ class ChannelScrapeWorker(QThread):
         3. Return all videos with playlist_name / playlist_index set.
         """
         import yt_dlp
-        from utils.yt_dlp_opts import build_parse_ydl_opts
+        from utils.yt_dlp_opts import build_parse_ydl_opts, private_cookie_ydl_opts
 
         opts = build_parse_ydl_opts(
             cookies_file=self._cookies_file,
@@ -158,8 +159,9 @@ class ChannelScrapeWorker(QThread):
         # ── Step 1: Get playlist list ──────────────────────────────────────────
         playlist_entries: list[dict] = []
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(tab.url, download=False)
+            with private_cookie_ydl_opts(opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(tab.url, download=False)
             if info:
                 playlist_entries = [e for e in (info.get("entries") or []) if e]
         except Exception as exc:  # noqa: BLE001
@@ -187,8 +189,9 @@ class ChannelScrapeWorker(QThread):
                 continue
 
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    pl_info = ydl.extract_info(pl_url, download=False)
+                with private_cookie_ydl_opts(opts) as private_opts:
+                    with yt_dlp.YoutubeDL(private_opts) as ydl:
+                        pl_info = ydl.extract_info(pl_url, download=False)
 
                 if not pl_info:
                     continue

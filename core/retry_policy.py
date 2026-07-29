@@ -22,6 +22,16 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.warning_classifier import (
+    ACCOUNT_REQUIRED,
+    BROWSER_COOKIE_ACCESS_BLOCKED,
+    COOKIES_EXPIRED_OR_INVALID,
+    JS_RUNTIME_MISSING,
+    PO_TOKEN_MISSING,
+    RATE_LIMITED_OR_FORBIDDEN,
+    classify_warning,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,8 +74,47 @@ _PERMANENT_PATTERNS = [
     # refused outright and retrying changes nothing).
     re.compile(r"po[ _]?token", re.I),
     re.compile(r"cookies?.*(no longer valid|expired|invalid)", re.I),
-    re.compile(r"\b403\b|forbidden", re.I),
 ]
+
+_PERMANENT_HTTP_403_RE = re.compile(r"\b403\b|forbidden", re.I)
+
+_TEMPORARY_MEDIA_403_RE = re.compile(
+    r"unable to download (?:video )?data[^\n]*\b403\b|"
+    r"\b403\b[^\n]*unable to download (?:video )?data",
+    re.I,
+)
+
+_PERMANENT_LOGGER_CATEGORIES = frozenset({
+    ACCOUNT_REQUIRED,
+    BROWSER_COOKIE_ACCESS_BLOCKED,
+    COOKIES_EXPIRED_OR_INVALID,
+    JS_RUNTIME_MISSING,
+    PO_TOKEN_MISSING,
+})
+_LOGGER_EVIDENCE_SEPARATOR_RE = re.compile(r"\s+\|\s+")
+
+
+def is_temporary_media_403(error_message: str) -> bool:
+    """True only for a transfer-stage 403 fixed by fresh extraction data."""
+    return bool(_TEMPORARY_MEDIA_403_RE.search(error_message or ""))
+
+
+def _has_permanent_logger_evidence(error_message: str) -> bool:
+    """Inspect retained logger items before the final yt-dlp exception."""
+    for item in _LOGGER_EVIDENCE_SEPARATOR_RE.split(error_message or ""):
+        category = classify_warning(item)
+        if category in _PERMANENT_LOGGER_CATEGORIES:
+            return True
+        if category == RATE_LIMITED_OR_FORBIDDEN:
+            # A retained generic 403 or bot challenge is permanent. The final
+            # bare transfer-stage item remains eligible for one fresh attempt,
+            # and 429/rate-limit evidence retains its normal transient policy.
+            if not is_temporary_media_403(item) and (
+                _PERMANENT_HTTP_403_RE.search(item)
+                or re.search(r"not a bot", item, re.I)
+            ):
+                return True
+    return False
 
 
 def is_retriable(error_message: str) -> bool:
@@ -74,9 +123,15 @@ def is_retriable(error_message: str) -> bool:
     that is worth retrying.
     """
     # Check permanent patterns first — they take priority
+    if _has_permanent_logger_evidence(error_message):
+        return False
     for pat in _PERMANENT_PATTERNS:
         if pat.search(error_message):
             return False
+    if is_temporary_media_403(error_message):
+        return True
+    if _PERMANENT_HTTP_403_RE.search(error_message):
+        return False
     # Check retriable patterns
     for pat in _RETRIABLE_PATTERNS:
         if pat.search(error_message):
@@ -148,10 +203,18 @@ def retry_download(
         except Exception as exc:
             last_error = str(exc)
 
-            if attempt >= policy.max_retries:
+            # Refresh a transfer-stage 403 once; a second refusal is final for
+            # this track. Generic retries retain their configured budget.
+            retry_limit = (
+                min(policy.max_retries, 1)
+                if is_temporary_media_403(last_error)
+                else policy.max_retries
+            )
+
+            if attempt >= retry_limit:
                 logger.warning(
                     "[Retry] %s — all %d attempts exhausted: %s",
-                    job_key, policy.max_retries + 1, last_error[:100],
+                    job_key, retry_limit + 1, last_error[:100],
                 )
                 return last_error
 
@@ -166,7 +229,7 @@ def retry_download(
             logger.info(
                 "[Retry] %s — attempt %d/%d failed (retriable), "
                 "waiting %.1fs: %s",
-                job_key, attempt + 1, policy.max_retries + 1,
+                job_key, attempt + 1, retry_limit + 1,
                 delay, last_error[:80],
             )
 

@@ -160,3 +160,51 @@ def test_appwindow_idle_close_remains_immediate(monkeypatch):
         assert event.accepted == 1 and event.ignored == 0
     finally:
         controller.deleteLater()
+
+
+def test_appwindow_defers_service_close_until_prefetch_has_joined(monkeypatch):
+    _app()
+    controller = MetadataController()
+    harness = _WindowHarness(controller)
+    harness._save_state = lambda: None
+    harness._save_queue_state = lambda: None
+    harness._clipboard_worker = None
+    harness._download_ctrl = SimpleNamespace(_dl_worker=None)
+    harness._fetch_ctrl = SimpleNamespace(_fetch_worker=None, _scraper_worker=None)
+    harness._search_ctrl = SimpleNamespace(_search_worker=None)
+    closed = []
+    harness._svc = SimpleNamespace(close=lambda: closed.append(True))
+
+    class _Prefetcher:
+        def __init__(self):
+            self.joined = False
+            self.calls = 0
+
+        def shutdown(self, timeout_s=0.0):
+            self.calls += 1
+            return self.joined
+
+        def cancel(self):
+            self.calls += 1
+
+    prefetcher = _Prefetcher()
+    harness._match_prefetcher = prefetcher
+    scheduled = []
+    monkeypatch.setattr(
+        "ui.app_window.QTimer.singleShot", lambda _ms, callback: scheduled.append(callback),
+    )
+    monkeypatch.setitem(sys.modules, "keyboard", SimpleNamespace(unhook_all=lambda: None))
+    first = _CloseEvent()
+    try:
+        AppWindow.closeEvent(harness, first)
+        assert first.ignored == 1 and first.accepted == 0
+        assert closed == []
+        assert len(scheduled) == 1
+
+        prefetcher.joined = True
+        second = _CloseEvent()
+        AppWindow.closeEvent(harness, second)
+        assert second.accepted == 1 and second.ignored == 0
+        assert closed == [True]
+    finally:
+        controller.deleteLater()

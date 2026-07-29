@@ -45,6 +45,33 @@ DEFAULT_PREFETCH_LIMIT = 8
 # Concurrency for the pre-resolve pass. Matches the stage-1 resolve fan-out;
 # the searches are network-bound and independent.
 _PREFETCH_WORKERS = 3
+_prefetched_matches_lock = threading.Lock()
+_prefetched_match_keys: set[str] = set()
+
+
+def _prefetch_key(track: dict) -> str:
+    # Keep this identical to the persistent cache key. In particular, a
+    # spotify_url is normalized to its bare track ID and metadata-only tracks
+    # use the same composite hash rather than silently losing provenance.
+    from core.scraper import _spotify_cache_key
+    return _spotify_cache_key(track)[0]
+
+
+def clear_prefetched_matches() -> None:
+    with _prefetched_matches_lock:
+        _prefetched_match_keys.clear()
+
+
+def mark_prefetched_match(track: dict) -> None:
+    key = _prefetch_key(track)
+    if key:
+        with _prefetched_matches_lock:
+            _prefetched_match_keys.add(key)
+
+
+def was_prefetched_match(spotify_key: str) -> bool:
+    with _prefetched_matches_lock:
+        return spotify_key in _prefetched_match_keys
 
 
 class MatchPrefetcher:
@@ -67,6 +94,8 @@ class MatchPrefetcher:
         self._cancel = threading.Event()
         self._cancel.set()  # idle until the first start()
         self._thread: Optional[threading.Thread] = None
+        self._threads: set[threading.Thread] = set()
+        self._warm_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
     # ── Public API (call from any thread) ─────────────────────────────────────
@@ -83,17 +112,19 @@ class MatchPrefetcher:
         """
         with self._lock:
             self._cancel_locked()
+            clear_prefetched_matches()
             if cookies_file is not None:
                 self._cookies = cookies_file
             subset = [t for t in tracks if t][: self._limit]
             cancel = threading.Event()
             self._cancel = cancel
             self._thread = threading.Thread(
-                target=self._run,
+                target=self._run_owned,
                 args=(subset, cancel),
                 name="match-prefetch",
                 daemon=True,
             )
+            self._threads.add(self._thread)
             self._thread.start()
 
     def warm_up_async(self) -> None:
@@ -111,7 +142,13 @@ class MatchPrefetcher:
             except Exception as exc:  # noqa: BLE001 - warm-up must never raise out
                 logger.debug("[prefetch] async warm-up failed: %s", exc)
 
-        threading.Thread(target=_warm, name="plugin-warmup", daemon=True).start()
+        with self._lock:
+            if self._warm_thread is not None and self._warm_thread.is_alive():
+                return
+            self._warm_thread = threading.Thread(
+                target=_warm, name="plugin-warmup", daemon=True,
+            )
+            self._warm_thread.start()
 
     def cancel(self) -> None:
         """Signal the background run to stop as soon as possible.
@@ -122,8 +159,52 @@ class MatchPrefetcher:
         with self._lock:
             self._cancel_locked()
 
+    def shutdown(self, timeout_s: float = 0.0) -> bool:
+        """Cancel owned work and join it within one total time budget.
+
+        ``False`` means a provider/plugin call is still at its own bounded
+        cancellation boundary. The UI keeps services alive and retries from
+        the event loop instead of blocking or destroying dependencies beneath
+        that work.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._lock:
+            self._cancel_locked()
+            owned_threads = set(self._threads)
+            if self._thread is not None:
+                owned_threads.add(self._thread)
+            if self._warm_thread is not None:
+                owned_threads.add(self._warm_thread)
+            threads = tuple(
+                thread for thread in owned_threads
+                if thread is not threading.current_thread()
+            )
+
+        for thread in threads:
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(remaining)
+
+        stopped = all(not thread.is_alive() for thread in threads)
+        if stopped:
+            with self._lock:
+                if self._thread is not None and not self._thread.is_alive():
+                    self._thread = None
+                self._threads = {
+                    thread for thread in self._threads if thread.is_alive()
+                }
+                if self._warm_thread is not None and not self._warm_thread.is_alive():
+                    self._warm_thread = None
+        return stopped
+
     def _cancel_locked(self) -> None:
         self._cancel.set()
+
+    def _run_owned(self, tracks: list[dict], cancel: threading.Event) -> None:
+        try:
+            self._run(tracks, cancel)
+        finally:
+            with self._lock:
+                self._threads.discard(threading.current_thread())
 
     # ── Background worker ─────────────────────────────────────────────────────
 
@@ -151,7 +232,7 @@ class MatchPrefetcher:
             title = td.get("title", "")
             started = time.monotonic()
             try:
-                resolve_track_to_youtube(
+                resolved = resolve_track_to_youtube(
                     td,
                     cookies_file=self._cookies,
                     cancel_check=cancel.is_set,
@@ -159,6 +240,8 @@ class MatchPrefetcher:
             except Exception as exc:  # noqa: BLE001 - a bad match must not sink prefetch
                 logger.debug("[prefetch] resolve failed for %r: %s", title, exc)
                 return
+            if resolved and not cancel.is_set():
+                mark_prefetched_match(td)
             logger.debug(
                 "[timing][prefetch] resolved %r in %.2fs",
                 title, time.monotonic() - started,

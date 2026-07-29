@@ -5,6 +5,8 @@ tests/test_yt_dlp_opts.py  –  JS runtime selection for yt-dlp options
 
 from __future__ import annotations
 
+import pytest
+
 from utils import yt_dlp_opts
 
 
@@ -176,6 +178,28 @@ class TestPoTokenCircuitBreaker:
         assert calls[0][1]["stderr"] is yt_dlp_opts.subprocess.PIPE
         assert calls[1][1]["stderr"] is yt_dlp_opts.subprocess.PIPE
         assert "stderr" not in calls[2][1]
+        assert yt_dlp_opts.po_token_provider_circuit_open()
+
+    def test_bgutil_timeouts_open_circuit_and_bound_repeated_startup_work(self, monkeypatch):
+        """The packaged failure was TimeoutExpired, not a non-zero exit."""
+        from yt_dlp.utils import Popen
+
+        calls = []
+
+        def timeout_run(command, *args, **kwargs):
+            calls.append(command)
+            raise yt_dlp_opts.subprocess.TimeoutExpired(command, 15.0)
+
+        monkeypatch.setattr(Popen, "run", staticmethod(timeout_run))
+        monkeypatch.setattr(yt_dlp_opts, "_bgutil_stderr_capture_installed", False)
+        yt_dlp_opts.install_bgutil_stderr_capture()
+
+        for _ in range(2):
+            with pytest.raises(yt_dlp_opts.subprocess.TimeoutExpired):
+                Popen.run(["deno", "run", "generate_once.ts", "--version"])
+
+        assert len(calls) == 2
+        assert yt_dlp_opts.po_token_provider_metrics()["attempts"] == 2
         assert yt_dlp_opts.po_token_provider_circuit_open()
 
     def test_diagnostics_do_not_spend_provider_attempt_budget(self):

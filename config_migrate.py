@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import sys
 from typing import Callable
 
 from core.quality_presets import (
@@ -43,7 +44,7 @@ from core.quality_presets import (
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump this when adding a new migration.
-CURRENT_VERSION: int = 9
+CURRENT_VERSION: int = 10
 
 _RETIRED_SPOTIFY_DEFAULT_SHA256 = (
     "253081b21dd3bfb76e467c5811e5084a4bdd47c3dba9cabdcb2600cda6b27da9"  # pragma: allowlist secret
@@ -195,6 +196,24 @@ def _media_format_to_media_type(data: dict) -> None:
     data.pop("media_format", None)
 
 
+_UNSUPPORTED_WINDOWS_LIVE_CHROMIUM = frozenset({
+    "chrome", "edge", "brave", "chromium",
+})
+
+
+def _clear_unsupported_windows_browser_cookie_source(data: dict) -> None:
+    """Remove legacy live-Chromium cookie extraction on Windows once.
+
+    The UI cannot merely hide an unsafe stored value: background download
+    requests read configuration directly. The migration clears and persists
+    that value and records a one-time, user-facing recovery notice.
+    """
+    value = str(data.get("cookies_browser") or "").strip().lower()
+    if sys.platform == "win32" and value in _UNSUPPORTED_WINDOWS_LIVE_CHROMIUM:
+        data["cookies_browser"] = ""
+        data["cookies_browser_migration_notice_pending"] = True
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Migration registry
 # ──────────────────────────────────────────────────────────────────────────────
@@ -276,6 +295,12 @@ _MIGRATIONS: list[tuple[int, str, Callable[[dict], None]]] = [
         9,
         "Remove the retired committed Spotify proxy credential default",
         _remove_retired_spotify_default,
+    ),
+
+    (
+        10,
+        "Clear unsupported live Chromium cookie extraction on Windows",
+        _clear_unsupported_windows_browser_cookie_source,
     ),
 
     # ── Future migrations go here ─────────────────────────────────────────────

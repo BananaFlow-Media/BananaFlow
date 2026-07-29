@@ -1,0 +1,480 @@
+[
+  {
+    "name": "hebrew withdrawn-pr cover regression",
+    "source": ["באת לי פתאום - 2020", "קרן פלס", 192],
+    "expected": "קרן פלס ורוני אלטר - באת לי פתאום",
+    "candidates": [
+      ["באת לי פתאום קאבר", "חפצי פרג", 194],
+      ["קרן פלס ורוני אלטר - באת לי פתאום", "קרן פלס", 202]
+    ]
+  },
+  {
+    "name": "neutral rejects cover",
+    "source": ["Easy On Me", "Adele", 224],
+    "expected": "Adele - Easy On Me (Official Video)",
+    "candidates": [
+      ["Easy On Me (Cover)", "Singer Covers", 224],
+      ["Adele - Easy On Me (Official Video)", "Adele", 225]
+    ]
+  },
+  {
+    "name": "requested cover is legitimate",
+    "source": ["Fast Car (Cover)", "Luke Combs", 265],
+    "expected": "Luke Combs - Fast Car (Cover)",
+    "candidates": [
+      ["Tracy Chapman - Fast Car", "Tracy Chapman - Topic", 296],
+      ["Luke Combs - Fast Car (Cover)", "Luke Combs", 265]
+    ]
+  },
+  {
+    "name": "neutral rejects live",
+    "source": ["Fix You", "Coldplay", 295],
+    "expected": "Coldplay - Fix You (Official Audio)",
+    "candidates": [
+      ["Coldplay - Fix You (Live in São Paulo)", "Coldplay", 340],
+      ["Coldplay - Fix You (Official Audio)", "Coldplay - Topic", 295]
+    ]
+  },
+  {
+    "name": "requested live preserved",
+    "source": ["Hotel California - Live", "Eagles", 412],
+    "expected": "Eagles - Hotel California (Live)",
+    "candidates": [
+      ["Eagles - Hotel California", "Eagles - Topic", 391],
+      ["Eagles - Hotel California (Live)", "Eagles", 414]
+    ]
+  },
+  {
+    "name": "neutral rejects remix",
+    "source": ["Levitating", "Dua Lipa", 203],
+    "expected": "Dua Lipa - Levitating (Official Audio)",
+    "candidates": [
+      ["Dua Lipa - Levitating (DJ Remix)", "Dance Mixes", 241],
+      ["Dua Lipa - Levitating (Official Audio)", "Dua Lipa", 203]
+    ]
+  },
+  {
+    "name": "requested remix preserved",
+    "source": ["Summertime Sadness (Cedric Gervais Remix)", "Lana Del Rey", 214],
+    "expected": "Lana Del Rey - Summertime Sadness (Cedric Gervais Remix)",
+    "candidates": [
+      ["Lana Del Rey - Summertime Sadness", "Lana Del Rey", 265],
+      ["Lana Del Rey - Summertime Sadness (Cedric Gervais Remix)", "Lana Del Rey", 214]
+    ]
+  },
+  {
+    "name": "acoustic intent",
+    "source": ["Latch (Acoustic)", "Sam Smith", 223],
+    "expected": "Sam Smith - Latch (Acoustic)",
+    "candidates": [
+      ["Disclosure - Latch feat. Sam Smith", "Disclosure", 256],
+      ["Sam Smith - Latch (Acoustic)", "Sam Smith", 224]
+    ]
+  },
+  {
+    "name": "instrumental intent",
+    "source": ["Numb (Instrumental)", "Linkin Park", 187],
+    "expected": "Linkin Park - Numb (Instrumental)",
+    "candidates": [
+      ["Linkin Park - Numb", "Linkin Park", 187],
+      ["Linkin Park - Numb (Instrumental)", "Linkin Park", 187]
+    ]
+  },
+  {
+    "name": "remaster intent",
+    "source": ["Here Comes The Sun - 2019 Mix", "The Beatles", 185],
+    "expected": "The Beatles - Here Comes The Sun (2019 Mix)",
+    "candidates": [
+      ["The Beatles - Here Comes The Sun", "The Beatles - Topic", 185],
+      ["The Beatles - Here Comes The Sun (2019 Mix)", "The Beatles", 185]
+    ]
+  },
+  {
+    "name": "explicit remaster wording",
+    "source": ["Dreams - 2004 Remaster", "Fleetwood Mac", 257],
+    "expected": "Fleetwood Mac - Dreams (2004 Remaster)",
+    "candidates": [
+      ["Fleetwood Mac - Dreams", "Fleetwood Mac", 257],
+      ["Fleetwood Mac - Dreams (2002 Remaster)", "Fleetwood Mac - Topic", 256],
+      ["Fleetwood Mac - Dreams (2004 Remaster)", "Fleetwood Mac - Topic", 257]
+    ]
+  },
+  {
+    "name": "demo intent",
+    "source": ["Something - Demo", "Artist One", 201],
+    "expected": "Artist One - Something (Demo)",
+    "candidates": [
+      ["Artist One - Something", "Artist One", 201],
+      ["Artist One - Something (Demo)", "Artist One", 199]
+    ]
+  },
+  {
+    "name": "radio edit intent",
+    "source": ["Blue Monday (Radio Edit)", "New Order", 240],
+    "expected": "New Order - Blue Monday (Radio Edit)",
+    "candidates": [
+      ["New Order - Blue Monday", "New Order", 449],
+      ["New Order - Blue Monday (Radio Edit)", "New Order", 240]
+    ]
+  },
+  {
+    "name": "extended intent",
+    "source": ["Music Sounds Better With You (Extended Mix)", "Stardust", 402],
+    "expected": "Stardust - Music Sounds Better With You (Extended Mix)",
+    "candidates": [
+      ["Stardust - Music Sounds Better With You", "Stardust", 260],
+      ["Stardust - Music Sounds Better With You (Extended Mix)", "Stardust", 402]
+    ]
+  },
+  {
+    "name": "sped up intent",
+    "source": ["Bloody Mary (Sped Up)", "Lady Gaga", 185],
+    "expected": "Lady Gaga - Bloody Mary (Sped Up)",
+    "candidates": [
+      ["Lady Gaga - Bloody Mary", "Lady Gaga", 244],
+      ["Lady Gaga - Bloody Mary (Sped Up)", "Lady Gaga", 185]
+    ]
+  },
+  {
+    "name": "slowed reverb intent",
+    "source": ["After Dark (Slowed + Reverb)", "Mr.Kitty", 285],
+    "expected": "Mr.Kitty - After Dark (Slowed Reverb)",
+    "candidates": [
+      ["Mr.Kitty - After Dark", "Mr.Kitty", 259],
+      ["Mr.Kitty - After Dark (Slowed Reverb)", "Mr.Kitty", 285]
+    ]
+  },
+  {
+    "name": "presentation lyrics is same recording",
+    "source": ["Flowers", "Miley Cyrus", 200],
+    "expected": "Miley Cyrus - Flowers (Lyrics)",
+    "candidates": [
+      ["Flowers (Cover)", "Other Singer", 200],
+      ["Miley Cyrus - Flowers (Lyrics)", "Miley Cyrus", 201]
+    ]
+  },
+  {
+    "name": "multi artist credit",
+    "source": ["Shallow", "Lady Gaga, Bradley Cooper", 215],
+    "expected": "Lady Gaga, Bradley Cooper - Shallow",
+    "candidates": [
+      ["Shallow (Karaoke)", "Karaoke Channel", 215],
+      ["Lady Gaga, Bradley Cooper - Shallow", "Lady Gaga", 216]
+    ]
+  },
+  {
+    "name": "wrong artist same title and duration",
+    "source": ["Stay", "Rihanna", 240],
+    "expected": "Rihanna - Stay",
+    "candidates": [
+      ["Stay", "Random Covers", 240],
+      ["Rihanna - Stay", "Rihanna - Topic", 241]
+    ]
+  },
+  {
+    "name": "hebrew live intent",
+    "source": ["מחכה - Live", "ריטה", 270],
+    "expected": "ריטה - מחכה (Live)",
+    "candidates": [
+      ["ריטה - מחכה", "ריטה", 250],
+      ["ריטה - מחכה (Live)", "ריטה", 270]
+    ]
+  },
+  {
+    "name": "same title collision halo beyonce",
+    "source": ["Halo", "Beyoncé", 261],
+    "expected": "Beyoncé - Halo (Official Audio)",
+    "candidates": [
+      ["Halo", "Independent Singer", 261],
+      ["Beyoncé - Halo (Official Audio)", "Beyoncé", 261]
+    ]
+  },
+  {
+    "name": "same title collision hello adele",
+    "source": ["Hello", "Adele", 295],
+    "expected": "Adele - Hello (Official Audio)",
+    "candidates": [
+      ["Lionel Richie - Hello", "Lionel Richie", 248],
+      ["Adele - Hello (Official Audio)", "Adele", 295]
+    ]
+  },
+  {
+    "name": "tribute uploader name drop",
+    "source": ["Rolling in the Deep", "Adele", 228],
+    "expected": "Adele - Rolling in the Deep",
+    "candidates": [
+      ["Adele Rolling in the Deep", "Adele Tribute Experience", 228],
+      ["Adele - Rolling in the Deep", "Adele", 228]
+    ]
+  },
+  {
+    "name": "fan archive name drop",
+    "source": ["Bad Romance", "Lady Gaga", 295],
+    "expected": "Lady Gaga - Bad Romance",
+    "candidates": [
+      ["Lady Gaga Bad Romance", "Lady Gaga Fan Archive", 295],
+      ["Lady Gaga - Bad Romance", "Lady Gaga", 295]
+    ]
+  },
+  {
+    "name": "karaoke exact duration",
+    "source": ["Someone Like You", "Adele", 285],
+    "expected": "Adele - Someone Like You",
+    "candidates": [
+      ["Adele - Someone Like You Karaoke", "Sing King Karaoke", 285],
+      ["Adele - Someone Like You", "Adele - Topic", 285]
+    ]
+  },
+  {
+    "name": "instrumental false positive",
+    "source": ["Yellow", "Coldplay", 269],
+    "expected": "Coldplay - Yellow",
+    "candidates": [
+      ["Coldplay Yellow Instrumental", "Backing Tracks", 269],
+      ["Coldplay - Yellow", "Coldplay", 269]
+    ]
+  },
+  {
+    "name": "acoustic false positive",
+    "source": ["Chandelier", "Sia", 216],
+    "expected": "Sia - Chandelier",
+    "candidates": [
+      ["Sia Chandelier Acoustic Cover", "Acoustic Covers", 216],
+      ["Sia - Chandelier", "Sia", 216]
+    ]
+  },
+  {
+    "name": "live false positive same artist",
+    "source": ["Viva La Vida", "Coldplay", 242],
+    "expected": "Coldplay - Viva La Vida (Official Audio)",
+    "candidates": [
+      ["Coldplay - Viva La Vida Live", "Coldplay", 242],
+      ["Coldplay - Viva La Vida (Official Audio)", "Coldplay - Topic", 242]
+    ]
+  },
+  {
+    "name": "remix false positive same artist",
+    "source": ["New Rules", "Dua Lipa", 209],
+    "expected": "Dua Lipa - New Rules",
+    "candidates": [
+      ["Dua Lipa - New Rules Remix", "Dua Lipa", 209],
+      ["Dua Lipa - New Rules", "Dua Lipa", 209]
+    ]
+  },
+  {
+    "name": "requested unplugged version",
+    "source": ["Layla (Unplugged)", "Eric Clapton", 289],
+    "expected": "Eric Clapton - Layla (Unplugged)",
+    "candidates": [
+      ["Derek and the Dominos - Layla", "Derek and the Dominos", 423],
+      ["Eric Clapton - Layla (Unplugged)", "Eric Clapton", 289]
+    ]
+  },
+  {
+    "name": "requested piano version",
+    "source": ["Forever Young (Piano Version)", "Alphaville", 244],
+    "expected": "Alphaville - Forever Young (Piano Version)",
+    "candidates": [
+      ["Alphaville - Forever Young", "Alphaville", 226],
+      ["Alphaville - Forever Young (Piano Version)", "Alphaville", 244]
+    ]
+  },
+  {
+    "name": "requested edit version",
+    "source": ["Insomnia (Radio Edit)", "Faithless", 216],
+    "expected": "Faithless - Insomnia (Radio Edit)",
+    "candidates": [
+      ["Faithless - Insomnia", "Faithless", 527],
+      ["Faithless - Insomnia (Radio Edit)", "Faithless", 216]
+    ]
+  },
+  {
+    "name": "requested anniversary remaster",
+    "source": ["Imagine (Ultimate Mix)", "John Lennon", 187],
+    "expected": "John Lennon - Imagine (Ultimate Mix)",
+    "candidates": [
+      ["John Lennon - Imagine", "John Lennon", 183],
+      ["John Lennon - Imagine (Ultimate Mix)", "John Lennon", 187]
+    ]
+  },
+  {
+    "name": "ampersand collaboration",
+    "source": ["Empire State of Mind", "JAY-Z & Alicia Keys", 276],
+    "expected": "JAY-Z & Alicia Keys - Empire State of Mind",
+    "candidates": [
+      ["Empire State of Mind cover", "NYC Cover Band", 276],
+      ["JAY-Z & Alicia Keys - Empire State of Mind", "JAY-Z", 276]
+    ]
+  },
+  {
+    "name": "featuring collaboration",
+    "source": ["Uptown Funk", "Mark Ronson feat. Bruno Mars", 270],
+    "expected": "Mark Ronson feat. Bruno Mars - Uptown Funk",
+    "candidates": [
+      ["Bruno Mars Uptown Funk cover", "Mars Tribute", 270],
+      ["Mark Ronson feat. Bruno Mars - Uptown Funk", "Mark Ronson", 270]
+    ]
+  },
+  {
+    "name": "slash is artist name not collaboration",
+    "source": ["Thunderstruck", "AC/DC", 292],
+    "expected": "AC/DC - Thunderstruck",
+    "candidates": [
+      ["Thunderstruck AC DC cover", "Rock Covers", 292],
+      ["AC/DC - Thunderstruck", "AC/DC", 292]
+    ]
+  },
+  {
+    "name": "single letter artist",
+    "source": ["Middle of the Night", "Elley Duhé", 185],
+    "expected": "Elley Duhé - Middle of the Night",
+    "candidates": [
+      ["Middle of the Night lyrics cover", "Night Covers", 185],
+      ["Elley Duhé - Middle of the Night", "Elley Duhé", 185]
+    ]
+  },
+  {
+    "name": "punctuated artist identity",
+    "source": ["After Dark", "Mr.Kitty", 259],
+    "expected": "Mr.Kitty - After Dark",
+    "candidates": [
+      ["After Dark slowed cover", "Dark Mixes", 259],
+      ["Mr.Kitty - After Dark", "Mr.Kitty", 259]
+    ]
+  },
+  {
+    "name": "the xx name integrity",
+    "source": ["Intro", "The xx", 128],
+    "expected": "The xx - Intro",
+    "candidates": [
+      ["The xx Intro cover", "Ambient Covers", 128],
+      ["The xx - Intro", "The xx", 128]
+    ]
+  },
+  {
+    "name": "x ambassadors name integrity",
+    "source": ["Renegades", "X Ambassadors", 195],
+    "expected": "X Ambassadors - Renegades",
+    "candidates": [
+      ["Renegades cover", "Alternative Covers", 195],
+      ["X Ambassadors - Renegades", "X Ambassadors", 195]
+    ]
+  },
+  {
+    "name": "hebrew same title collision",
+    "source": ["מישהו", "יהודית רביץ", 240],
+    "expected": "יהודית רביץ - מישהו",
+    "candidates": [
+      ["מישהו קאבר", "ערוץ קאברים", 240],
+      ["יהודית רביץ - מישהו", "יהודית רביץ", 240]
+    ]
+  },
+  {
+    "name": "hebrew tribute name drop",
+    "source": ["עטוף ברחמים", "ריטה", 251],
+    "expected": "ריטה - עטוף ברחמים",
+    "candidates": [
+      ["ריטה עטוף ברחמים", "מחווה לריטה", 251],
+      ["ריטה - עטוף ברחמים", "ריטה", 251]
+    ]
+  },
+  {
+    "name": "hebrew collaboration",
+    "source": ["ממעמקים", "עידן רייכל x מאיה אברהם", 278],
+    "expected": "עידן רייכל x מאיה אברהם - ממעמקים",
+    "candidates": [
+      ["ממעמקים קאבר", "שירי כיסוי", 278],
+      ["עידן רייכל x מאיה אברהם - ממעמקים", "עידן רייכל", 278]
+    ]
+  },
+  {
+    "name": "accent folding",
+    "source": ["Corazón", "Maluma", 184],
+    "expected": "Maluma - Corazon",
+    "candidates": [
+      ["Corazon cover", "Latin Covers", 184],
+      ["Maluma - Corazon", "Maluma", 184]
+    ]
+  },
+  {
+    "name": "hyphenated artist",
+    "source": ["99 Luftballons", "Nena", 233],
+    "expected": "Nena - 99 Luftballons",
+    "candidates": [
+      ["99 Luftballons English Cover", "Eighties Covers", 233],
+      ["Nena - 99 Luftballons", "Nena", 233]
+    ]
+  },
+  {
+    "name": "official lyric presentation",
+    "source": ["drivers license", "Olivia Rodrigo", 242],
+    "expected": "Olivia Rodrigo - drivers license (Lyric Video)",
+    "candidates": [
+      ["drivers license cover", "Pop Covers", 242],
+      ["Olivia Rodrigo - drivers license (Lyric Video)", "Olivia Rodrigo", 242]
+    ]
+  },
+  {
+    "name": "official visualizer presentation",
+    "source": ["As It Was", "Harry Styles", 167],
+    "expected": "Harry Styles - As It Was (Official Visualizer)",
+    "candidates": [
+      ["As It Was cover", "Styles Tribute", 167],
+      ["Harry Styles - As It Was (Official Visualizer)", "Harry Styles", 167]
+    ]
+  },
+  {
+    "name": "near duration wrong artist",
+    "source": ["Stay", "The Kid LAROI & Justin Bieber", 141],
+    "expected": "The Kid LAROI & Justin Bieber - Stay",
+    "candidates": [
+      ["Rihanna - Stay", "Rihanna", 143],
+      ["The Kid LAROI & Justin Bieber - Stay", "The Kid LAROI", 141]
+    ]
+  },
+  {
+    "name": "requested orchestral version",
+    "source": ["Nothing Else Matters (Orchestral)", "Metallica", 392],
+    "expected": "Metallica - Nothing Else Matters (Orchestral)",
+    "candidates": [
+      ["Metallica - Nothing Else Matters", "Metallica", 388],
+      ["Metallica - Nothing Else Matters (Orchestral)", "Metallica", 392]
+    ]
+  },
+  {
+    "name": "requested clean edit",
+    "source": ["Forget You (Clean)", "CeeLo Green", 222],
+    "expected": "CeeLo Green - Forget You (Clean)",
+    "candidates": [
+      ["CeeLo Green - Forget You", "CeeLo Green", 222],
+      ["CeeLo Green - Forget You (Clean)", "CeeLo Green", 222]
+    ]
+  },
+  {
+    "name": "single version versus album version",
+    "source": ["The Sound of Silence (Single Version)", "Simon & Garfunkel", 185],
+    "expected": "Simon & Garfunkel - The Sound of Silence (Single Version)",
+    "candidates": [
+      ["Simon & Garfunkel - The Sound of Silence (Album Version)", "Simon & Garfunkel", 192],
+      ["Simon & Garfunkel - The Sound of Silence (Single Version)", "Simon & Garfunkel", 185]
+    ]
+  },
+  {
+    "name": "duplicate valid official uploads",
+    "source": ["Blinding Lights", "The Weeknd", 200],
+    "expected": "The Weeknd - Blinding Lights (Official Audio)",
+    "candidates": [
+      ["The Weeknd - Blinding Lights (Official Video)", "The Weeknd", 200],
+      ["The Weeknd - Blinding Lights (Official Audio)", "The Weeknd - Topic", 200]
+    ]
+  },
+  {
+    "name": "difficult hebrew transliteration conservative miss",
+    "source": ["אני ואתה", "אריק איינשטיין", 207],
+    "expected": null,
+    "candidates": [
+      ["Ani VeAta", "Arik Einstein", 207],
+      ["Ani VeAta cover", "Israeli Classics Covers", 207]
+    ]
+  }
+]

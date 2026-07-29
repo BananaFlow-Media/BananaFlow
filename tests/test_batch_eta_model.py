@@ -325,6 +325,64 @@ class TestStallDegradation:
 # ── Window hygiene ───────────────────────────────────────────────────────────
 
 class TestWindowHygiene:
+    def test_full_cache_window_never_prices_large_live_remainder(self):
+        """A full global window must not erase the selected live cohort.
+
+        Twelve cache hits complete almost instantly, overflowing the ten-item
+        global history. Once three live resolutions establish a 10-second
+        cadence, the remaining live batch must use that cadence rather than a
+        mixed cache/live window.
+        """
+        cache_count = 12
+        live_count = 20
+        keys = _keys(cache_count + live_count)
+        a, clock = _agg(keys)
+        for key in keys[:cache_count]:
+            a.mark_resolution_source(key, "cache")
+        for key in keys[cache_count:]:
+            a.mark_resolution_source(key, "live")
+
+        for key in keys[:cache_count]:
+            clock.advance(0.1)
+            a.complete(key)
+        for key in keys[cache_count:cache_count + 3]:
+            clock.advance(10.0)
+            a.complete(key)
+
+        snap = a.snapshot()
+        assert snap.eta_source == "live"
+        assert snap.eta_rate_source == "live"
+        assert a._throughput_cycle_locked("live") == pytest.approx(10.0)
+        assert snap.eta_seconds == pytest.approx((live_count - 3) * 10.0)
+
+    def test_global_rate_is_explicit_only_while_live_cohort_warms(self):
+        a, clock = _agg(_keys(20))
+        for index in range(10):
+            a.mark_resolution_source(f"k{index}", "cache")
+            clock.advance(1.0)
+            a.complete(f"k{index}")
+        for index in range(10, 20):
+            a.mark_resolution_source(f"k{index}", "live")
+
+        clock.advance(10.0)
+        a.complete("k10")
+        snap = a.snapshot()
+        assert snap.eta_source == "live"
+        assert snap.eta_rate_source == "global"
+        assert snap.eta_confidence == "low"
+
+    def test_unknown_provenance_has_its_own_cohort(self):
+        a, clock = _agg(_keys(8))
+        for index in range(8):
+            a.mark_resolution_source(f"k{index}", "unknown")
+        for index in range(3):
+            clock.advance(7.0)
+            a.complete(f"k{index}")
+        snap = a.snapshot()
+        assert snap.eta_source == "unknown"
+        assert snap.eta_rate_source == "unknown"
+        assert a._throughput_cycle_locked("unknown") == pytest.approx(7.0)
+
     def test_preexisting_duplicates_do_not_poison_the_rate(self):
         """Duplicate-skips are resolved in a tight loop before any download
         starts. Twenty of them on the same instant would drive a naive rate to
@@ -467,17 +525,17 @@ class TestPerTrackNeverBecomesBatch:
 # ── Lifecycle states ─────────────────────────────────────────────────────────
 
 class TestLifecycle:
-    def test_single_track_batch_never_claims_a_batch_eta(self):
-        """A one-track batch ends at its first completion, so the throughput
-        model never gets two samples and the footer says "calculating…" for the
-        whole download. That is the right answer, not a gap: the one number
-        available is the track's own remaining transfer time, which is a lower
-        bound on the batch (post-processing and publish still follow) and would
-        read as a confident under-estimate. The track card shows it instead."""
+    def test_single_track_batch_labels_byte_time_as_current_speed_projection(self):
+        """Small batches cannot form a throughput window, but the active byte
+        time is still a useful *lower bound* when labelled honestly."""
         a, clock = _agg(["only"])
         assert a.snapshot().eta_seconds is None
         a.update("only", downloaded_bytes=10, total_bytes=100, speed_bps=10.0)
-        assert a.snapshot().eta_seconds is None      # no divide-by-zero either
+        snap = a.snapshot()
+        assert snap.eta_seconds == pytest.approx(9.0)
+        assert snap.eta_lower_seconds is None
+        assert snap.eta_upper_seconds is None
+        assert snap.eta_confidence == "current_speed"
         clock.advance(9.0)
         a.complete("only")
         assert a.snapshot().eta_seconds is None      # nothing left to wait for

@@ -45,7 +45,11 @@ from core.quality_presets import (
     audio_preset_for_quality,
     video_preset_for_quality,
 )
-from core.warning_classifier import classify_warning
+from core.warning_classifier import (
+    BROWSER_COOKIE_ACCESS_BLOCKED,
+    COOKIES_EXPIRED_OR_INVALID,
+    classify_warning,
+)
 from core.youtube_reliability import CONSERVATIVE_FRAGMENT_CONCURRENCY, is_youtube_url
 from ui.i18n import t
 
@@ -63,6 +67,19 @@ class SilentLogger:
     ``core.warning_classifier`` so the log line is actionable instead of
     just repeating yt-dlp's prose.
     """
+    def __init__(self) -> None:
+        self._failure_evidence: list[str] = []
+
+    def _remember_failure_evidence(self, msg: str) -> None:
+        category = classify_warning(msg)
+        if category and msg not in self._failure_evidence:
+            self._failure_evidence.append(msg)
+
+    @property
+    def failure_evidence(self) -> str:
+        """Earlier extractor evidence retained for final error precedence."""
+        return " | ".join(self._failure_evidence[-3:])
+
     def debug(self, msg: str) -> None:
         if msg.startswith("[debug] "):
             return
@@ -81,10 +98,14 @@ class SilentLogger:
         ))
 
     @staticmethod
-    def _is_cookie_diagnostic(msg: str) -> bool:
-        return classify_warning(msg) == "cookies_expired_or_invalid"
+    def _is_coalesced_cookie_diagnostic(msg: str) -> bool:
+        return classify_warning(msg) in {
+            COOKIES_EXPIRED_OR_INVALID,
+            BROWSER_COOKIE_ACCESS_BLOCKED,
+        }
 
     def warning(self, msg: str) -> None:
+        self._remember_failure_evidence(msg)
         from utils.yt_dlp_opts import note_po_token_provider_diagnostic
         if self._is_po_token_diagnostic(msg):
             if note_po_token_provider_diagnostic(msg):
@@ -95,7 +116,7 @@ class SilentLogger:
             else:
                 logger.debug("[yt-dlp][po_token] coalesced provider diagnostic: %s", msg)
             return
-        if self._is_cookie_diagnostic(msg):
+        if self._is_coalesced_cookie_diagnostic(msg):
             from utils.yt_dlp_opts import note_cookie_diagnostic
             note_cookie_diagnostic(msg)
             logger.debug("[yt-dlp][cookies] coalesced invalid-cookie diagnostic: %s", msg)
@@ -125,6 +146,7 @@ class SilentLogger:
             logger.warning(f"[yt-dlp] {msg}")
 
     def error(self, msg: str) -> None:
+        self._remember_failure_evidence(msg)
         from utils.yt_dlp_opts import note_po_token_provider_diagnostic
         if self._is_po_token_diagnostic(msg):
             if note_po_token_provider_diagnostic(msg):
@@ -135,7 +157,7 @@ class SilentLogger:
             else:
                 logger.debug("[yt-dlp][po_token] coalesced provider diagnostic: %s", msg)
             return
-        if self._is_cookie_diagnostic(msg):
+        if self._is_coalesced_cookie_diagnostic(msg):
             from utils.yt_dlp_opts import note_cookie_diagnostic
             note_cookie_diagnostic(msg)
             logger.debug("[yt-dlp][cookies] coalesced invalid-cookie diagnostic: %s", msg)
@@ -273,6 +295,11 @@ class DownloadRequest:
     stream_type: Optional[str] = None
     platform: Optional[SourcePlatform] = None
 
+    # Original queue-source identity.  Output routing uses this instead of
+    # inferring collection semantics from the current selection size.
+    source_kind: Optional[str] = None
+    source_url:  Optional[str] = None
+
     # Category tag forwarded from TrackMeta (e.g. "stream_intercept", "stream:hls")
     category: Optional[str] = None
 
@@ -327,6 +354,11 @@ class DownloadRequest:
     url_resolver: Optional[Callable[[Optional[threading.Event]], str]] = field(
         default=None, repr=False
     )
+
+    # Serializable Spotify identity retained after the lazy resolver has been
+    # consumed. If that exact upload later proves private/deleted, the
+    # orchestrator can invalidate only its cache row and resolve once more.
+    spotify_match_identity: Optional[dict] = None
 
     # Callbacks
     on_progress: Optional[Callable[[DownloadProgress], None]] = field(
@@ -500,7 +532,7 @@ class DownloadEngine:
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
                 url=request.url,
-                error_message="❌ Download URL is empty.",
+                error_message="This unresolved track has no downloadable media target.",
             ), error=True)
             return
 
@@ -690,7 +722,12 @@ class DownloadEngine:
                 error_message=str(exc),
             ), error=True)
         except yt_dlp.utils.DownloadError as exc:
-            err_msg = _get_friendly_error(str(exc))
+            evidence = ""
+            if isinstance(locals().get("opts"), dict):
+                candidate_logger = opts.get("logger")
+                evidence = getattr(candidate_logger, "failure_evidence", "")
+            combined = f"{evidence} | {exc}" if evidence else str(exc)
+            err_msg = _get_friendly_error(combined)
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
                 url=url,
@@ -1159,10 +1196,11 @@ class DownloadEngine:
                 note_cookie_diagnostic(warn_msg)
                 logger.debug("[Downloader][cookies] preflight diagnostic coalesced: %s", warn_msg)
 
+        ytdlp_logger = SilentLogger()
         opts: dict[str, Any] = _build_base_opts(
             cookies_file=cookies_file or None,
             cookies_browser=req.cookies_browser or None,
-            logger=SilentLogger(),
+            logger=ytdlp_logger,
             quiet=True,
             retries=10,
             proxy=req.proxy_url or None,

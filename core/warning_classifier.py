@@ -22,6 +22,7 @@ from typing import Optional
 # Plain strings rather than an Enum so callers can log/compare them directly.
 PO_TOKEN_MISSING           = "po_token_missing"
 COOKIES_EXPIRED_OR_INVALID = "cookies_expired_or_invalid"
+BROWSER_COOKIE_ACCESS_BLOCKED = "browser_cookie_access_blocked"
 JS_RUNTIME_MISSING         = "js_runtime_missing"
 RATE_LIMITED_OR_FORBIDDEN  = "rate_limited_or_forbidden"
 ACCOUNT_REQUIRED           = "account_required"
@@ -35,8 +36,15 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"po[ _]?token", re.I), PO_TOKEN_MISSING),
     (
         re.compile(
-            r"cookies?.*(no longer valid|expired|invalid)|"
-            r"could not copy .*cookie database|failed to decrypt with dpapi",
+            r"browser_cookie_unsupported|could not copy .*cookie database|"
+            r"database is locked|failed to decrypt with dpapi|app.?bound encryption",
+            re.I,
+        ),
+        BROWSER_COOKIE_ACCESS_BLOCKED,
+    ),
+    (
+        re.compile(
+            r"cookies?.*(no longer valid|expired|invalid)",
             re.I,
         ),
         COOKIES_EXPIRED_OR_INVALID,

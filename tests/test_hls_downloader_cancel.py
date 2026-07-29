@@ -76,6 +76,10 @@ class _ThrottledHandler(http.server.SimpleHTTPRequestHandler):
     CHUNK_SIZE = 4096
     CHUNK_DELAY_S = 0.05
 
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPServer API name
+        self.server.cookie_headers.append(self.headers.get("Cookie", ""))
+        super().do_GET()
+
     def copyfile(self, source, outputfile) -> None:  # noqa: N802 - BaseHTTPServer API name
         while True:
             chunk = source.read(self.CHUNK_SIZE)
@@ -100,6 +104,7 @@ def http_server(tmp_path_factory):
         *a, directory=str(directory), **k
     )
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.cookie_headers = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server, directory
@@ -141,6 +146,56 @@ def _url(http_server, name: str) -> str:
 
 @needs_ffmpeg
 class TestHlsCancellation:
+    def test_wizard_http_only_cookie_reaches_real_ffmpeg_request(
+        self, tmp_path, http_server, short_test_source,
+    ):
+        """Exercise wizard serialization, protected storage and real FFmpeg."""
+        from core.cookie_wizard import format_netscape_cookies
+        from core.hls_downloader import download_hls
+        from utils.cookie_store import write_cookie_store
+
+        server, _directory = http_server
+        server.cookie_headers.clear()
+        cookies = format_netscape_cookies([
+            {
+                "domain": ".youtube.com", "path": "/", "secure": True,
+                "expires": int(time.time()) + 3600, "name": "LOGIN_INFO",
+                "value": "http-only-session", "httpOnly": True,
+            },
+            {
+                "domain": ".youtube.com", "path": "/", "secure": True,
+                "expires": int(time.time()) + 3600, "name": "PREF",
+                "value": "ordinary-preference", "httpOnly": False,
+            },
+            {
+                "domain": ".youtube.com", "path": "/", "secure": True,
+                "expires": int(time.time()) - 60, "name": "YSC",
+                "value": "expired-value", "httpOnly": True,
+            },
+        ])
+        protected = tmp_path / "bananaflow-cookies.bin"
+        write_cookie_store(protected, cookies)
+
+        out = tmp_path / "cookie_boundary.mp3"
+        download_hls(
+            _url(http_server, short_test_source), str(out),
+            cookies_file=str(protected),
+        )
+
+        received = "; ".join(server.cookie_headers)
+        assert "LOGIN_INFO=http-only-session" in received
+        assert "PREF=ordinary-preference" in received
+        assert "expired-value" not in received
+
+    def test_malformed_expiry_is_not_forwarded_as_a_cookie(self):
+        from core.hls_downloader import _netscape_text_to_cookie_header
+
+        text = (
+            "# Netscape HTTP Cookie File\n"
+            ".youtube.com\tTRUE\t/\tTRUE\tnot-a-time\tLOGIN_INFO\tbad\n"
+        )
+        assert _netscape_text_to_cookie_header(text) == ""
+
     def test_cancel_mid_download_terminates_ffmpeg_promptly(
         self, tmp_path, http_server, long_test_source,
     ):

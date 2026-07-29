@@ -44,7 +44,13 @@ def get_app_data_dir() -> Path:
 
 
 def get_app_cookies_path() -> Path:
-    """Return the path where the cookie wizard saves Netscape-format cookies."""
+    """Return BananaFlow's cookie store (DPAPI-protected on Windows)."""
+    name = "app_cookies.dpapi" if os.name == "nt" else "app_cookies.txt"
+    return get_app_data_dir() / name
+
+
+def get_legacy_app_cookies_path() -> Path:
+    """Return the pre-DPAPI plaintext app-owned cookie path."""
     return get_app_data_dir() / "app_cookies.txt"
 
 

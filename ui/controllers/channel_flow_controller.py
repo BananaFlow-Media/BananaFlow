@@ -41,6 +41,7 @@ from core.duplicate_detector import (
     DuplicateGroup, DuplicateDecision, VideoInfo,
     detect_duplicates, apply_decisions,
 )
+from core.playlist_parser import UrlKind
 from ui.i18n import t
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,8 @@ class ChannelFlowController(QObject):
                         "category":      "פלייליסטים",
                         "album_index":   v.playlist_index,
                         "total_tracks":  playlist_sizes.get(v.playlist_name, 0),
+                        "source_kind":   UrlKind.ARTIST.name,
+                        "source_url":    self._url,
                     }
                 else:
                     track = {
@@ -210,6 +213,8 @@ class ChannelFlowController(QObject):
                         "category":      v.tab_name,
                         "album_index":   0,
                         "total_tracks":  0,
+                        "source_kind":   UrlKind.ARTIST.name,
+                        "source_url":    self._url,
                     }
 
                 tracks.append(track)

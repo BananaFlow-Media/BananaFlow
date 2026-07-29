@@ -47,7 +47,10 @@ except ImportError:
 
 from utils.time_format import seconds_to_str as _seconds_to_str
 from utils.logger import SilentLogger as _SilentLogger
-from utils.yt_dlp_opts import build_parse_ydl_opts as _build_parse_ydl_opts
+from utils.yt_dlp_opts import (
+    build_parse_ydl_opts as _build_parse_ydl_opts,
+    private_cookie_ydl_opts,
+)
 from utils.artwork_cleaner import clean_artwork_url
 from utils.url_cleaner import host_matches_domain
 
@@ -100,6 +103,8 @@ class TrackMeta:
 
     # ── Platform ─────────────────────────────────────────────────────────────
     platform:       SourcePlatform = SourcePlatform.UNKNOWN
+    source_kind:    str   = ""          # UrlKind.name of the URL that produced this item
+    source_url:     str   = ""          # original fetched URL / collection identity
     
     # ── Custom Categories ───────────────────────────────────────────────────
     category:       str   = ""          # override for custom yt/scraper tabs
@@ -112,7 +117,8 @@ class TrackMeta:
     # "pending". Non-Spotify paths resolve up-front and stay "matched".
     spotify_id:       str = ""            # stable Spotify track id (cache key)
     spotify_key_kind: str = "spotify_id"  # "spotify_id" | "composite"
-    match_status:     str = "matched"     # "matched" | "pending"
+    match_status:     str = "matched"     # matched | pending | metadata_invalid | unresolved
+    resolution_error: str = ""            # stable UI translation key for blocked rows
 
     # ── State used by the GUI (not set by the parser) ─────────────────────────
     selected:       bool = True         # pre-tick all items in the UI
@@ -481,8 +487,11 @@ class PlaylistParser:
                 spotify_id=track_data.get("spotify_id", ""),
                 spotify_key_kind=track_data.get("spotify_key_kind", "spotify_id"),
                 match_status=match_status,
+                resolution_error=track_data.get("resolution_error", ""),
                 platform=platform,
-                selected=True,
+                source_kind=kind.name,
+                source_url=url,
+                selected=match_status not in ("metadata_invalid", "unresolved"),
             )
             result.tracks.append(track)
             if on_item:
@@ -492,12 +501,17 @@ class PlaylistParser:
         try:
             # ── SPOTIFY ──────────────────────────────────────────────────────
             if platform == SourcePlatform.SPOTIFY:
+                from ui.i18n import current_language
                 from core.scraper import (
                     scrape_spotify_playlist, scrape_spotify_album,
                     scrape_spotify_artist, scrape_spotify_track
                 )
+                spotify_locale = "he-IL" if current_language() == "he" else "en-US"
                 if kind == UrlKind.SINGLE_VIDEO:
-                    title, _ = scrape_spotify_track(url, on_item=_on_scraper_item, cookies_file=cookies_file)
+                    title, _ = scrape_spotify_track(
+                        url, on_item=_on_scraper_item, cookies_file=cookies_file,
+                        locale=spotify_locale,
+                    )
                 elif kind in (UrlKind.PLAYLIST, UrlKind.ALBUM, UrlKind.ARTIST):
                     # Two-stage flow: show the whole catalog immediately with
                     # metadata only; the YouTube match is deferred to download
@@ -507,11 +521,15 @@ class PlaylistParser:
                     title = self._scrape_spotify_catalog(
                         url, kind, on_item=_on_scraper_item,
                         on_progress=on_progress, cookies_file=cookies_file,
+                        locale=spotify_locale,
                     )
                     if kind == UrlKind.ARTIST:
                         title = f"{title} (Discography)"
                 else:
-                    title, _ = scrape_spotify_track(url, on_item=_on_scraper_item, cookies_file=cookies_file)
+                    title, _ = scrape_spotify_track(
+                        url, on_item=_on_scraper_item, cookies_file=cookies_file,
+                        locale=spotify_locale,
+                    )
                 result.playlist_title = title
 
             # ── YOUTUBE MUSIC ────────────────────────────────────────────────
@@ -645,6 +663,7 @@ class PlaylistParser:
         on_item:     Callable[[dict], None],
         on_progress: Optional[Callable[[str], None]],
         cookies_file: Optional[str],
+        locale:       str = "en-US",
     ) -> str:
         """Stage 1 of the two-stage Spotify import.
 
@@ -679,7 +698,7 @@ class PlaylistParser:
         }.get(kind, scrape_spotify_playlist)
         title, _ = scraper(
             url, on_item=_pending_on_item, cookies_file=cookies_file,
-            metadata_only=True, cancel_check=cancel_cb,
+            metadata_only=True, cancel_check=cancel_cb, locale=locale,
         )
         self._notify(on_progress, t("found_n_tracks", n=count[0]))
         return title
@@ -711,8 +730,9 @@ class PlaylistParser:
         ydl_opts = self._build_opts(cookies_file=cookies_file, logger=extract_logger)
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            with private_cookie_ydl_opts(ydl_opts) as private_opts:
+                with yt_dlp.YoutubeDL(private_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
 
             if not info:
                 # build_parse_ydl_opts sets ignoreerrors=True, so a real extractor
@@ -736,11 +756,15 @@ class PlaylistParser:
                         result.cancelled = True
                         break
                     track = _entry_to_track(entry, idx, platform=platform, album=playlist_title)
+                    track.source_kind = kind.name
+                    track.source_url = url
                     result.tracks.append(track)
                     if on_item:
                         on_item(track, idx, len(entries))
             else:
                 track = _entry_to_track(info, 1, platform=platform, album="")
+                track.source_kind = kind.name
+                track.source_url = url
                 result.tracks.append(track)
                 result.playlist_title = track.title
                 if on_item:
@@ -825,6 +849,8 @@ class PlaylistParser:
                     # 'stream_intercept' tells the downloader to open this video
                     # page and intercept its HLS/DASH stream at download time.
                     category="stream_intercept",
+                    source_kind=kind.name,
+                    source_url=url,
                 )
                 result.tracks.append(track)
                 if on_item:
@@ -882,6 +908,8 @@ class PlaylistParser:
                 # Carry the stream type in the category field so DownloadRequest
                 # can route to the correct downloader without a schema change.
                 category=f"stream:{stream.stream_type}",
+                source_kind=kind.name,
+                source_url=url,
             )
             result.tracks.append(track)
             if on_item:

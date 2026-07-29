@@ -311,6 +311,7 @@ class AppWindow(FluentWindow):
         self._setup_drag_drop()
 
         QTimer.singleShot(300,  self._start_background_workers)
+        QTimer.singleShot(450,  self._show_browser_cookie_migration_notice)
         # Reclaim abandoned download workspaces and restore paused jobs first,
         # so a paused batch is back in the queue before the queue-state resume
         # prompt and before the user can start anything new.
@@ -318,6 +319,18 @@ class AppWindow(FluentWindow):
         QTimer.singleShot(1200, self._check_auto_resume)
         # Offer review-first recovery if a previous run crashed mid-Apply.
         QTimer.singleShot(1500, self._check_tag_apply_recovery)
+
+    def _show_browser_cookie_migration_notice(self) -> None:
+        """Explain a one-time Windows upgrade after persisting the safe value."""
+        if not self._cfg.cookies_browser_migration_notice_pending:
+            return
+        show_info(
+            self,
+            t("browser_cookie_migrated_title"),
+            t("browser_cookie_migrated_msg"),
+        )
+        self._cfg.cookies_browser_migration_notice_pending = False
+        self._cfg.save()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Panel construction
@@ -895,6 +908,13 @@ class AppWindow(FluentWindow):
                     category=item.get("category", ""),
                     album_index=item.get("album_index", 0),
                     total_tracks=item.get("total_tracks", 0),
+                    duration_sec=item.get("duration_sec"),
+                    spotify_id=item.get("spotify_id", ""),
+                    spotify_key_kind=item.get("spotify_key_kind", "spotify_id"),
+                    match_status=item.get("match_status", "matched"),
+                    resolution_error=item.get("resolution_error", ""),
+                    source_kind=item.get("source_kind", ""),
+                    source_url=item.get("source_url", ""),
                 )
                 self._add_track_to_queue(meta)
             except Exception as exc:
@@ -916,6 +936,13 @@ class AppWindow(FluentWindow):
                 "category":      c.category,
                 "album_index":   c.album_index,
                 "total_tracks":  c.total_tracks,
+                "duration_sec":  getattr(c, "duration_sec", None),
+                "spotify_id":    getattr(c, "spotify_id", ""),
+                "spotify_key_kind": getattr(c, "spotify_key_kind", "spotify_id"),
+                "match_status":  getattr(c, "match_status", "matched"),
+                "resolution_error": getattr(c, "resolution_error", ""),
+                "source_kind":    getattr(c, "source_kind", ""),
+                "source_url":     getattr(c, "source_url", ""),
             }
             for c in cards
             # "done" cards are finished; "paused" cards are owned by the
@@ -946,10 +973,9 @@ class AppWindow(FluentWindow):
                 parent=self,
             )
             return
-        # The download workers now own match resolution; stop the fast-start
-        # prefetch so the two don't race the same lookups. Matches it already
-        # cached remain and give the opening tracks instant, cache-hit resolves.
-        self._match_prefetcher.cancel()
+        # Keep an in-flight fast-start match alive. The resolver's single-flight
+        # boundary lets the download pipeline join that exact work instead of
+        # cancelling it or starting the same cold lookup again.
         opts = self._options_bar.get_options()
         self._download_ctrl.start_batch(
             selected, opts, self._last_url_kind, self._last_playlist_title
@@ -957,6 +983,7 @@ class AppWindow(FluentWindow):
 
     def _on_global_pause_resume(self, pause: bool) -> None:
         if pause:
+            self._match_prefetcher.cancel()
             # Pause, not cancel: the outcome model keeps the distinction, so
             # the footer shows "paused" and the queue stays resumable.
             self._download_ctrl.global_pause()
@@ -1039,7 +1066,7 @@ class AppWindow(FluentWindow):
         # detection signatures, not UI text, and stay hardcoded.
         if auth_related or any(x in detail for x in ["Please sign in", "sign in", "PO Token",
                                       "account cookies", "אימות", "חשבון", "Cookies",
-                                      "DPAPI", "Chrome", "bot", "visitor_data"]):
+                                      "DPAPI", "Chrome", "visitor_data"]):
             if confirm(
                 self,
                 headline,
@@ -1208,7 +1235,9 @@ class AppWindow(FluentWindow):
     def _is_browser_cookie_error_text(self, text: str) -> bool:
         haystack = text.lower()
         return (
-            "cookie database" in haystack
+            "browser_cookie_unsupported" in haystack
+            or "cannot be read safely on windows" in haystack
+            or "cookie database" in haystack
             or "database is locked" in haystack
             or "could not copy chrome" in haystack
             or ("could not copy" in haystack and "cookie" in haystack)
@@ -1219,13 +1248,14 @@ class AppWindow(FluentWindow):
 
     def _is_auth_error_text(self, text: str) -> bool:
         haystack = text.lower()
+        if "not a bot" in haystack or "bot challenge" in haystack:
+            return False
         return (
             "sign-in required" in haystack
             or "age-restricted" in haystack
             or "requires a youtube account" in haystack
             or "account cookies" in haystack
             or "sign in to confirm" in haystack
-            or "not a bot" in haystack
             or "po token" in haystack
             or "visitor_data" in haystack
         )
@@ -1535,6 +1565,9 @@ class AppWindow(FluentWindow):
             spotify_id=get("spotify_id", ""),
             spotify_key_kind=get("spotify_key_kind", "spotify_id"),
             match_status=get("match_status", "matched"),
+            resolution_error=get("resolution_error", ""),
+            source_kind=get("source_kind", ""),
+            source_url=get("source_url", ""),
         )
 
         card.remove_requested.connect(self._on_card_removed)
@@ -1682,6 +1715,7 @@ class AppWindow(FluentWindow):
 
     def _on_cancel(self) -> None:
         was_downloading = self._download_ctrl.is_downloading()
+        self._match_prefetcher.cancel()
         self._fetch_ctrl.cancel()
         self._search_ctrl.cancel()
         self._download_ctrl.cancel_all()
@@ -1837,6 +1871,24 @@ class AppWindow(FluentWindow):
 
         logger.info("[AppWindow] closeEvent — beginning shutdown sequence")
 
+        # Match prefetch owns Python threads and a resolver executor. Keep the
+        # UI and services alive until cooperative cancellation reaches the
+        # provider boundary, polling from Qt instead of blocking this thread.
+        prefetcher = getattr(self, "_match_prefetcher", None)
+        if prefetcher is not None and not prefetcher.shutdown(timeout_s=0.0):
+            event.ignore()
+            if not getattr(self, "_prefetch_shutdown_retry_scheduled", False):
+                self._prefetch_shutdown_retry_scheduled = True
+
+                def _retry_close_after_prefetch() -> None:
+                    self._prefetch_shutdown_retry_scheduled = False
+                    self.close()
+
+                QTimer.singleShot(50, _retry_close_after_prefetch)
+            logger.info("[AppWindow] Deferring close while match prefetch finishes safely")
+            return
+        self._prefetch_shutdown_retry_scheduled = False
+
         # 2. Persist state
         self._save_state()
         self._save_queue_state()
@@ -1850,9 +1902,6 @@ class AppWindow(FluentWindow):
         # 4. Cancel + join workers
         # getattr-guarded like _net_monitor/_svc below: tolerate a close that
         # fires before _build_controllers finished (e.g. a first-run crash).
-        prefetcher = getattr(self, "_match_prefetcher", None)
-        if prefetcher is not None:
-            prefetcher.cancel()  # daemon thread; signal it to stop
         dl_worker = self._download_ctrl._dl_worker  # noqa: SLF001
         if dl_worker and dl_worker.isRunning():
             logger.info("[AppWindow] Shutting down DownloadWorker…")

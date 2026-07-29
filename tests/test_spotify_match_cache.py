@@ -54,6 +54,14 @@ class TestMatchCache:
         assert c.count() == 0
         assert c.get("", 1) is None
 
+    def test_compare_and_delete_cannot_remove_newer_url(self):
+        c = MatchCache(":memory:")
+        c.put("k", "https://youtube.test/new", 0.9, 3)
+        assert not c.delete("k", 3, expected_url="https://youtube.test/old")
+        assert c.get("k", 3) == "https://youtube.test/new"
+        assert c.delete("k", 3, expected_url="https://youtube.test/new")
+        assert c.get("k", 3) is None
+
     def test_composite_key_normalizes_and_buckets(self):
         # Case/whitespace differences and <=3s jitter collapse to one key.
         a = MatchCache.composite_key("The Beatles", "Hey  Jude", 431)
@@ -120,7 +128,10 @@ class TestResolveTrackToYoutube:
 
         calls = {"n": 0}
 
-        def fake_resolve(title, artist, duration_sec, cookies_file=None, cancel_check=None):
+        def fake_resolve(
+            title, artist, duration_sec, cookies_file=None,
+            cancel_check=None, **_kwargs,
+        ):
             calls["n"] += 1
             return "https://music.youtube.com/watch?v=CACHED"
 
@@ -142,7 +153,10 @@ class TestResolveTrackToYoutube:
 
         calls = {"n": 0}
 
-        def fake_resolve(title, artist, duration_sec, cookies_file=None, cancel_check=None):
+        def fake_resolve(
+            title, artist, duration_sec, cookies_file=None,
+            cancel_check=None, **_kwargs,
+        ):
             calls["n"] += 1
             return "ytsearch1:Artist Song audio"
 
@@ -156,6 +170,38 @@ class TestResolveTrackToYoutube:
         # the search re-runs every time until a confident match is found.
         assert calls["n"] == 2
         assert cache.count() == 0
+
+    def test_force_refresh_skips_cache_without_unconditional_delete(self, monkeypatch):
+        import core.match_cache as mc
+        import core.scraper as scraper
+        from core.spotify_match_scorer import MATCH_ALGO_VERSION
+
+        cache = MatchCache(":memory:")
+        monkeypatch.setattr(mc, "_SINGLETON", cache)
+        cache.put(
+            "sid-refresh", "https://youtube.test/concurrent-newer", None,
+            MATCH_ALGO_VERSION,
+        )
+
+        def fail_delete(*_args, **_kwargs):
+            raise AssertionError("refresh must not delete a concurrent mapping")
+
+        monkeypatch.setattr(cache, "delete", fail_delete)
+        monkeypatch.setattr(
+            scraper,
+            "_resolve_to_ytm_url",
+            lambda *args, **kwargs: "https://youtube.test/refreshed",
+        )
+        td = {
+            "spotify_id": "sid-refresh",
+            "title": "Song",
+            "artist": "Artist",
+            "duration_sec": 200,
+        }
+
+        assert scraper.resolve_track_to_youtube(td, force_refresh=True) == (
+            "https://youtube.test/refreshed"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

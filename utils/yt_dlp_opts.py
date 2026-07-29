@@ -25,14 +25,12 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from utils.security import restrict_path_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +267,17 @@ def install_bgutil_stderr_capture() -> None:
             if not _is_bgutil_script_command(command):
                 return original_run(command, *args, **kwargs)
             kwargs.setdefault("stderr", subprocess.PIPE)
-            stdout, stderr, returncode = original_run(command, *args, **kwargs)
+            try:
+                stdout, stderr, returncode = original_run(command, *args, **kwargs)
+            except (subprocess.TimeoutExpired, TimeoutError):
+                # A timed-out provider process is just as unusable as a
+                # non-zero exit.  Count the actual child attempt before yt-dlp
+                # wraps/rephrases it so the existing circuit breaker disables
+                # the provider after two failures.  The following retry can
+                # still use yt-dlp's ordinary clients instead of repeating the
+                # same 15-second startup timeout four times per track.
+                note_po_token_provider_attempt_failure()
+                raise
             if stderr:
                 text = str(stderr).strip()
                 if text:
@@ -439,6 +447,8 @@ def build_base_ydl_opts(
     if cookies_file:
         opts["cookiefile"] = cookies_file
     elif cookies_browser:
+        from core.browser_session import require_supported_browser_cookie_mode
+        require_supported_browser_cookie_mode(cookies_browser)
         profile = _detect_last_used_chromium_profile(cookies_browser)
         opts["cookiesfrombrowser"] = (cookies_browser, profile, None, None)
 
@@ -461,21 +471,27 @@ def temp_cookies_copy(cookies_file: Optional[str]) -> Iterator[Optional[str]]:
     corrupt it — a private copy removes the shared mutable state; whatever
     yt-dlp does to its copy is discarded when the temp file is deleted.
     """
-    if not cookies_file or not os.path.exists(cookies_file):
-        yield cookies_file
-        return
+    from utils.cookie_store import materialize_cookie_file
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="bananaflow_cookies_")
-    os.close(fd)
-    try:
-        shutil.copyfile(cookies_file, tmp_path)
-        restrict_path_permissions(tmp_path)
-        yield tmp_path
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    with materialize_cookie_file(cookies_file) as temporary:
+        yield temporary
+
+
+@contextmanager
+def private_cookie_ydl_opts(opts: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Yield yt-dlp options with any app cookie store privately materialized.
+
+    Keeping this at the yt-dlp boundary makes it difficult for a metadata,
+    search, or download caller to accidentally hand the encrypted store to
+    yt-dlp or create its own long-lived plaintext copy.
+    """
+    effective = dict(opts)
+    with temp_cookies_copy(effective.get("cookiefile")) as temporary:
+        if temporary:
+            effective["cookiefile"] = temporary
+        else:
+            effective.pop("cookiefile", None)
+        yield effective
 
 
 def build_search_ydl_opts(

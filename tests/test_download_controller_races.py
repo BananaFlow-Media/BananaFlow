@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -134,6 +136,74 @@ def test_stale_worker_finish_cannot_end_newer_batch(tmp_path, monkeypatch, app):
     new_worker.all_finished.emit(BatchOutcome.COMPLETED)
     assert outcomes == [BatchOutcome.COMPLETED]
     assert ctrl._dl_worker is None
+
+
+def test_track_error_callback_is_safe_and_media_403_is_not_batch_fatal(
+    tmp_path, monkeypatch, app,
+):
+    from error_handler import classify_error
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    card = MagicMock()
+    ctrl._key_to_card["dubai"] = card
+    request = SimpleNamespace(url="https://www.youtube.com/watch?v=qtxE3g4E0J0")
+    monkeypatch.setattr(ctrl, "_active_request_for_key", lambda key: request if key == "dubai" else None)
+    cancelled = []
+    monkeypatch.setattr(ctrl, "cancel_all", lambda: cancelled.append(True))
+    dialogs = []
+    ctrl.show_error_dialog.connect(lambda err, url: dialogs.append((err, url)))
+
+    error = classify_error(Exception(
+        "unable to download video data: HTTP Error 403: Forbidden"
+    ))
+    ctrl._on_track_error("dubai", error)
+
+    card.set_status.assert_called_once_with("error")
+    assert dialogs[0][1] == request.url
+    assert cancelled == []
+
+
+def test_track_error_callback_tolerates_missing_state_and_stale_sender(
+    tmp_path, monkeypatch, app,
+):
+    from error_handler import classify_error
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    dialogs = []
+    ctrl.show_error_dialog.connect(lambda err, url: dialogs.append((err, url)))
+    ctrl._on_track_error("missing", classify_error(Exception("per-video failure")))
+    assert dialogs[0][1] == ""
+
+    new_worker = _FakeWorker()
+    # Drive the real QObject sender boundary with a small signal owner.
+    class Emitter(QObject):
+        failed = Signal(str, object)
+    emitter = Emitter()
+    emitter.failed.connect(ctrl._on_track_error)
+    ctrl._dl_worker = new_worker
+    emitter.failed.emit("missing", classify_error(Exception("stale failure")))
+    assert len(dialogs) == 1
+
+
+def test_genuine_global_cookie_configuration_failure_stops_cleanly_once(
+    tmp_path, monkeypatch, app,
+):
+    from error_handler import classify_error
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    cancelled = []
+    monkeypatch.setattr(ctrl, "cancel_all", lambda: cancelled.append(True))
+    dialogs = []
+    ctrl.show_error_dialog.connect(lambda err, url: dialogs.append((err, url)))
+    error = classify_error(Exception(
+        "could not copy Chrome cookie database: database is locked"
+    ))
+
+    ctrl._on_track_error("first", error)
+    ctrl._on_track_error("second", error)
+
+    assert cancelled == [True]
+    assert len(dialogs) == 1
 
 
 def test_resume_worker_finish_is_allowed_when_no_main_batch(tmp_path, monkeypatch, app):

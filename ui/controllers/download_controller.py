@@ -175,6 +175,25 @@ class DownloadController(QObject):
 
         t_click = time.monotonic()
 
+        downloadable = []
+        for card in selected:
+            match_status = getattr(card, "match_status", "matched")
+            if (
+                match_status == "unresolved"
+                and str(getattr(card, "platform", "")).lower() == "spotify"
+            ):
+                card.match_status = "pending"
+                card.resolution_error = ""
+                match_status = "pending"
+            pending = match_status == "pending"
+            has_url = bool((getattr(card, "track_url", "") or "").strip())
+            if match_status in ("metadata_invalid", "unresolved") or (not pending and not has_url):
+                if hasattr(card, "mark_metadata_invalid"):
+                    card.mark_metadata_invalid(t("spotify_metadata_invalid_card"))
+                continue
+            downloadable.append(card)
+        selected = downloadable
+
         if not selected:
             # "Nothing selected" is not a global-status condition \u2014 the
             # Download button is disabled when nothing is selected, so this
@@ -302,9 +321,16 @@ class DownloadController(QObject):
                 expand_thumbnails=self._cfg.expand_thumbnails,
                 clean_filename=is_clean,
                 proxy_url=self._cfg.get("youtube_proxy_url") or None,
-                is_solo=is_solo,
+                is_solo=(
+                    str(getattr(card, "source_kind", "") or "").upper()
+                    in {UrlKind.SINGLE_VIDEO.name, UrlKind.UNKNOWN.name}
+                    if getattr(card, "source_kind", "")
+                    else is_solo
+                ),
                 stream_type=_parse_stream_type(getattr(card, "category", "")),
                 category=getattr(card, "category", "") or None,
+                source_kind=getattr(card, "source_kind", "") or None,
+                source_url=getattr(card, "source_url", "") or None,
                 youtube_reliability_mode=self._cfg.youtube_reliability_mode,
             )
 
@@ -318,10 +344,21 @@ class DownloadController(QObject):
                     "spotify_id":       getattr(card, "spotify_id", ""),
                     "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
                     "title":            card.title,
+                    "album":            getattr(card, "album", ""),
                     "artist":           card.artist,
                     "duration_sec":     getattr(card, "duration_sec", None),
                 }
+                req.spotify_match_identity = dict(td)
                 req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
+            elif req_platform == SourcePlatform.SPOTIFY:
+                req.spotify_match_identity = {
+                    "spotify_id":       getattr(card, "spotify_id", ""),
+                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
+                    "title":            card.title,
+                    "album":            getattr(card, "album", ""),
+                    "artist":           card.artist,
+                    "duration_sec":     getattr(card, "duration_sec", None),
+                }
 
             return req
 
@@ -329,6 +366,14 @@ class DownloadController(QObject):
             key = str(id(card))
             track_playlist_name:   Optional[str] = None
             is_parent_discography: bool          = False
+            source_kind = str(getattr(card, "source_kind", "") or "").upper()
+            has_source_context = bool(source_kind)
+            independent_source = source_kind in {
+                UrlKind.SINGLE_VIDEO.name, UrlKind.UNKNOWN.name,
+            }
+            grouped_source = source_kind in {
+                UrlKind.PLAYLIST.name, UrlKind.ALBUM.name, UrlKind.ARTIST.name,
+            }
 
             if self._cfg.playlist_subfolders:
                 parent_artist = (card.parent_artist or "").strip()
@@ -337,7 +382,11 @@ class DownloadController(QObject):
                 platform      = (card.platform      or "").lower()
                 category      = (card.category      or "").strip()
 
-                if parent_artist:
+                if independent_source:
+                    # Album/artist fields describe this track but do not turn
+                    # a direct URL (or TXT list of direct URLs) into a collection.
+                    track_playlist_name = ""
+                elif parent_artist:
                     is_live     = "live" in card.title.lower() or "הופעה" in card.title
                     is_spotify  = "spotify" in platform
                     
@@ -390,16 +439,20 @@ class DownloadController(QObject):
 
                     is_parent_discography = True
 
-                elif is_multi:
+                elif grouped_source or (not has_source_context and is_multi):
                     # Generic multi-item (Playlist/Album) logic
-                    track_playlist_name = last_playlist_title or "Playlist"
+                    track_playlist_name = (
+                        (card.album or "").strip()
+                        or last_playlist_title
+                        or "Playlist"
+                    )
                 elif card.artist:
                     pass  # single track — no subfolder
             else:
                 track_playlist_name = ""
 
             # User wants NO folders for solo downloads
-            if is_solo:
+            if is_solo and not grouped_source:
                 track_playlist_name = ""
 
             # Use the same path the writability check ran against. opts["output_dir"]
@@ -416,7 +469,7 @@ class DownloadController(QObject):
 
             # Calculate the index to use for filename prefixing and metadata tags
             track_index = None
-            if not is_solo:
+            if grouped_source or (not has_source_context and not is_solo):
                 if card.release_type in ("album", "ep") and card.album_index > 0:
                     track_index = card.album_index
                 elif card.release_type == "playlist":
@@ -603,6 +656,10 @@ class DownloadController(QObject):
         can be -- see core.download_request_codec's had_pending_resolver
         flag and _card_to_dict's spotify_id/spotify_key_kind/duration_sec
         fields."""
+        from core.scraper import track_match_source_hint
+
+        source_hint = track_match_source_hint(td)
+
         def _resolve(ev, _td=td, _cookies=cookies):
             from core.scraper import resolve_track_to_youtube
             from utils.url_cleaner import clean_youtube_url as _clean
@@ -610,7 +667,9 @@ class DownloadController(QObject):
                 _td, cookies_file=_cookies,
                 cancel_check=lambda: ev is not None and ev.is_set(),
             )
+            _resolve.resolve_source = _td.get("_match_source", "live")
             return _clean(resolved)
+        _resolve.resolve_source = source_hint
         return _resolve
 
     @staticmethod
@@ -835,6 +894,8 @@ class DownloadController(QObject):
             "spotify_id":       getattr(card, "spotify_id", ""),
             "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
             "match_status":     getattr(card, "match_status", "matched"),
+            "source_kind":      getattr(card, "source_kind", ""),
+            "source_url":       getattr(card, "source_url", ""),
         }
 
     def _persist_paused_state(self) -> None:
@@ -952,6 +1013,7 @@ class DownloadController(QObject):
                     "duration_sec":     pj.card.get("duration_sec"),
                 }
                 req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
+                req.spotify_match_identity = dict(td)
             self._paused_requests[key] = req
             self._key_to_card[key] = card
             restored.append(card)
@@ -1272,6 +1334,9 @@ class DownloadController(QObject):
             return
         card = self._key_to_card.get(key)
         if card:
+            # Resolver misses are repaired before engine submission. An error
+            # reaching this callback is an ordinary transfer/service failure,
+            # not a permanently invalid Spotify identity.
             card.set_status("error")
 
         err_msg = str(err)
@@ -1292,20 +1357,28 @@ class DownloadController(QObject):
         # still succeed, so these must NOT cancel the whole batch. They still
         # mark that one card as errored and show once via the throttled
         # per-track error dialog.
-        is_fatal = False
-        fatal_markers = [
-            "cookie database",
-            "DPAPI",
-            "HTTP Error 403",
-            "Signature solving failed",
-            "n challenge solving failed",
-        ]
-        if any(marker in err_msg for marker in fatal_markers):
-            is_fatal = True
+        stops_batch = getattr(err, "stops_batch", None)
+        if callable(stops_batch):
+            is_fatal = bool(stops_batch())
+        else:
+            # Compatibility for legacy/custom error objects. These phrases
+            # identify one broken cookie mechanism; a bare 403 or signature
+            # failure is not evidence that unrelated videos will fail.
+            is_fatal = any(marker in err_msg.casefold() for marker in (
+                "cookie database", "failed to decrypt with dpapi",
+                "app-bound encryption",
+            ))
             
         # Get the failing URL to pass to the UI
         failing_url = ""
-        track_req = self._active_request_for_key(key)
+        try:
+            track_req = self._active_request_for_key(key)
+        except Exception:
+            logger.debug(
+                "[DownloadController] Failed request lookup for %s",
+                key, exc_info=True,
+            )
+            track_req = None
         if track_req:
             failing_url = track_req.url
 
@@ -1320,7 +1393,7 @@ class DownloadController(QObject):
         if emit_dialog:
             self.show_error_dialog.emit(err, failing_url)
 
-        if is_fatal:
+        if is_fatal and emit_dialog:
             logger.warning("[DownloadController] Fatal error detected. Stopping batch.")
             # Record the fatal cause BEFORE cancelling so the outcome is
             # reported as a technical stop, not a user cancellation — and so

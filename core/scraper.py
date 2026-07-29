@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Callable, Optional, Dict, List, Tuple, TYPE_CHECKING
 import logging
 import re
+import threading
 import yt_dlp
 from utils.yt_dlp_opts import build_parse_ydl_opts as _build_parse_ydl_opts
 from utils.logger import SilentLogger as _SilentLogger
@@ -40,6 +41,11 @@ def _emit_pending_track(
     resort) and is tagged ``match_status="pending"`` so the download path
     resolves it lazily. No network calls happen here.
     """
+    if track_dict.get("match_status") == "metadata_invalid":
+        track_dict["url"] = ""
+        if on_item:
+            on_item(track_dict)
+        return
     if not track_dict.get("url"):
         q = f"{track_dict.get('artist', '')} {track_dict.get('title', '')}".strip()
         track_dict["url"] = f"ytsearch1:{q} audio"
@@ -97,25 +103,34 @@ def _resolve_to_ytm_url(
     title: str, artist: str, duration_sec: int = 0,
     cookies_file: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    exclude_urls: Optional[set[str]] = None,
+    album: str = "",
 ) -> str:
     """
     Resolve a track to a YouTube Music URL via ytmusicapi search.
 
-    Uses duration-based and text-similarity confidence scoring to pick the best match.
-    Falls back to a general YouTube search if YTM confidence is low, and finally
-    to a plain ytsearch1: query as a last resort.
+    Uses recording-identity gates first, then the existing broad search and a
+    ranked reasonable fallback. If discovery yields no usable candidate,
+    valid Spotify metadata remains downloadable through a legacy ``ytsearch1``
+    request; malformed metadata is still rejected before any search.
 
     ``cancel_check`` (if given) is polled between the cheap YTM search and the
     heavier yt-dlp fallback so a cancel doesn't let an already-doomed second
     network call run to completion.
     """
+    from utils.spotify_resolver import validate_spotify_track_metadata
+
+    title, artist_credits = validate_spotify_track_metadata(title, [artist])
+    artist = ", ".join(artist_credits)
     query = f"{artist} {title}" if artist else title
-    best_ytm_candidate = None
-    best_ytm_score = -1.0
+    excluded = exclude_urls or set()
+    ytm_matches = []
+    best_ytm_match = None
+    best_general_match = None
 
     try:
         from ytmusicapi import YTMusic
-        from core.spotify_match_scorer import score_candidate
+        from core.spotify_match_scorer import match_from_metadata
 
         yt = YTMusic()
         results = yt.search(query, filter="songs", limit=5)
@@ -136,7 +151,6 @@ def _resolve_to_ytm_url(
                         pass
                 return 0
 
-            best_ytm_breakdown = {}
             for r in results:
                 vid = r.get("videoId")
                 if not vid:
@@ -144,81 +158,131 @@ def _resolve_to_ytm_url(
 
                 yt_title = r.get("title") or ""
                 artists_list = r.get("artists") or []
-                yt_channel = artists_list[0].get("name") if artists_list else ""
+                artist_names = [
+                    item.get("name") or "" for item in artists_list
+                    if isinstance(item, dict)
+                ]
+                yt_channel = artist_names[0] if artist_names else ""
                 yt_dur = _dur_secs(r)
 
                 spotify_dur = duration_sec if duration_sec > 0 else None
 
-                score, breakdown = score_candidate(
-                    spotify_title=title,
-                    spotify_artist=artist,
-                    spotify_dur=spotify_dur,
+                candidate_url = f"https://music.youtube.com/watch?v={vid}"
+                if candidate_url in excluded:
+                    continue
+                match = match_from_metadata(
+                    url=candidate_url,
+                    title=title,
+                    artist=artist,
+                    duration_sec=spotify_dur,
                     yt_title=yt_title,
                     yt_channel=yt_channel,
-                    yt_dur=yt_dur if yt_dur > 0 else None
+                    yt_duration_sec=yt_dur if yt_dur > 0 else None,
+                    yt_artists=artist_names,
+                    spotify_album=album,
+                    yt_album=(r.get("album") or {}).get("name", "")
+                    if isinstance(r.get("album"), dict) else "",
                 )
+                ytm_matches.append(match)
+                if match.safe and (
+                    best_ytm_match is None
+                    or (match.score, match.url) > (best_ytm_match.score, best_ytm_match.url)
+                ):
+                    best_ytm_match = match
 
-                if score > best_ytm_score:
-                    best_ytm_score = score
-                    best_ytm_candidate = (vid, score)
-                    best_ytm_breakdown = breakdown
-
-            if best_ytm_candidate:
-                vid, score = best_ytm_candidate
-                confidence = score / 100.0
-                if artist and best_ytm_breakdown.get("artist", 0.0) == 0.0:
-                    confidence = min(confidence, 0.50)
+            if best_ytm_match:
                 logger.debug(
-                    "[Scraper] Best YTM candidate: %s (score=%.1f, confidence=%.2f)",
-                    vid, score, confidence
+                    "[Scraper] Best safe YTM candidate: %s (score=%.1f, confidence=%.2f)",
+                    best_ytm_match.url, best_ytm_match.score, best_ytm_match.confidence,
                 )
-                if confidence >= 0.65:
-                    return f"https://music.youtube.com/watch?v={vid}"
+                if best_ytm_match.confidence >= 0.65:
+                    return best_ytm_match.url
 
     except Exception as exc:
         logger.debug("[Scraper] ytmusicapi search or scoring failed: %s", exc)
 
     # A cancel between the cheap YTM search and the heavier yt-dlp fallback
-    # returns the last-resort placeholder immediately rather than firing
+    # returns no match immediately rather than firing
     # another network call the user has already abandoned.
     if cancel_check and cancel_check():
-        return f"ytsearch1:{query} audio"
+        return ""
 
     # ── Fallback 1: General YouTube Search ──
     try:
         from core.spotify_match_scorer import find_best_youtube_match
         spotify_dur = duration_sec if duration_sec > 0 else None
-        yt_match = find_best_youtube_match(
-            title=title,
-            artist=artist,
-            duration_sec=spotify_dur,
-            min_confidence=0.55,
-            cookies_file=cookies_file,
+        match_kwargs = dict(
+            title=title, artist=artist, duration_sec=spotify_dur,
+            min_confidence=0.55, cookies_file=cookies_file,
+            album=album, allow_reasonable_fallback=True,
         )
+        if excluded:
+            match_kwargs["exclude_urls"] = excluded
+        yt_match = find_best_youtube_match(**match_kwargs)
         if yt_match:
-            logger.info(
-                "[Scraper] YTM confidence was low. Found strong general YouTube match: %s (confidence=%.2f)",
-                yt_match.youtube_title, yt_match.confidence
-            )
-            return yt_match.url
+            if yt_match.safe:
+                logger.info(
+                    "[Scraper] YTM confidence was low. Found strong general "
+                    "YouTube match: %s (confidence=%.2f)",
+                    yt_match.youtube_title, yt_match.confidence,
+                )
+                return yt_match.url
+            best_general_match = yt_match
     except Exception as exc:
         logger.debug("[Scraper] General YouTube fallback search failed: %s", exc)
 
-    # ── Fallback 2: Best YTM candidate (even if low confidence) ──
-    if best_ytm_candidate:
-        vid, score = best_ytm_candidate
-        if score >= 35.0:
-            logger.debug(
-                "[Scraper] Falling back to low confidence YTM candidate: %s (score=%.1f)",
-                vid, score
-            )
-            return f"https://music.youtube.com/watch?v={vid}"
+    # The strict YTM threshold is deliberately high. Retain a lower-confidence
+    # safe YTM result before considering an approximate candidate.
+    if best_ytm_match and best_ytm_match.confidence >= 0.55:
+        logger.info(
+            "[Scraper] General fallback was inconclusive; using the closest "
+            "identity-safe structured YTM candidate: %s (confidence=%.2f)",
+            best_ytm_match.youtube_title, best_ytm_match.confidence,
+        )
+        return best_ytm_match.url
 
-    # ── Fallback 3: Last Resort ytsearch1 ──
-    # Routine — every track always resolves to *something* playable via this
-    # last-resort search; nothing here is actionable by the user.
-    logger.debug("[Scraper] No confident match found for '%s'. Using last resort ytsearch1.", query)
-    return f"ytsearch1:{query} audio"
+    # The broad resolver has already had its opportunity. If it produced no
+    # result, a structured YTM candidate may still be the closest reasonable
+    # recording when only independent artist proof is missing (for example
+    # Latin Spotify credits versus Hebrew YouTube Music credits).
+    try:
+        from core.spotify_match_scorer import _rank, is_reasonable_fallback_match
+        reasonable_candidates = [
+            item for item in _rank([
+                *ytm_matches,
+                *([best_general_match] if best_general_match else []),
+            ])
+            if is_reasonable_fallback_match(item)
+        ]
+        if reasonable_candidates:
+            best = reasonable_candidates[0]
+            logger.info(
+                "[Scraper] Using closest reasonable YouTube candidate: "
+                "%s (ranking_score=%.1f)",
+                best.youtube_title,
+                float(best.breakdown.get("ranking_score", best.score)),
+            )
+            return best.url
+    except Exception as exc:
+        logger.debug("[Scraper] Reasonable YTM ranking failed: %s", exc)
+
+    fallback = spotify_legacy_search_request(title, artist)
+    logger.warning(
+        "[Scraper] No direct reasonable candidate for title=%r artist=%r; "
+        "delegating to legacy search request",
+        title, artist,
+    )
+    return fallback
+
+
+def spotify_legacy_search_request(title: str, artist: str) -> str:
+    """Build the final yt-dlp search request for valid Spotify metadata."""
+    from utils.spotify_resolver import validate_spotify_track_metadata
+
+    clean_title, artist_credits = validate_spotify_track_metadata(title, [artist])
+    clean_artist = ", ".join(artist_credits)
+    query = " ".join(part for part in (clean_artist, clean_title, "audio") if part)
+    return f"ytsearch1:{query}"
 
 
 def _spotify_id_from_url(url: str) -> str:
@@ -250,10 +314,26 @@ def _spotify_cache_key(td: Dict) -> Tuple[str, str]:
     )
 
 
+class _ResolutionFlight:
+    """One process-local cold resolution shared by prefetch and download."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result = ""
+        self.error: Optional[BaseException] = None
+
+
+_resolution_flights_lock = threading.Lock()
+_resolution_flights: dict[tuple, _ResolutionFlight] = {}
+
+
 def resolve_track_to_youtube(
     td: Dict,
     cookies_file: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    *,
+    force_refresh: bool = False,
+    exclude_urls: Optional[set[str]] = None,
 ) -> str:
     """Cache-aware resolution of one track dict to a YouTube URL.
 
@@ -272,22 +352,109 @@ def resolve_track_to_youtube(
     spotify_key, key_kind = _spotify_cache_key(td)
     cache = get_match_cache()
 
-    cached = cache.get(spotify_key, MATCH_ALGO_VERSION)
-    if cached:
+    # A refresh skips the current row but does not delete it here. Stale-target
+    # recovery already uses compare-and-delete with the failed URL; an
+    # unconditional second delete would race with another resolver that may
+    # have installed a newer mapping in the meantime.
+    cached = None if force_refresh else cache.get(spotify_key, MATCH_ALGO_VERSION)
+    if cached and cached not in (exclude_urls or set()):
+        try:
+            from core.match_prefetcher import was_prefetched_match
+            td["_match_source"] = (
+                "prefetched" if was_prefetched_match(spotify_key) else "cache"
+            )
+        except Exception:
+            td["_match_source"] = "cache"
         return cached
 
-    url = _resolve_to_ytm_url(
-        td.get("title", ""),
-        td.get("artist", ""),
-        td.get("duration_sec") or 0,
-        cookies_file=cookies_file,
-        cancel_check=cancel_check,
+    # The fetch prefetcher and the download pipeline can miss the same cache
+    # row before either has written it. Share that cold operation in-process;
+    # refreshes remain separate because they deliberately exclude old URLs.
+    flight_key = (
+        spotify_key,
+        MATCH_ALGO_VERSION,
+        bool(force_refresh),
+        tuple(sorted(exclude_urls or ())),
+    )
+    with _resolution_flights_lock:
+        flight = _resolution_flights.get(flight_key)
+        owner = flight is None
+        if owner:
+            flight = _ResolutionFlight()
+            _resolution_flights[flight_key] = flight
+
+    if not owner:
+        while not flight.done.wait(0.05):
+            if cancel_check and cancel_check():
+                return ""
+        if flight.error is not None:
+            raise flight.error
+        td["_match_source"] = "shared"
+        return flight.result
+
+    try:
+        resolve_kwargs = dict(
+            cookies_file=cookies_file,
+            cancel_check=cancel_check,
+            album=td.get("album") or td.get("album_name") or "",
+        )
+        if exclude_urls:
+            resolve_kwargs["exclude_urls"] = exclude_urls
+        url = _resolve_to_ytm_url(
+            td.get("title", ""),
+            td.get("artist", ""),
+            td.get("duration_sec") or 0,
+            **resolve_kwargs,
+        )
+
+        if url and not url.startswith("ytsearch"):
+            cache.put(spotify_key, url, None, MATCH_ALGO_VERSION, key_kind=key_kind)
+        td["_match_source"] = "live"
+        flight.result = url
+        return url
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    finally:
+        flight.done.set()
+        with _resolution_flights_lock:
+            if _resolution_flights.get(flight_key) is flight:
+                _resolution_flights.pop(flight_key, None)
+
+
+def invalidate_track_match(td: Dict, expected_url: Optional[str] = None) -> bool:
+    """Invalidate one cached match after a proven media-unavailable failure."""
+    from core.match_cache import get_match_cache
+    from core.spotify_match_scorer import MATCH_ALGO_VERSION
+    from utils.spotify_resolver import validate_spotify_track_metadata
+
+    clean_title, artist_credits = validate_spotify_track_metadata(
+        td.get("title", ""), [td.get("artist", "")]
+    )
+    td["title"] = clean_title
+    td["artist"] = ", ".join(artist_credits)
+
+    spotify_key, _key_kind = _spotify_cache_key(td)
+    return get_match_cache().delete(
+        spotify_key, MATCH_ALGO_VERSION, expected_url=expected_url,
     )
 
-    # Cache only confident matches — never the ytsearch* last-resort sentinel.
-    if url and not url.startswith("ytsearch"):
-        cache.put(spotify_key, url, None, MATCH_ALGO_VERSION, key_kind=key_kind)
-    return url
+
+def track_match_source_hint(td: Dict) -> str:
+    """Inspect local state only; never perform a network match."""
+    from core.match_cache import get_match_cache
+    from core.spotify_match_scorer import MATCH_ALGO_VERSION
+
+    spotify_key, _key_kind = _spotify_cache_key(td)
+    if not get_match_cache().get(spotify_key, MATCH_ALGO_VERSION):
+        return "live"
+    try:
+        from core.match_prefetcher import was_prefetched_match
+        if was_prefetched_match(spotify_key):
+            return "prefetched"
+    except Exception:
+        pass
+    return "cache"
 
 
 def _sync_playwright_for(feature: str):
@@ -304,6 +471,87 @@ def _sync_playwright_for(feature: str):
 # ── Private Internal Helpers (Shared common logic) ────────────────────────────
 # Real Desktop User Agent to avoid bot-detection
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+
+
+def _spotify_context_kwargs(locale: str = "en-US", **kwargs) -> dict:
+    """Build a Spotify browser context in the selected application locale.
+
+    Spotify's full page payload localizes artist display names, while the
+    public embed payload may retain a market-neutral Latin representation.
+    The locale therefore has to be explicit before metadata is emitted.
+    """
+    locale = "he-IL" if str(locale).lower().startswith("he") else "en-US"
+    return {
+        "user_agent": _USER_AGENT,
+        "locale": locale,
+        "extra_http_headers": {
+            "Accept-Language": (
+                "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
+                if locale == "he-IL"
+                else "en-US,en;q=0.9"
+            ),
+        },
+        **kwargs,
+    }
+
+
+def _read_spotify_artist_credits(artist_links, page=None) -> list[str]:
+    """Read the ordered credits from one track row after hydration settles.
+
+    Spotify can insert all artist anchors before their text nodes are hydrated.
+    Reading that transient state produced values such as ``"אודיה,"`` when a
+    collaborator anchor was present but still empty.  Retry only that narrow
+    row-scoped condition for a bounded 600 ms, then return the usable credits;
+    downstream metadata validation remains authoritative for malformed input.
+    """
+    links = list(artist_links or [])
+    for attempt in range(5):
+        names: list[str] = []
+        missing = False
+        seen: set[str] = set()
+        for link in links:
+            name = ""
+            for reader_name in ("inner_text", "text_content"):
+                try:
+                    value = getattr(link, reader_name)()
+                except Exception:
+                    value = ""
+                name = str(value or "").strip()
+                if name:
+                    break
+            if not name:
+                missing = True
+                continue
+            key = name.casefold()
+            if key not in seen:
+                seen.add(key)
+                names.append(name)
+        if not missing or page is None or attempt == 4:
+            return names
+        try:
+            page.wait_for_timeout(150)
+        except Exception:
+            return names
+    return []
+
+
+def _validated_spotify_display_metadata(
+    title: str, artist_credits: list[str],
+) -> tuple[str, str, list[str]]:
+    """Validate Spotify-owned display metadata without generic title cleanup.
+
+    ``clean_title_and_artist`` is intended for noisy video titles.  Applying it
+    to authoritative Spotify credits removed Latin collaborators from mixed-
+    script rows (``"אודיה, Shir Koren"`` became ``"אודיה,"``).
+    """
+    from utils.spotify_resolver import validate_spotify_track_metadata
+
+    clean_title, clean_credits = validate_spotify_track_metadata(
+        title, artist_credits,
+    )
+    return clean_title, ", ".join(clean_credits), clean_credits
+
+
 def _block_heavy_resources(route):
     """
     Aborts requests for heavy media while keeping CSS and XHR/Scripts active.
@@ -441,7 +689,10 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
                     added_in_pass += 1
 
                     artist_links = track_row.locator("a[href*='/artist/']").all()
-                    artists = ", ".join([a.inner_text().strip() for a in artist_links]) if artist_links else "Unknown Artist"
+                    artist_names = _read_spotify_artist_credits(artist_links, page)
+                    track_title, artists, artist_names = _validated_spotify_display_metadata(
+                        track_title, artist_names,
+                    )
 
                     # Extract thumbnail from row
                     track_thumb = ""
@@ -471,10 +722,8 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
                             elif len(parts) == 3:
                                 duration_sec = parts[0] * 3600 + parts[1] * 60 + parts[2]
                     except: pass
-                    from utils.metadata_cleaner import clean_title_and_artist
-                    cleaned_title, cleaned_artist = clean_title_and_artist(track_title, artists)
                     track_dict = {
-                        "title": cleaned_title, "artist": cleaned_artist, "album": scraped_title,
+                        "title": track_title, "artist": artists, "album": scraped_title,
                         "url": "",  # resolved in parallel after browser closes
                         "album_index": len(seen), "thumbnail_url": final_thumb,
                         "duration_sec": duration_sec, "duration_str": duration_str or "??:??",
@@ -515,6 +764,7 @@ def scrape_spotify_playlist(
     cookies_file: Optional[str] = None,
     metadata_only: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
+    locale: str = "en-US",
 ) -> Tuple[str, List[Dict]]:
     """Dedicated entry for Spotify Playlists.
 
@@ -525,7 +775,7 @@ def scrape_spotify_playlist(
     title, items = "Unknown Playlist", []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=_USER_AGENT)
+        context = browser.new_context(**_spotify_context_kwargs(locale))
         page = context.new_page()
         page.route("**/*", _block_heavy_resources)
         try:
@@ -545,6 +795,7 @@ def scrape_spotify_album(
     cookies_file: Optional[str] = None,
     metadata_only: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
+    locale: str = "en-US",
 ) -> Tuple[str, List[Dict]]:
     """Dedicated entry for Spotify Albums.
 
@@ -555,7 +806,7 @@ def scrape_spotify_album(
     title, items = "Unknown Album", []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=_USER_AGENT)
+        context = browser.new_context(**_spotify_context_kwargs(locale))
         page = context.new_page()
         page.route("**/*", _block_heavy_resources)
         try:
@@ -569,72 +820,188 @@ def scrape_spotify_album(
     if not metadata_only:
         _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
     return title, items
-def scrape_spotify_track(url: str, on_item: Optional[Callable[[Dict], None]] = None, cookies_file: Optional[str] = None) -> Tuple[str, List[Dict]]:
-    """Dedicated entry for single Spotify track."""
+
+
+def _spotify_metadata_invalid_item(
+    url: str, reason: str, *, title: str = "Spotify track",
+) -> Dict:
+    """Build a visible but non-downloadable row for untrustworthy metadata."""
+    return {
+        "title": title or "Spotify track",
+        "artist": "",
+        "album": title or "Spotify track",
+        "url": "",
+        "platform": "spotify",
+        "release_type": "single",
+        "category": "סינגלים ו-EP",
+        "total_tracks": 1,
+        "spotify_id": _spotify_id_from_url(url),
+        "spotify_url": url,
+        "match_status": "metadata_invalid",
+        "resolution_error": "spotify_metadata_invalid_card",
+        "metadata_error": reason,
+    }
+
+
+def scrape_spotify_track(
+    url: str,
+    on_item: Optional[Callable[[Dict], None]] = None,
+    cookies_file: Optional[str] = None,
+    locale: str = "en-US",
+) -> Tuple[str, List[Dict]]:
+    """Extract one Spotify track, structured-first and match it lazily.
+
+    Locale-aware structured page data is preferred, followed by exact
+    track-scoped embed JSON. The DOM fallback is limited to the entity header
+    and ``track-artist-link-card`` credits; it never scans all artist links in
+    ``main`` where recommendations and discography sections also live.
+    """
+    del cookies_file  # Spotify page metadata is public; YouTube cookies are used later.
+    from core.match_errors import SpotifyMetadataInvalid
+    from utils.spotify_resolver import SpotifyResolver, validate_spotify_track_metadata
+
+    spotify_id = _spotify_id_from_url(url)
     title = "Unknown Track"
-    items = []
-    sync_playwright = _sync_playwright_for("Spotify track scraping")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=_USER_AGENT)
-        page = context.new_page()
-        page.route("**/*", _block_heavy_resources)
+    items: List[Dict] = []
+
+    # Spotify's full page initialState is both structured and locale-aware.
+    # Prefer it for Hebrew display metadata and constrain traversal to the
+    # requested track id; the track-scoped embed remains the resilient
+    # credential-free fallback when that payload is unavailable.
+    if str(locale).lower().startswith("he"):
         try:
-            page.goto(url, wait_until="load")
+            html = SpotifyResolver._localized_page_html("track", spotify_id, locale)
+            parsed = _parse_spotify_json_fallback(
+                html, "Track", expected_spotify_id=spotify_id,
+            )
+            if parsed:
+                title, items = parsed
+                items = items[:1]
+                logger.info(
+                    "[SpotifyScraper] Parsed localized track %s from scoped "
+                    "initialState JSON", spotify_id,
+                )
+        except SpotifyMetadataInvalid as exc:
+            logger.warning(
+                "[SpotifyScraper] Invalid localized metadata for track %s: %s",
+                spotify_id, exc,
+            )
+            items = [_spotify_metadata_invalid_item(url, str(exc), title=title)]
+        except Exception as exc:
+            logger.debug("[SpotifyScraper] Localized track metadata unavailable: %s", exc)
 
-            # Try embedded JSON extraction fallback first
+    # Exact, credential-free Spotify embed JSON fallback.
+    if not items:
+        try:
+            rows = SpotifyResolver._embed_fallback("track", spotify_id, locale=locale)
+            if not rows:
+                raise RuntimeError("Spotify embed returned no track")
+            metadata = dict(rows[0])
+            title, artist, artist_names = _validated_spotify_display_metadata(
+                metadata.get("title"), metadata.get("artist_credits") or [metadata.get("artist", "")]
+            )
+            metadata.update({
+                "title": title,
+                "artist": artist,
+                "album": title,
+                "parent_artist": artist_names[0],
+                "category": "סינגלים ו-EP",
+                "release_type": "single",
+                "total_tracks": 1,
+                "platform": "spotify",
+                "spotify_id": spotify_id,
+                "spotify_url": url,
+                "url": "",
+            })
+            items = [metadata]
+            logger.info("[SpotifyScraper] Parsed track %s from scoped embed JSON", spotify_id)
+        except SpotifyMetadataInvalid as exc:
+            logger.warning("[SpotifyScraper] Invalid structured metadata for track %s: %s", spotify_id, exc)
+            items = [_spotify_metadata_invalid_item(url, str(exc), title=title)]
+        except Exception as exc:
+            logger.debug("[SpotifyScraper] Structured track metadata unavailable: %s", exc)
+
+    # Narrowly scoped DOM fallback only when structured data was unavailable,
+    # never when the structured source was present but clearly malformed.
+    if not items:
+        sync_playwright = _sync_playwright_for("Spotify track scraping")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(**_spotify_context_kwargs(locale))
+            page = context.new_page()
+            page.route("**/*", _block_heavy_resources)
             try:
-                html = page.content()
-                parsed = _parse_spotify_json_fallback(html, "Track")
-                if parsed:
-                    title, tracks = parsed
-                    tracks = tracks[:1]
-                    for t in tracks:
-                        t["category"] = "סינגלים ו-EP"
-                        t["release_type"] = "single"
-                        t["total_tracks"] = 1
-                    items = tracks
-                    artists = items[0]["artist"]
-            except Exception as e:
-                logger.debug(f"[SpotifyScraper] Track JSON fallback failed: {e}")
-
-            if not items:
-                page.wait_for_selector("main h1", timeout=12000)
-                title = page.locator("main h1").first.inner_text().strip()
-
-                # Extract high-res thumbnail
-                thumb_url = ""
+                page.goto(url, wait_until="load", timeout=30000)
                 try:
-                    img_el = page.locator("main img[data-testid='entity-image'], main img").first
+                    html = page.content()
+                    parsed = _parse_spotify_json_fallback(
+                        html, "Track", expected_spotify_id=spotify_id,
+                    )
+                    if parsed:
+                        title, items = parsed
+                        items = items[:1]
+                except SpotifyMetadataInvalid as exc:
+                    items = [_spotify_metadata_invalid_item(url, str(exc), title=title)]
+                except Exception as exc:
+                    logger.debug("[SpotifyScraper] Track page JSON unavailable: %s", exc)
+
+                if not items:
+                    page.wait_for_selector(
+                        "main [data-testid='entityTitle'], main h1", timeout=12000,
+                    )
+                    title = page.locator(
+                        "main [data-testid='entityTitle'], main h1"
+                    ).first.inner_text().strip()
+                    credit_links = page.locator(
+                        "main [data-testid='track-artist-link-card'] a[href*='/artist/']"
+                    ).all()
+                    artist_names = _read_spotify_artist_credits(credit_links, page)
+                    clean_title, artist, artist_names = _validated_spotify_display_metadata(
+                        title, artist_names,
+                    )
+
+                    thumb_url = ""
+                    img_el = page.locator("main img[data-testid='entity-image']").first
                     if img_el.count():
                         thumb_url = _ensure_high_res_spotify_image(img_el.get_attribute("src") or "")
-                except: pass
-                artist_links = page.locator("main a[href*='/artist/']").all()
-                artist_names = [a.inner_text().strip() for a in artist_links] if artist_links else []
-                artists = ", ".join(artist_names) if artist_names else "Unknown Artist"
-                parent_artist = artist_names[0] if artist_names else ""
+                    items = [{
+                        "title": clean_title,
+                        "artist": artist,
+                        "album": clean_title,
+                        "parent_artist": artist_names[0],
+                        "category": "סינגלים ו-EP",
+                        "url": "",
+                        "thumbnail_url": thumb_url,
+                        "platform": "spotify",
+                        "release_type": "single",
+                        "total_tracks": 1,
+                        "spotify_id": spotify_id,
+                        "spotify_url": url,
+                    }]
+                    title = clean_title
+            except SpotifyMetadataInvalid as exc:
+                logger.warning("[SpotifyScraper] Invalid DOM metadata for track %s: %s", spotify_id, exc)
+                items = [_spotify_metadata_invalid_item(url, str(exc), title=title)]
+            finally:
+                browser.close()
 
-                from utils.metadata_cleaner import clean_title_and_artist
-                cleaned_title, cleaned_artist = clean_title_and_artist(title, artists)
-
-                track_dict = {
-                    "title": cleaned_title, "artist": cleaned_artist, "album": cleaned_title,
-                    "parent_artist": parent_artist, "category": "סינגלים ו-EP",
-                    "url": "",  # resolved after browser closes
-                    "thumbnail_url": thumb_url, "platform": "spotify",
-                    "release_type": "single", "total_tracks": 1,
-                }
-                items.append(track_dict)
-        finally: browser.close()
+    for item in items:
+        item.setdefault("category", "סינגלים ו-EP")
+        item.setdefault("release_type", "single")
+        item.setdefault("total_tracks", 1)
+        _emit_pending_track(item, on_item)
     if items:
-        _parallel_resolve_urls(items, on_item, max_workers=1, cookies_file=cookies_file)
+        title = items[0].get("title") or title
     return title, items
+
+
 def scrape_spotify_artist(
     url: str,
     on_item: Optional[Callable[[Dict], None]] = None,
     cookies_file: Optional[str] = None,
     metadata_only: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
+    locale: str = "en-US",
 ) -> Tuple[str, List[Dict]]:
     """
     Dedicated entry for Spotify Artist discographies.
@@ -645,6 +1012,8 @@ def scrape_spotify_artist(
     ``cancel_check`` is polled in the scroll/category loops so a user cancel
     stops the (potentially long) scrape promptly.
     """
+    from utils.spotify_resolver import validate_spotify_track_metadata
+
     items = []
     artist_name = ""
     seen_track_uids = set()
@@ -654,12 +1023,9 @@ def scrape_spotify_artist(
     sync_playwright = _sync_playwright_for("Spotify artist discography scraping")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 1000},
-            user_agent=_USER_AGENT,
-            locale="he-IL",
-            extra_http_headers={"Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"}
-        )
+        context = browser.new_context(**_spotify_context_kwargs(
+            locale, viewport={"width": 1280, "height": 1000},
+        ))
         page = context.new_page()
         page.route("**/*", _block_heavy_resources)
 
@@ -773,7 +1139,12 @@ def scrape_spotify_artist(
                                 added_any = True
 
                                 artist_links = track_row.locator("a[href*='/artist/']").all()
-                                artists = ", ".join([a.inner_text().strip() for a in artist_links]) if artist_links else artist_name
+                                artist_names = _read_spotify_artist_credits(
+                                    artist_links, page,
+                                )
+                                track_title, artists, artist_names = _validated_spotify_display_metadata(
+                                    track_title, artist_names or [artist_name],
+                                )
                                 duration_sec, duration_str = 0, ""
                                 try:
                                     dur_el = track_row.locator("[data-testid='track-duration']").first
@@ -1049,21 +1420,40 @@ def _scraper_best_thumbnail(info: dict) -> str:
     return info.get("thumbnail") or ""
 
 
-def _extract_spotify_data_from_json(data: Any, content_type: str) -> Optional[Tuple[str, List[Dict]]]:
+def _extract_spotify_data_from_json(
+    data: Any, content_type: str, expected_spotify_id: str = "",
+) -> Optional[Tuple[str, List[Dict]]]:
     """
     Generic traversal of Spotify initial-state JSON to find tracks and container title.
     """
     tracks_found = []
     container_title = None
+    container_thumbnail = ""
     seen_track_ids = set()
 
     def traverse(node: Any):
-        nonlocal container_title
+        nonlocal container_title, container_thumbnail
         if isinstance(node, dict):
             # Check if this is the playlist/album container title
-            node_type = str(node.get("type", "")).lower()
-            if node_type == content_type.lower() and "name" in node:
+            node_type = str(node.get("type") or node.get("__typename") or "").lower()
+            if (
+                container_title is None
+                and node_type == content_type.lower()
+                and "name" in node
+            ):
                 container_title = node["name"]
+            if node_type == content_type.lower() and not container_thumbnail:
+                sources = (node.get("coverArt") or {}).get("sources") or []
+                ranked = []
+                for image in sources if isinstance(sources, list) else []:
+                    if not isinstance(image, dict) or not image.get("url"):
+                        continue
+                    ranked.append((
+                        int(image.get("width") or 0) * int(image.get("height") or 0),
+                        image["url"],
+                    ))
+                if ranked:
+                    container_thumbnail = max(ranked)[1]
 
             # Check if this is a track object
             is_track = node_type == "track"
@@ -1073,26 +1463,47 @@ def _extract_spotify_data_from_json(data: Any, content_type: str) -> Optional[Tu
 
             if is_track and "name" in node:
                 track_id = uri.split(":")[-1] if uri else node.get("id")
-                if track_id and track_id not in seen_track_ids:
+                if (
+                    track_id and track_id not in seen_track_ids
+                    and (not expected_spotify_id or track_id == expected_spotify_id)
+                ):
                     seen_track_ids.add(track_id)
 
                     # Extract artists
                     artists_list = []
                     artists_data = node.get("artists", [])
+                    if isinstance(artists_data, dict):
+                        artists_data = artists_data.get("items") or []
                     if isinstance(artists_data, list):
                         for art in artists_data:
-                            if isinstance(art, dict) and "name" in art:
-                                artists_list.append(art["name"])
-                    artists_str = ", ".join(artists_list) if artists_list else "Unknown Artist"
-
+                            if isinstance(art, dict):
+                                artist_name = art.get("name")
+                                if not artist_name and isinstance(art.get("profile"), dict):
+                                    artist_name = art["profile"].get("name")
+                                if artist_name:
+                                    artists_list.append(artist_name)
+                    if not artists_list:
+                        for group_name in ("firstArtist", "otherArtists"):
+                            group = node.get(group_name) or {}
+                            group_items = group.get("items") if isinstance(group, dict) else []
+                            for art in group_items or []:
+                                if not isinstance(art, dict):
+                                    continue
+                                artist_name = art.get("name")
+                                if not artist_name and isinstance(art.get("profile"), dict):
+                                    artist_name = art["profile"].get("name")
+                                if artist_name:
+                                    artists_list.append(artist_name)
                     # Extract album name
                     album_name = ""
-                    album_data = node.get("album")
+                    album_data = node.get("album") or node.get("albumOfTrack")
                     if isinstance(album_data, dict) and "name" in album_data:
                         album_name = album_data["name"]
 
                     # Duration
-                    dur_ms = node.get("duration_ms", 0)
+                    dur_ms = node.get("duration_ms") or node.get("duration") or 0
+                    if isinstance(dur_ms, dict):
+                        dur_ms = dur_ms.get("totalMilliseconds") or 0
                     duration_sec = int(dur_ms) // 1000 if dur_ms else 0
 
                     # Thumbnail
@@ -1100,16 +1511,29 @@ def _extract_spotify_data_from_json(data: Any, content_type: str) -> Optional[Tu
                     images = []
                     if isinstance(album_data, dict) and isinstance(album_data.get("images"), list):
                         images = album_data["images"]
+                    elif isinstance(album_data, dict):
+                        images = (album_data.get("coverArt") or {}).get("sources") or []
                     elif isinstance(node.get("images"), list):
                         images = node["images"]
 
                     if images:
                         if isinstance(images[0], dict) and "url" in images[0]:
-                            thumb_url = images[0]["url"]
+                            ranked = []
+                            for image in images:
+                                if not isinstance(image, dict) or not image.get("url"):
+                                    continue
+                                ranked.append((
+                                    int(image.get("width") or image.get("maxWidth") or 0)
+                                    * int(image.get("height") or image.get("maxHeight") or 0),
+                                    image["url"],
+                                ))
+                            thumb_url = max(ranked, default=(0, images[0]["url"]))[1]
+                    if not thumb_url:
+                        thumb_url = container_thumbnail
 
                     tracks_found.append({
                         "title": node["name"],
-                        "artist": artists_str,
+                        "artists": artists_list,
                         "album": album_name,
                         "duration_sec": duration_sec,
                         "thumbnail_url": thumb_url,
@@ -1132,11 +1556,28 @@ def _extract_spotify_data_from_json(data: Any, content_type: str) -> Optional[Tu
     items = []
     total = len(tracks_found)
     for idx, t in enumerate(tracks_found, start=1):
-        from utils.metadata_cleaner import clean_title_and_artist
-        cleaned_title, cleaned_artist = clean_title_and_artist(t["title"], t["artist"])
+        from core.match_errors import SpotifyMetadataInvalid
+        try:
+            track_title, cleaned_artist, artist_names = _validated_spotify_display_metadata(
+                t["title"], t["artists"],
+            )
+            cleaned_title = track_title
+            match_status = "matched"
+            resolution_error = ""
+            metadata_error = ""
+        except SpotifyMetadataInvalid as exc:
+            cleaned_title = str(t.get("title") or "Spotify track")
+            cleaned_artist = ""
+            match_status = "metadata_invalid"
+            resolution_error = "spotify_metadata_invalid_card"
+            metadata_error = str(exc)
         items.append({
             "title": cleaned_title,
             "artist": cleaned_artist,
+            "parent_artist": (
+                artist_names[0]
+                if match_status != "metadata_invalid" and artist_names else ""
+            ),
             "album": t["album"] or scraped_title,
             "url": "",  # resolved in parallel after browser closes
             "album_index": idx,
@@ -1151,18 +1592,41 @@ def _extract_spotify_data_from_json(data: Any, content_type: str) -> Optional[Tu
                 f"https://open.spotify.com/track/{t['track_id']}"
                 if t.get("track_id") else ""
             ),
+            "match_status": match_status,
+            "resolution_error": resolution_error,
+            "metadata_error": metadata_error,
         })
 
     return scraped_title, items
 
 
-def _parse_spotify_json_fallback(html: str, content_type: str) -> Optional[Tuple[str, List[Dict]]]:
+def _parse_spotify_json_fallback(
+    html: str, content_type: str, expected_spotify_id: str = "",
+) -> Optional[Tuple[str, List[Dict]]]:
     """Parse Spotify tracks directly from embedded JSON in the HTML if available."""
+    import base64
     import re
     import json
     import urllib.parse
 
-    # 1. Search for script tags with initial-state or session
+    # Spotify's current full page stores a base64-encoded JSON payload in a
+    # text/plain ``initialState`` script. It is locale-aware and exact enough
+    # to preserve the same display names the user sees on spotify.com.
+    current = re.search(
+        r'<script\s+[^>]*id="initialState"[^>]*>(.*?)</script>', html, re.DOTALL,
+    )
+    if current:
+        try:
+            data = json.loads(base64.b64decode(current.group(1).strip()))
+            res = _extract_spotify_data_from_json(
+                data, content_type, expected_spotify_id=expected_spotify_id,
+            )
+            if res:
+                return res
+        except Exception as exc:
+            logger.debug("[SpotifyScraper] initialState parse error: %s", exc)
+
+    # 1. Search for legacy script tags with initial-state or session
     match = re.search(r'<script\s+[^>]*id="initial-state"[^>]* type="application/json"[^>]*>(.*?)</script>', html, re.DOTALL)
     if not match:
         match = re.search(r'<script\s+[^>]*id="session"[^>]* type="application/json"[^>]*>(.*?)</script>', html, re.DOTALL)
@@ -1173,7 +1637,9 @@ def _parse_spotify_json_fallback(html: str, content_type: str) -> Optional[Tuple
             if raw_json.startswith("%"):
                 raw_json = urllib.parse.unquote(raw_json)
             data = json.loads(raw_json)
-            res = _extract_spotify_data_from_json(data, content_type)
+            res = _extract_spotify_data_from_json(
+                data, content_type, expected_spotify_id=expected_spotify_id,
+            )
             if res:
                 return res
         except Exception as exc:
@@ -1184,7 +1650,9 @@ def _parse_spotify_json_fallback(html: str, content_type: str) -> Optional[Tuple
     if js_match:
         try:
             data = json.loads(js_match.group(1).strip())
-            res = _extract_spotify_data_from_json(data, content_type)
+            res = _extract_spotify_data_from_json(
+                data, content_type, expected_spotify_id=expected_spotify_id,
+            )
             if res:
                 return res
         except:
@@ -1197,7 +1665,9 @@ def _parse_spotify_json_fallback(html: str, content_type: str) -> Optional[Tuple
             if raw_json.startswith("%"):
                 raw_json = urllib.parse.unquote(raw_json)
             data = json.loads(raw_json)
-            res = _extract_spotify_data_from_json(data, content_type)
+            res = _extract_spotify_data_from_json(
+                data, content_type, expected_spotify_id=expected_spotify_id,
+            )
             if res:
                 return res
         except:

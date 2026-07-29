@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from core.retry_policy import is_retriable as _is_retriable
 from core.warning_classifier import (
     ACCOUNT_REQUIRED,
+    BROWSER_COOKIE_ACCESS_BLOCKED,
     COOKIES_EXPIRED_OR_INVALID,
     JS_RUNTIME_MISSING,
     NETWORK_TRANSIENT,
@@ -76,6 +77,15 @@ class ErrorInfo:
 
     def is_fatal(self) -> bool:
         return self.severity == ErrorSeverity.CRITICAL
+
+    def stops_batch(self) -> bool:
+        """Whether the same local configuration will fail every peer job.
+
+        Transfer failures, video restrictions, rate limits and bare HTTP 403s
+        are track-scoped. Broken browser-cookie access and critical local
+        prerequisites (FFmpeg/output permissions) are batch-wide.
+        """
+        return self.message_key == "err_browser_cookie_access" or self.is_fatal()
 
     def status_line(self) -> str:
         """A one-line summary for a status area. Emoji-free by design: the GUI
@@ -161,6 +171,18 @@ ERROR_TEXTS_EN: dict[str, str] = {
         "Your YouTube cookies appear expired or invalid. Re-export cookies "
         "and try again.",
 
+    "err_browser_cookie_access_title": "Browser cookies cannot be read safely",
+    "err_browser_cookie_access_detail":
+        "Windows protects and locks live Chrome, Edge, and Brave profiles. "
+        "BananaFlow will not bypass those protections. Open the sign-in helper "
+        "to use a separate BananaFlow profile, or import a cookies.txt file.",
+
+    "err_bot_challenge_title": "YouTube requested a human verification",
+    "err_bot_challenge_detail":
+        "YouTube presented an anti-bot challenge. Stop repeated attempts and "
+        "wait before trying again. If the content requires your account, use "
+        "BananaFlow's sign-in helper; changing videos will not fix this challenge.",
+
     "err_js_runtime_title": "No JavaScript runtime found",
     "err_js_runtime_detail":
         "No supported JavaScript runtime was found. Install Deno or Node "
@@ -171,12 +193,17 @@ ERROR_TEXTS_EN: dict[str, str] = {
         "This video appears to require login (age-restricted or "
         "account-required). Configure YouTube cookies if you have access "
         "to the content.\n\n"
-        "Solution: Export your browser cookies to a cookies.txt file and set the path "
-        "in Settings → Cookies File.",
+        "Use BananaFlow's isolated sign-in helper, or import a cookies.txt "
+        "file in Settings. BananaFlow does not need access to your regular browser profile.",
 
     "err_video_unavailable_title": "Video unavailable",
     "err_video_unavailable_detail":
         "This video is private, deleted, or not available in your region.",
+
+    "err_spotify_metadata_invalid_title": "Invalid Spotify track details",
+    "err_spotify_metadata_invalid_detail":
+        "Spotify returned missing, malformed, or page-polluted track details. "
+        "This track was left unresolved and was not added to the download queue.",
 
     "err_geo_restricted_title": "Geo-restricted content",
     "err_geo_restricted_detail":
@@ -276,6 +303,28 @@ ERROR_TEXTS_EN: dict[str, str] = {
 # headline/detail text, so rewording a message can never silently break
 # the link.
 _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
+    (
+        re.compile(r"spotify (?:artist credits|track title|structured data)", re.I),
+        "err_spotify_metadata_invalid",
+        ErrorSeverity.WARNING,
+        None,
+    ),
+    (
+        re.compile(
+            r"browser_cookie_unsupported|could not copy .*cookie database|"
+            r"database is locked|failed to decrypt with dpapi|app.?bound encryption",
+            re.I,
+        ),
+        "err_browser_cookie_access",
+        ErrorSeverity.ERROR,
+        BROWSER_COOKIE_ACCESS_BLOCKED,
+    ),
+    (
+        re.compile(r"confirm (?:that )?you(?:'|’| a)?re not a bot|bot challenge|unusual traffic", re.I),
+        "err_bot_challenge",
+        ErrorSeverity.ERROR,
+        RATE_LIMITED_OR_FORBIDDEN,
+    ),
     # PO Token required — checked first: needs a ready PO Token Provider
     # stack, not cookies or a retry.
     (
@@ -307,18 +356,10 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         ErrorSeverity.ERROR,
         ACCOUNT_REQUIRED,
     ),
-    # Private / deleted video — not the same as "requires login": no
-    # amount of cookies fixes a deleted/private video, so this is
-    # deliberately left without a Doctor-linked code.
+    # Geo-blocked must precede the generic unavailable pattern: yt-dlp can say
+    # "This video is unavailable in your country", which is not a stale match.
     (
-        re.compile(r"private video|video unavailable|has been removed|no longer available", re.I),
-        "err_video_unavailable",
-        ErrorSeverity.WARNING,
-        None,
-    ),
-    # Geo-blocked
-    (
-        re.compile(r"not available in your country|geo.?block|geo.?restrict", re.I),
+        re.compile(r"(?:not available|unavailable) in your country|geo.?block|geo.?restrict", re.I),
         "err_geo_restricted",
         ErrorSeverity.ERROR,
         None,
@@ -336,6 +377,17 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         "err_403",
         ErrorSeverity.ERROR,
         RATE_LIMITED_OR_FORBIDDEN,
+    ),
+    # Private / deleted video — evaluated after actionable HTTP evidence. A
+    # multi-client yt-dlp attempt can emit 429/403 first and end with the
+    # generic phrase "video unavailable"; the concrete transport response
+    # must win so users do not retry or change authentication for the wrong
+    # reason.
+    (
+        re.compile(r"private video|video (?:is )?unavailable|has been removed|no longer available", re.I),
+        "err_video_unavailable",
+        ErrorSeverity.WARNING,
+        None,
     ),
     # Copyright / DMCA takedown
     (

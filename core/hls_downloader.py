@@ -112,8 +112,13 @@ def download_hls(
     ]
 
     # Cookies: ffmpeg uses a single "Cookie: k=v; ..." header value
+    cookie_header = ""
     if cookies_file and Path(cookies_file).exists():
-        cookie_header = _netscape_to_cookie_header(cookies_file)
+        from utils.cookie_store import read_cookie_store
+        try:
+            cookie_header = _netscape_text_to_cookie_header(read_cookie_store(cookies_file))
+        except OSError:
+            logger.debug("hls_downloader: protected cookie store could not be read")
         if cookie_header:
             cmd += ["-headers", f"Cookie: {cookie_header}\r\n"]
 
@@ -165,7 +170,7 @@ def download_hls(
     stderr_fh = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     try:
         proc = popen_hidden(
-            cmd, purpose="hls-remux",
+            cmd, purpose="hls-remux", log_command=False,
             stdout=subprocess.DEVNULL, stderr=stderr_fh,
         )
     except (OSError, ValueError):
@@ -229,32 +234,42 @@ def download_hls(
 def _netscape_to_cookie_header(path: str) -> str:
     """
     Parse a Netscape cookies.txt and return a single `Cookie: k=v; ...` value.
-    Lines starting with # are skipped.  Only unexpired cookies are included.
+    Comment lines are skipped, except Netscape's ``#HttpOnly_`` data rows.
+    Only well-formed, unexpired cookies are included.
     """
+    from utils.cookie_store import read_cookie_store
+    try:
+        return _netscape_text_to_cookie_header(read_cookie_store(path))
+    except OSError:
+        logger.debug("_netscape_to_cookie_header: cookie store could not be read")
+        return ""
+
+
+def _netscape_text_to_cookie_header(text: str) -> str:
+    """Convert Netscape text already held in private memory to one header."""
     now = time.time()
     parts: list[str] = []
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                fields = line.split("\t")
-                if len(fields) < 7:
-                    continue
-                _domain, _flag, _path, _secure, expires_str, name, value = (
-                    fields[0], fields[1], fields[2], fields[3],
-                    fields[4], fields[5], fields[6],
-                )
-                try:
-                    expires = float(expires_str)
-                    if expires > 0 and expires < now:
-                        continue   # expired
-                except (ValueError, TypeError):
-                    pass
-                parts.append(f"{name}={value}")
-    except Exception:
-        logger.debug("_netscape_to_cookie_header: cookie file could not be read")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 7:
+            continue
+        _domain, _flag, _path, _secure, expires_str, name, value = (
+            fields[0], fields[1], fields[2], fields[3],
+            fields[4], fields[5], fields[6],
+        )
+        try:
+            expires = float(expires_str)
+            if expires > 0 and expires < now:
+                continue
+        except (ValueError, TypeError):
+            continue
+        name = name.strip()
+        if not name or any(char in name for char in "\t\r\n;="):
+            continue
+        parts.append(f"{name}={value}")
     return "; ".join(parts)
 
 

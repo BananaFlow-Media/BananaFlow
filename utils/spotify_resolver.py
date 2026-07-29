@@ -38,7 +38,7 @@ Output format
 -------------
 Every resolver method returns ``list[dict]`` with these keys:
     title        str  – track title
-    artist       str  – primary artist name
+    artist       str  – ordered, deduplicated track artist credits
     url          str  – ``ytsearch1:<artist> <title> audio`` search string
     duration_sec int | None  – track duration in seconds
     thumbnail_url str  – album art URL (best available; empty string if none)
@@ -55,7 +55,10 @@ import time
 import urllib.parse
 import urllib.request
 import logging
+from html.parser import HTMLParser
 from typing import Callable, Optional
+
+from core.match_errors import SpotifyMetadataInvalid
 
 
 # ── Spotify API constants ──────────────────────────────────────────────────────
@@ -68,6 +71,148 @@ _REQUEST_UA   = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/136.0.0.0 Safari/537.36"
 )
+
+_SPOTIFY_UI_ARTIST_TEXT = re.compile(
+    r"\b(?:show\s+all|popular\s+(?:releases|albums|singles(?:\s+and\s+eps)?)|"
+    r"fans\s+also\s+like|recommended|based\s+on\s+this\s+song)\b",
+    re.I,
+)
+
+
+def normalise_spotify_artist_credits(values) -> list[str]:
+    """Return ordered, unique track credits or raise for polluted metadata.
+
+    Spotify artist credits are structured values.  Empty and punctuation-only
+    entries are harmless and ignored; page-navigation/recommendation labels or
+    an implausibly large credit list mean the source scope is polluted and must
+    never be handed to recording matching.
+    """
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple)):
+        raise SpotifyMetadataInvalid("Spotify artist credits are missing or malformed")
+
+    credits: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("name") or ""
+        if not isinstance(value, str):
+            raise SpotifyMetadataInvalid("Spotify artist credits are malformed")
+        text = " ".join(value.replace("\u00a0", " ").split()).strip(" ,;|•")
+        if not text or not any(ch.isalnum() for ch in text):
+            continue
+        if _SPOTIFY_UI_ARTIST_TEXT.search(text):
+            raise SpotifyMetadataInvalid("Spotify artist credits contain page UI text")
+        key = text.casefold()
+        if key not in seen:
+            seen.add(key)
+            credits.append(text)
+
+    if not credits:
+        raise SpotifyMetadataInvalid("Spotify artist credits are missing")
+    if len(credits) > 12:
+        raise SpotifyMetadataInvalid("Spotify artist credits are clearly polluted")
+    return credits
+
+
+def validate_spotify_track_metadata(title: str, artists) -> tuple[str, list[str]]:
+    """Validate one track-specific title and its ordered artist credits."""
+    clean_title = " ".join(str(title or "").replace("\u00a0", " ").split()).strip()
+    if not clean_title or not any(ch.isalnum() for ch in clean_title):
+        raise SpotifyMetadataInvalid("Spotify track title is missing or malformed")
+    if _SPOTIFY_UI_ARTIST_TEXT.search(clean_title):
+        raise SpotifyMetadataInvalid("Spotify track title contains page UI text")
+    return clean_title, normalise_spotify_artist_credits(artists)
+
+
+class _SpotifyNextDataParser(HTMLParser):
+    """Extract one exactly identified JSON script without regex-parsing HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.payload: Optional[str] = None
+        self._capturing = False
+        self._chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if self.payload is not None or self._capturing or tag.casefold() != "script":
+            return
+        attributes = {str(key).casefold(): value for key, value in attrs}
+        if attributes.get("id") == "__NEXT_DATA__":
+            self._capturing = True
+            self._chunks = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capturing:
+            self._chunks.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._capturing and tag.casefold() == "script":
+            self.payload = "".join(self._chunks)
+            self._capturing = False
+
+
+def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
+    """Parse a public Spotify embed response into exact track metadata."""
+    parser = _SpotifyNextDataParser()
+    parser.feed(html or "")
+    parser.close()
+    if parser.payload is None:
+        raise RuntimeError("Could not find structured Spotify embed data")
+    try:
+        data = json.loads(parser.payload)
+        entity = data["props"]["pageProps"]["state"]["data"]["entity"]
+    except Exception as exc:
+        raise RuntimeError(f"Could not parse structured Spotify embed data: {exc}") from exc
+
+    entity_id = str(entity.get("id") or "")
+    uri = str(entity.get("uri") or "")
+    if entity.get("type") != "track" or (
+        expected_track_id and entity_id != expected_track_id
+        and uri != f"spotify:track:{expected_track_id}"
+    ):
+        raise SpotifyMetadataInvalid("Spotify structured data is not the requested track")
+
+    title, artist_names = validate_spotify_track_metadata(
+        entity.get("name") or entity.get("title"), entity.get("artists") or []
+    )
+    raw_duration = entity.get("duration") or entity.get("duration_ms") or 0
+    if isinstance(raw_duration, dict):
+        raw_duration = raw_duration.get("totalMilliseconds") or 0
+    try:
+        duration_sec = int(raw_duration) // 1000 if raw_duration else 0
+    except (TypeError, ValueError):
+        duration_sec = 0
+
+    # The public embed entity owns a track-scoped image set.  Prefer its
+    # largest declared image instead of querying broad page DOM selectors,
+    # which may point at recommendation cards or unrelated Spotify UI.
+    # Artwork is optional: a missing/malformed image must never invalidate
+    # otherwise usable track metadata.
+    images = (entity.get("visualIdentity") or {}).get("image") or []
+    artwork_candidates: list[tuple[int, str]] = []
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        url = str(image.get("url") or "").strip()
+        if not url.startswith(("https://", "http://")):
+            continue
+        try:
+            area = int(image.get("maxWidth") or 0) * int(image.get("maxHeight") or 0)
+        except (TypeError, ValueError):
+            area = 0
+        artwork_candidates.append((area, url))
+    thumbnail_url = max(artwork_candidates, default=(0, ""))[1]
+    return {
+        "title": title,
+        "artist": ", ".join(artist_names),
+        "artist_credits": artist_names,
+        "duration_sec": duration_sec,
+        "spotify_id": entity_id or expected_track_id,
+        "spotify_url": f"https://open.spotify.com/track/{entity_id or expected_track_id}",
+        "thumbnail_url": thumbnail_url,
+    }
 
 
 # ── Global Logger ─────────────────────────────────────────────────────────────
@@ -338,12 +483,34 @@ class SpotifyResolver:
     # Embed API fallback (no credentials required)
     # ──────────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _localized_page_html(
+        entity_type: str, entity_id: str, locale: str = "en-US",
+    ) -> str:
+        """Fetch Spotify's locale-aware public page without credentials."""
+        language = (
+            "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
+            if str(locale).lower().startswith("he")
+            else "en-US,en;q=0.9"
+        )
+        url = f"https://open.spotify.com/{entity_type}/{entity_id}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _REQUEST_UA,
+            "Accept-Language": language,
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch Spotify page: {exc}") from exc
+
     @classmethod
     def _embed_fallback(
         cls,
         entity_type: str,
         entity_id:   str,
         on_item:     Optional[Callable[[dict], None]] = None,
+        locale:      str = "en-US",
     ) -> list[dict]:
         """
         Fetch the Spotify embed page and parse the ``__NEXT_DATA__`` payload.
@@ -351,7 +518,15 @@ class SpotifyResolver:
         Fragile – Spotify may change the embed payload structure at any time.
         """
         embed_url = f"{_EMBED_BASE}/{entity_type}/{entity_id}"
-        req = urllib.request.Request(embed_url, headers={"User-Agent": _REQUEST_UA})
+        language = (
+            "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
+            if str(locale).lower().startswith("he")
+            else "en-US,en;q=0.9"
+        )
+        req = urllib.request.Request(embed_url, headers={
+            "User-Agent": _REQUEST_UA,
+            "Accept-Language": language,
+        })
 
         try:
             with urllib.request.urlopen(req, timeout=12) as resp:
@@ -387,10 +562,14 @@ class SpotifyResolver:
             return int(track_obj.get("duration_ms", 0))
 
         if entity_type == "track":
-            title  = entity.get("name") or "Unknown Title"
-            artist = entity.get("subtitle") or "Unknown Artist"
-            ms     = _ms(entity)
-            d = cls._make_dict(title, artist, ms, "", f"https://open.spotify.com/track/{entity_id}")
+            metadata = parse_spotify_embed_track_html(html, entity_id)
+            d = cls._make_dict(
+                metadata["title"], metadata["artist"],
+                metadata["duration_sec"] * 1000, metadata["thumbnail_url"],
+                metadata["spotify_url"],
+            )
+            d["spotify_id"] = metadata["spotify_id"]
+            d["artist_credits"] = metadata["artist_credits"]
             items.append(d)
             if on_item:
                 on_item(d)
@@ -785,10 +964,11 @@ class SpotifyResolver:
 
     @staticmethod
     def _primary_artist(artists: list) -> str:
-        """Return the name of the first artist in the list, or empty string."""
-        if artists and isinstance(artists[0], dict):
-            return artists[0].get("name", "")
-        return ""
+        """Return ordered, deduplicated track credits as one display string."""
+        try:
+            return ", ".join(normalise_spotify_artist_credits(artists))
+        except SpotifyMetadataInvalid:
+            return ""
 
     @staticmethod
     def _best_image(images: list) -> str:

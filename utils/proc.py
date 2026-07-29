@@ -180,6 +180,7 @@ def run_hidden(
     cwd: Optional[str | Path] = None,
     capture_output: bool = True,
     new_process_group: bool = False,
+    log_command: bool = True,
 ) -> ProcessResult:
     """Run ``argv`` to completion with no console window, and log it.
 
@@ -198,10 +199,13 @@ def run_hidden(
 
     # The record's own asctime is the start time — utils.logging_config
     # stamps every line — so this deliberately does not format its own.
-    logger.debug(
-        "[proc] start purpose=%s program=%s cmd=%s",
-        purpose, program, _describe(argv),
-    )
+    if log_command:
+        logger.debug(
+            "[proc] start purpose=%s program=%s cmd=%s",
+            purpose, program, _describe(argv),
+        )
+    else:
+        logger.debug("[proc] start purpose=%s program=%s", purpose, program)
 
     kwargs: dict[str, Any] = dict(no_window_kwargs(new_process_group=new_process_group))
     if capture_output:
@@ -263,7 +267,7 @@ def run_hidden(
             "[proc] FAILED purpose=%s program=%s rc=%d duration=%dms "
             "cmd=%s stderr=%r stdout=%r",
             purpose, program, completed.returncode, duration_ms,
-            _describe(argv), _tail(stderr), _tail(stdout),
+            _describe(argv) if log_command else "[redacted]", _tail(stderr), _tail(stdout),
         )
 
     result = ProcessResult(
@@ -286,6 +290,7 @@ def popen_hidden(
     *,
     purpose: str,
     new_process_group: bool = True,
+    log_command: bool = True,
     **kwargs: Any,
 ) -> subprocess.Popen:
     """Start a long-running child with no console window, and log the start.
@@ -298,10 +303,13 @@ def popen_hidden(
     logged first so the failure is never silent.
     """
     program = _program_name(argv)
-    logger.debug(
-        "[proc] spawn purpose=%s program=%s cmd=%s",
-        purpose, program, _describe(argv),
-    )
+    if log_command:
+        logger.debug(
+            "[proc] spawn purpose=%s program=%s cmd=%s",
+            purpose, program, _describe(argv),
+        )
+    else:
+        logger.debug("[proc] spawn purpose=%s program=%s", purpose, program)
     merged: dict[str, Any] = dict(no_window_kwargs(new_process_group=new_process_group))
     merged.update(kwargs)
     try:

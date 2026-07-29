@@ -93,6 +93,7 @@ _DEFAULTS: dict[str, Any] = {
     # ── Cookies ───────────────────────────────────────────────────────────────
     "cookies_file":         "",
     "cookies_browser":      "",
+    "cookies_browser_migration_notice_pending": False,
 
     # ── Appearance ────────────────────────────────────────────────────────────
     "theme":                "light",
@@ -216,7 +217,25 @@ class AppConfig:
     def __init__(self) -> None:
         self._path: Path           = _config_path()
         self._data: dict[str, Any] = dict(_DEFAULTS)
+        try:
+            from utils.cookie_store import sweep_stale_cookie_temps
+            sweep_stale_cookie_temps()
+        except OSError:
+            pass
         self._load()
+        # Cookie migration is independent of config schema migration: an old
+        # wizard export can exist even if config.json was deleted or never
+        # persisted. Verify the protected replacement before updating the
+        # configured path or removing plaintext.
+        try:
+            from utils.cookie_store import migrate_legacy_app_cookie_store
+            old_path = str(self._data.get("cookies_file", ""))
+            protected_path = migrate_legacy_app_cookie_store(old_path)
+            if protected_path != old_path:
+                self._data["cookies_file"] = protected_path
+                self.save()
+        except OSError:
+            pass
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -512,6 +531,14 @@ class AppConfig:
     @cookies_browser.setter
     def cookies_browser(self, value: str) -> None:
         self._data["cookies_browser"] = value.lower().strip()
+
+    @property
+    def cookies_browser_migration_notice_pending(self) -> bool:
+        return bool(self._data.get("cookies_browser_migration_notice_pending", False))
+
+    @cookies_browser_migration_notice_pending.setter
+    def cookies_browser_migration_notice_pending(self, value: bool) -> None:
+        self._data["cookies_browser_migration_notice_pending"] = bool(value)
 
     @property
     def spotify_client_id(self) -> str:

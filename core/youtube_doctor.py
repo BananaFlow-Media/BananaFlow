@@ -134,6 +134,11 @@ DOCTOR_TEXTS_EN: dict[str, str] = {
         "Presence/login state can't be verified offline; yt-dlp will "
         "report an error at download time if extraction fails."
     ),
+    "doctor_cookies_browser_windows_unsupported": (
+        "Live '{browser}' profile extraction is not supported safely on Windows. "
+        "Use BananaFlow's isolated sign-in browser or import cookies.txt; the "
+        "app will not bypass profile locks or App-Bound Encryption."
+    ),
     "doctor_cookies_none": (
         "No cookies configured. Public videos will still work; "
         "age-restricted, private, or members-only videos will fail "
@@ -566,7 +571,8 @@ def _inspect_cookies_file(path: Path) -> CookieDiagnostics:
     diag.file_exists = True
 
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        from utils.cookie_store import read_cookie_store
+        text = read_cookie_store(path)
     except OSError:
         return diag  # exists but unreadable
     diag.file_readable = True
@@ -574,7 +580,7 @@ def _inspect_cookies_file(path: Path) -> CookieDiagnostics:
     cookie_line_count = 0
     for line in text.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
             continue
         parts = line.split("\t")
         if len(parts) < 7:
@@ -583,7 +589,7 @@ def _inspect_cookies_file(path: Path) -> CookieDiagnostics:
 
         # Only ever read the domain (parts[0]) and name (parts[5]).
         # parts[6] is the cookie value — intentionally never touched.
-        domain = parts[0].lower().lstrip(".")
+        domain = parts[0].removeprefix("#HttpOnly_").lower().lstrip(".")
         name   = parts[5]
 
         # Exact/subdomain match, not a substring test: "youtube.com" in
@@ -603,6 +609,13 @@ def check_cookies(
 ) -> tuple[DoctorCheck, CookieDiagnostics]:
     if cookies_browser:
         diag = CookieDiagnostics(mode="browser", browser=cookies_browser)
+        from core.browser_session import browser_cookie_mode_supported
+        if not browser_cookie_mode_supported(cookies_browser):
+            return _mk_check(
+                "cookies", DoctorStatus.WARN,
+                "doctor_cookies_browser_windows_unsupported",
+                {"browser": cookies_browser},
+            ), diag
         return _mk_check(
             "cookies", DoctorStatus.PASS,
             "doctor_cookies_browser", {"browser": cookies_browser},
