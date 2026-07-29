@@ -47,7 +47,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QDialog,
     QComboBox,
     QFileDialog,
@@ -359,7 +358,6 @@ class MetadataEditorPanel(
         self._is_scanning = False
         self._is_applying = False
         self._is_restoring = False
-        self._include_subdirs = True
         self._op_rows: list[OpRow] = []
         self._checked_scope_buttons: list[QPushButton] = []
         self._selection_scope_buttons: list[QPushButton] = []
@@ -721,18 +719,6 @@ class MetadataEditorPanel(
             self._path_chip.setStyleSheet(
                 f"QLabel {{ background: {c.surface3}; color: {c.text_secondary};"
                 " border: none; border-radius: 9px; padding: 0 10px; font-size: 12px; }}")
-        if hasattr(self, "_subdirs_check"):
-            self._subdirs_check.setStyleSheet(
-                f"QCheckBox {{ color: {c.text_secondary}; spacing: 7px; font-weight: 600; }}"
-                f"QCheckBox::indicator {{ width: 16px; height: 16px; background: {c.surface};"
-                f" border: 1px solid {c.border}; border-radius: 5px; }}"
-                f"QCheckBox::indicator:checked {{ background: {c.accent}; border-color: {c.accent}; }}")
-        if hasattr(self, "_monitor_badge"):
-            self._monitor_badge.setStyleSheet(
-                f"QFrame#tagEditorMonitorBadge {{ background: {c.accent_soft}; border: none;"
-                " border-radius: 8px; }}"
-                f"QLabel {{ background: transparent; color: {c.accent_dark}; border: none;"
-                " padding: 0; font-size: 11px; font-weight: 800; }}")
         if hasattr(self, "_search_edit"):
             self._search_edit.setStyleSheet(
                 f"QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
@@ -1099,32 +1085,6 @@ class MetadataEditorPanel(
         self._path_chip.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         a11y.describe(self._path_chip, t("meta_shell_active_folder"))
         layout.addWidget(self._path_chip)
-
-        self._subdirs_check = QCheckBox(t("meta_include_subdirs"))
-        self._subdirs_check.setObjectName("tagEditorSubdirs")
-        self._subdirs_check.setChecked(True)
-        self._subdirs_check.setCursor(Qt.CursorShape.PointingHandCursor)
-        a11y.describe(self._subdirs_check, t("meta_include_subdirs"),
-                      description=t("meta_include_subdirs_tooltip"))
-        self._subdirs_check.toggled.connect(self._on_include_subdirs_toggled)
-        layout.addWidget(self._subdirs_check)
-
-        self._monitor_badge = QFrame()
-        self._monitor_badge.setObjectName("tagEditorMonitorBadge")
-        self._monitor_badge.setFixedHeight(26)
-        monitor_layout = QHBoxLayout(self._monitor_badge)
-        monitor_layout.setContentsMargins(9, 0, 9, 0)
-        monitor_layout.setSpacing(6)
-        self._monitor_dot = QLabel("●")
-        self._monitor_dot.setObjectName("tagEditorMonitorDot")
-        monitor_layout.addWidget(self._monitor_dot)
-        self._monitoring_status = QLabel(t("meta_monitoring_disabled"))
-        self._monitoring_status.setObjectName("tagEditorMonitorBadge")
-        self._monitoring_status.setFixedHeight(26)
-        self._monitoring_status.setAccessibleName(t("meta_monitoring_status"))
-        self._monitoring_status.setToolTip(t("meta_monitoring_status_tooltip"))
-        monitor_layout.addWidget(self._monitoring_status)
-        layout.addWidget(self._monitor_badge)
 
         # Two different refreshes behind one control: the click is the cheap
         # incremental reconcile people press often; the full rescan re-reads
@@ -2664,10 +2624,6 @@ class MetadataEditorPanel(
 
     # ── Toolbar handlers ──────────────────────────────────────────────────────
 
-    def _on_include_subdirs_toggled(self, enabled: bool) -> None:
-        """Use the prototype's explicit recursive-scan choice on the next scan."""
-        self._include_subdirs = bool(enabled)
-
     def _on_tree_header_add_folder(self) -> None:
         parent = self._navigation.current or self._root_folder
         if parent is not None:
@@ -2692,12 +2648,12 @@ class MetadataEditorPanel(
             self, t("meta_choose_music_folder"), str(start_folder)
         )
         if path:
-            self.scan_requested.emit(Path(path), self._include_subdirs)
+            self.scan_requested.emit(Path(path), True)
 
     def _on_scan(self) -> None:
         if not self._root_folder:
             return
-        self.scan_requested.emit(self._root_folder, self._include_subdirs)
+        self.scan_requested.emit(self._root_folder, True)
 
     def on_workspace_replacement_started(self, folder: Path) -> None:
         """Update the visible root only after the controller accepts replacement."""
@@ -3668,11 +3624,8 @@ class MetadataEditorPanel(
             self._populate_track_inspector(tracks)
 
     def on_monitoring_state_changed(self, state, diagnostic: str = "") -> None:
+        """Keep refresh availability in sync without exposing monitor internals."""
         value = getattr(state, "value", str(state))
-        self._monitoring_status.setText(t(f"meta_monitoring_{value}"))
-        self._monitoring_status.setToolTip(
-            t("meta_monitoring_diagnostic", detail=diagnostic)
-            if diagnostic else t("meta_monitoring_status_tooltip"))
         self._manual_refresh_btn.setEnabled(
             self._root_folder is not None and value != "disabled")
 
@@ -4847,7 +4800,7 @@ class MetadataEditorPanel(
         compact = width <= 1180
         narrow = width <= 1040
         mode = "narrow" if narrow else "compact" if compact else "wide"
-        for widget in (self._path_chip, self._monitor_badge, self._subdirs_check):
+        for widget in (self._path_chip,):
             widget.setVisible(not compact)
         self._search_edit.setFixedWidth(150 if narrow else 180 if compact else 230)
         if hasattr(self, "_footer_desc"):

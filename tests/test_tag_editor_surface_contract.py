@@ -159,7 +159,7 @@ CONTRACT_ATTRIBUTES = (
     # toolbar / primary actions
     "_apply_btn", "_revert_btn", "_review_btn", "_undo_btn", "_redo_btn",
     "_browse_btn", "_auto_btn", "_auto_container", "_io_btn", "_restore_btn",
-    "_backup_manager_btn", "_manual_refresh_btn", "_monitoring_status",
+    "_backup_manager_btn", "_manual_refresh_btn",
     "_scan_progress", "_summary_lbl",
     # table chrome
     "_table", "_model", "_proxy", "_workspace", "_navigation",

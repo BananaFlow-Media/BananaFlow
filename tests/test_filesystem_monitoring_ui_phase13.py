@@ -37,14 +37,13 @@ def track(path, external_state="current", external_conflict=None):
         external_state=external_state, external_conflict=external_conflict)
 
 
-def test_panel_exposes_status_manual_refresh_and_stale_filter_accessibly():
+def test_panel_hides_monitor_status_but_keeps_refresh_and_stale_filter_accessible():
     app(); set_language("en"); panel = MetadataEditorPanel()
-    assert panel._monitoring_status.accessibleName() == t("meta_monitoring_status")
+    assert not hasattr(panel, "_monitoring_status")
     assert panel._manual_refresh_btn.accessibleName() == t("meta_manual_refresh")
     assert panel._stale_chip.isCheckable()
     panel._root_folder = Path("C:/music")
     panel.on_monitoring_state_changed(MonitoringState.DEGRADED, "watch_limit")
-    assert panel._monitoring_status.text() == t("meta_monitoring_degraded")
     assert panel._manual_refresh_btn.isEnabled()
     value = track(Path("C:/music/song.mp3"), "conflict", conflict())
     panel._model.load_tracks([value])

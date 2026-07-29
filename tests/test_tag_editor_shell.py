@@ -133,8 +133,8 @@ def test_rescan_is_disabled_until_a_folder_is_loaded(panel, tmp_path):
     assert panel._rescan_action.isEnabled()
 
 
-def test_subfolder_toggle_controls_browse_and_rescan(panel, tmp_path, monkeypatch):
-    """The permanent toolbar checkbox has the prototype's real scan effect."""
+def test_browse_and_rescan_always_include_subfolders(panel, tmp_path, monkeypatch):
+    """All scans are recursive; the toolbar no longer exposes a scope toggle."""
     from PySide6.QtWidgets import QFileDialog
 
     scans = []
@@ -145,11 +145,10 @@ def test_subfolder_toggle_controls_browse_and_rescan(panel, tmp_path, monkeypatc
     panel._on_browse()
 
     _load(panel, tmp_path)
-    panel._subdirs_check.setChecked(False)
     panel._on_scan()
 
-    assert scans == [True, False]
-    assert panel._include_subdirs is False
+    assert scans == [True, True]
+    assert not hasattr(panel, "_subdirs_check")
 
 
 def test_path_chip_stays_ltr_and_shows_the_full_path_on_hover(panel, tmp_path):
