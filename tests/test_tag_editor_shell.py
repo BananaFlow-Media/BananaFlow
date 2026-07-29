@@ -263,14 +263,12 @@ def test_status_column_prefers_disk_state_over_pending_edits(panel, tmp_path):
     assert label == t("meta_external_state_changed_on_disk")
 
 
-def test_status_column_is_user_hideable(panel):
-    """Per the review it is a real column, not a fixed decoration."""
+def test_status_column_is_fixed_visible(panel):
+    """Status is the fixed trailing column and cannot become empty space."""
     from ui.models.metadata_table_model import COL_STATUS, _HEADER_KEYS
 
     assert _HEADER_KEYS[COL_STATUS] == "mt_col_status"
     panel._set_column_hidden(COL_STATUS, True)
-    assert panel._table.isColumnHidden(COL_STATUS)
-    panel._set_column_hidden(COL_STATUS, False)
     assert not panel._table.isColumnHidden(COL_STATUS)
 
 
@@ -299,6 +297,8 @@ def test_saved_column_order_is_widened_not_discarded(panel):
     assert len(migrated) == COLUMN_COUNT
     assert migrated[:15] == saved_fifteen      # their order, untouched
     assert migrated[15] == 15                  # the column they have not seen
+    assert migrated[16] == 16                  # the new dedicated empty gutter
+    assert migrated[17] == 17                  # the opposite-edge empty gutter
 
 
 def test_current_column_order_passes_through_unchanged(panel):

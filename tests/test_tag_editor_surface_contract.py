@@ -402,12 +402,12 @@ def test_default_auto_ops_are_a_subset_of_all_ops():
 # --------------------------------------------------------------------------- #
 
 def test_user_selectable_columns_are_offered_in_the_picker(panel):
-    """Every column except the internal gutter must be user-toggleable."""
-    from ui.models.metadata_table_model import COLUMN_COUNT, COL_CHECK, _HEADER_KEYS
+    """Every named data column is offered; fixed utility columns are not."""
+    from ui.models.metadata_table_model import COLUMN_COUNT, COL_CHECK, COL_END_GUTTER, COL_GUTTER, _HEADER_KEYS
 
     offered = {
         col for col in range(COLUMN_COUNT)
-        if col != COL_CHECK and _HEADER_KEYS[col]
+        if col not in (COL_CHECK, COL_GUTTER, COL_END_GUTTER) and _HEADER_KEYS[col]
     }
     # 14 data columns today; the redesign adds a status column (15).
     assert len(offered) >= 14
@@ -419,21 +419,54 @@ def test_filename_column_can_never_be_hidden(panel):
     assert not panel._table.isColumnHidden(COL_FILENAME)
 
 
-def test_check_gutter_column_is_inert(panel, tmp_path):
-    """COL_CHECK is a 28px visual gutter, not a selection mechanism.
-
-    Guarding this explicitly because it *looks* like a checkbox column: if a
-    future change makes it writable, row selection would silently stop being
-    the single source of edit scope.
-    """
+def test_checkbox_and_empty_gutter_are_distinct_fixed_columns(panel, tmp_path):
+    """The narrow checkbox column sits directly beside the smaller gutter."""
     from PySide6.QtCore import Qt
-    from ui.models.metadata_table_model import COL_CHECK
+    from ui.models.metadata_table_model import COL_CHECK, COL_END_GUTTER, COL_FILENAME, COL_GUTTER, COL_STATUS
 
     _loaded_panel(panel, tmp_path)
     index = panel._model.index(0, COL_CHECK)
+    assert not panel._table.isColumnHidden(COL_CHECK)
+    header = panel._table.horizontalHeader()
+    assert header.visualIndex(COL_GUTTER) == 0
+    assert header.visualIndex(COL_CHECK) == 1
+    assert header.visualIndex(COL_STATUS) == panel._model.columnCount() - 2
+    assert header.visualIndex(COL_END_GUTTER) == panel._model.columnCount() - 1
+    assert panel._table.columnWidth(COL_GUTTER) == panel._table._SIDE_EMPTY_GUTTER
+    assert panel._table.columnWidth(COL_CHECK) == panel._table._CHECK_COLUMN_WIDTH
+    assert panel._table.columnWidth(COL_END_GUTTER) == panel._table._END_EMPTY_GUTTER
+    assert panel._table._SIDE_EMPTY_GUTTER == 17
+    assert panel._table._CHECK_COLUMN_WIDTH == 24
+    assert panel._table._END_EMPTY_GUTTER == 9
+    assert panel._table.itemDelegateForColumn(COL_FILENAME)._show_checkbox is False
     assert panel._model.data(index, Qt.CheckStateRole) == Qt.Unchecked
     assert panel._model.setData(index, Qt.Checked, Qt.CheckStateRole) is False
-    assert panel._model.data(index, Qt.CheckStateRole) == Qt.Unchecked
+    panel._table.selectRow(0)
+    assert panel._table.selectionModel().isRowSelected(0, panel._table.rootIndex())
+
+
+def test_filename_column_can_be_reordered_between_fixed_edges(panel):
+    from ui.models.metadata_table_model import COL_CHECK, COL_END_GUTTER, COL_FILENAME, COL_GUTTER, COL_STATUS, COLUMN_COUNT
+
+    header = panel._table.horizontalHeader()
+    original = header.visualIndex(COL_FILENAME)
+    header.moveSection(original, 4)
+
+    assert header.visualIndex(COL_FILENAME) != original
+    assert header.visualIndex(COL_GUTTER) == 0
+    assert header.visualIndex(COL_CHECK) == 1
+    assert header.visualIndex(COL_STATUS) == COLUMN_COUNT - 2
+    assert header.visualIndex(COL_END_GUTTER) == COLUMN_COUNT - 1
+
+
+def test_status_column_does_not_expand_into_the_leftover_space(panel):
+    from ui.models.metadata_table_model import COL_STATUS
+
+    status_width = panel._table.columnWidth(COL_STATUS)
+    panel._table.resize(panel._table.width() + 500, panel._table.height())
+    panel._fill_leftover_space()
+
+    assert panel._table.columnWidth(COL_STATUS) == status_width
 
 
 # --------------------------------------------------------------------------- #

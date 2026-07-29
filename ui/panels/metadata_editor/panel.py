@@ -108,7 +108,7 @@ from ui.models.metadata_table_model import (
     COL_TRACK_NEW,
     COL_FILENAME_NEW, COL_GENRE_CUR, COL_GENRE_NEW,
     COL_COMMENT_CUR, COL_COMMENT_NEW,
-    COLUMN_COUNT, MetadataTableModel, _HEADER_KEYS,
+    COL_STATUS, COL_GUTTER, COL_END_GUTTER, COLUMN_COUNT, MetadataTableModel, _HEADER_KEYS,
 )
 from ui.models.metadata_filter_proxy_model import MetadataFilterProxyModel
 from ui.controllers.tag_editor_workspace_state import TagEditorWorkspaceState
@@ -134,6 +134,7 @@ from .explorer_view import (
     ExplorerTableStyle,
     FilenameDelegate,
     MetadataHeaderView,
+    SelectionCheckDelegate,
 )
 from .shared import (
     DEFAULT_AUTO_OPS,
@@ -1874,7 +1875,11 @@ class MetadataEditorPanel(
         self._table.setItemDelegate(
             ExplorerFileListDelegate(self._table)
         )
-        # Filename columns get their own delegate: LTR, ElideMiddle, icon, checkbox.
+        self._table.setItemDelegateForColumn(
+            COL_CHECK,
+            SelectionCheckDelegate(self._table),
+        )
+        # Filename and media icon stay together; selection is a separate column.
         self._table.setItemDelegateForColumn(
             COL_FILENAME,
             FilenameDelegate(self._table, icon_provider=self._track_icon, show_checkbox=False),
@@ -1887,6 +1892,9 @@ class MetadataEditorPanel(
         hdr = MetadataHeaderView(self._table)
         hdr.setAccessibleName(t("meta_a11y_table_header"))
         self._table.setHorizontalHeader(hdr)
+        # Qt's platform default minimum is 17 px; lower it only enough for the
+        # deliberately tiny opposite-edge clear strip (9 px).
+        hdr.setMinimumSectionSize(ExplorerDetailsView._END_EMPTY_GUTTER)
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
         hdr.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1900,9 +1908,7 @@ class MetadataEditorPanel(
         if self._cfg:
             saved_visibility = self._cfg.tag_editor_column_visibility
         for col in range(COLUMN_COUNT):
-            if col == COL_CHECK:
-                self._table.setColumnHidden(col, True)
-            elif col == COL_FILENAME:
+            if col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK, COL_FILENAME, COL_STATUS):
                 self._table.setColumnHidden(col, False)
             elif saved_visibility is not None:
                 self._table.setColumnHidden(col, col in saved_visibility)
@@ -1912,6 +1918,8 @@ class MetadataEditorPanel(
         # Allow drag reordering. Restore order from config or apply default.
         hdr.setSectionsMovable(True)
         hdr.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_GUTTER, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_END_GUTTER, QHeaderView.Fixed)
 
         saved_order = None
         if self._cfg:
@@ -1926,9 +1934,15 @@ class MetadataEditorPanel(
                     if current_visual != visual_idx:
                         hdr.moveSection(current_visual, visual_idx)
             else:
-                # Move new filename right next to original filename
+                # Keep the proposed name next to the current filename.
                 hdr.moveSection(hdr.visualIndex(COL_FILENAME_NEW), hdr.visualIndex(COL_FILENAME) + 1)
-                hdr.moveSection(hdr.visualIndex(COL_CHECK), COLUMN_COUNT - 1)
+
+            # Blank gutter and checkbox are distinct fixed leading columns.
+            # Filename and every other content column remain movable.
+            hdr.moveSection(hdr.visualIndex(COL_GUTTER), 0)
+            hdr.moveSection(hdr.visualIndex(COL_CHECK), 1)
+            hdr.moveSection(hdr.visualIndex(COL_STATUS), COLUMN_COUNT - 2)
+            hdr.moveSection(hdr.visualIndex(COL_END_GUTTER), COLUMN_COUNT - 1)
         finally:
             hdr.blockSignals(False)
 
@@ -1947,7 +1961,7 @@ class MetadataEditorPanel(
             saved_sort_order_val = self._cfg.tag_editor_sort_order
             saved_sort_order = Qt.SortOrder(saved_sort_order_val)
 
-        if saved_sort_col == COL_CHECK:
+        if saved_sort_col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK):
             saved_sort_col = -1
             if self._cfg:
                 self._cfg.tag_editor_sort_column = -1
@@ -4907,8 +4921,12 @@ class MetadataEditorPanel(
         try:
             for col in range(COLUMN_COUNT):
                 base_w = saved_widths.get(col, DEFAULT_COL_WIDTHS.get(col, 100))
-                if col == COL_CHECK:
+                if col == COL_GUTTER:
                     self._table.setColumnWidth(col, ExplorerDetailsView._SIDE_EMPTY_GUTTER)
+                elif col == COL_END_GUTTER:
+                    self._table.setColumnWidth(col, ExplorerDetailsView._END_EMPTY_GUTTER)
+                elif col == COL_CHECK:
+                    self._table.setColumnWidth(col, ExplorerDetailsView._CHECK_COLUMN_WIDTH)
                 else:
                     self._table.setColumnWidth(col, max(10, int(base_w * factor)))
         finally:

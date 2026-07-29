@@ -45,7 +45,10 @@ from ui.i18n import t
 from ui.models.metadata_table_model import (
     COLUMN_COUNT,
     COL_CHECK,
+    COL_END_GUTTER,
+    COL_GUTTER,
     COL_FILENAME,
+    COL_STATUS,
     _HEADER_KEYS,
 )
 
@@ -91,9 +94,9 @@ class MoreColumnsDialog(StyledDialog):
         self._list_layout.setContentsMargins(0, 8, 0, 0)
 
         # Always-visible columns that can't be hidden
-        ALWAYS_VISIBLE = {COL_FILENAME}
+        ALWAYS_VISIBLE = {COL_FILENAME, COL_STATUS}
         # Columns never offered in any menu
-        NO_MENU = {COL_CHECK}
+        NO_MENU = {COL_CHECK, COL_GUTTER, COL_END_GUTTER}
 
         self._rows: list[tuple[int, str, QCheckBox]] = []
         for col in range(COLUMN_COUNT):

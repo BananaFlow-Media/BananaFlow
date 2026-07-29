@@ -46,7 +46,12 @@ COL_COMMENT_NEW  = 14
 # only ever reached the user as a row tint and a tooltip, which cannot be
 # sorted, filtered or read by a screen reader.
 COL_STATUS       = 15
-COLUMN_COUNT     = 16
+# Fixed, intentionally blank click-to-clear strip.  Kept separate from the
+# selection checkbox column so neither can stretch or borrow Filename space.
+COL_GUTTER       = 16
+# Matching click-to-clear strip at the opposite edge, intentionally narrower.
+COL_END_GUTTER   = 17
+COLUMN_COUNT     = 18
 EXTERNAL_STATE_ROLE = int(Qt.UserRole) + 13
 
 
@@ -71,6 +76,8 @@ _HEADER_KEYS: list[str] = [
     "mt_col_genre",        "mt_col_genre_new",
     "mt_col_comment",      "mt_col_comment_new",
     "mt_col_status",
+    "",
+    "",
 ]
 
 

@@ -57,7 +57,7 @@ from ui.models.metadata_table_model import (
     COL_TRACK_NEW,
     COL_FILENAME_NEW, COL_GENRE_CUR, COL_GENRE_NEW,
     COL_COMMENT_CUR, COL_COMMENT_NEW,
-    COLUMN_COUNT, MetadataTableModel, _HEADER_KEYS,
+    COL_STATUS, COL_GUTTER, COL_END_GUTTER, COLUMN_COUNT, MetadataTableModel, _HEADER_KEYS,
 )
 from .dialogs import AutoArrangeSettingsDialog, CleanSettingsDialog, MoreColumnsDialog
 
@@ -66,29 +66,23 @@ class TableLayoutMixin:
     """Table header geometry: column order, widths, the trailing filler"""
 
     def _on_section_moved(self, logical: int, old_visual: int, new_visual: int) -> None:
-        """Keep Name pinned first and the fixed empty gutter pinned last."""
+        """Keep gutter/check first and Status last; content columns move."""
         hdr = self._table.horizontalHeader()
 
-        target_gutter_visual = COLUMN_COUNT - 1
-        if hdr.visualIndex(COL_CHECK) != target_gutter_visual:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_CHECK), target_gutter_visual)
-            finally:
-                hdr.blockSignals(False)
-
-        if logical == COL_FILENAME and new_visual != 0:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_FILENAME), 0)
-            finally:
-                hdr.blockSignals(False)
-        elif new_visual == 0 and logical != COL_FILENAME:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_FILENAME), 0)
-            finally:
-                hdr.blockSignals(False)
+        hdr.blockSignals(True)
+        try:
+            if hdr.visualIndex(COL_GUTTER) != 0:
+                hdr.moveSection(hdr.visualIndex(COL_GUTTER), 0)
+            if hdr.visualIndex(COL_CHECK) != 1:
+                hdr.moveSection(hdr.visualIndex(COL_CHECK), 1)
+            target_status_visual = COLUMN_COUNT - 2
+            if hdr.visualIndex(COL_STATUS) != target_status_visual:
+                hdr.moveSection(hdr.visualIndex(COL_STATUS), target_status_visual)
+            target_end_gutter_visual = COLUMN_COUNT - 1
+            if hdr.visualIndex(COL_END_GUTTER) != target_end_gutter_visual:
+                hdr.moveSection(hdr.visualIndex(COL_END_GUTTER), target_end_gutter_visual)
+        finally:
+            hdr.blockSignals(False)
 
         self._save_column_order()
         self._fill_leftover_space()
@@ -97,8 +91,9 @@ class TableLayoutMixin:
         """Grow the visually-last real content column to absorb any leftover
         viewport width, so there's never blank space with no column in it.
 
-        COL_CHECK is pinned to the trailing edge as a deliberate thin gutter
-        (mirrors the empty-area margin on the leading edge). Deliberately a
+        COL_GUTTER and COL_CHECK are narrow, fixed leading columns.  The
+        smaller COL_END_GUTTER follows the trailing Status column.
+        The nearest movable content column absorbs any true leftover. Deliberately a
         *one-time* width top-up via `resizeSection` rather than Qt's
         `Stretch` resize mode — Stretch permanently locks that column so the
         user can no longer drag it narrower, which just traded "dead space"
@@ -133,7 +128,7 @@ class TableLayoutMixin:
         hdr = self._table.horizontalHeader()
         best_col, best_visual = None, -1
         for col in range(COLUMN_COUNT):
-            if col == COL_CHECK or self._table.isColumnHidden(col):
+            if col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK, COL_STATUS) or self._table.isColumnHidden(col):
                 continue
             visual = hdr.visualIndex(col)
             if visual > best_visual:
@@ -172,7 +167,7 @@ class TableLayoutMixin:
     def _on_section_resized(self, logical: int, old_size: int, new_size: int) -> None:
         if getattr(self, "_ignore_header_resize", False):
             return
-        if logical == COL_CHECK:
+        if logical in (COL_GUTTER, COL_END_GUTTER, COL_CHECK):
             return
 
         factor = self._zoom_level / 100.0
@@ -190,7 +185,7 @@ class TableLayoutMixin:
 
     def _on_sort_indicator_changed(self, column: int, order: Qt.SortOrder) -> None:
         hdr = self._table.horizontalHeader()
-        if column == COL_CHECK:
+        if column in (COL_GUTTER, COL_END_GUTTER, COL_CHECK):
             hdr.setSortIndicatorShown(False)
             if self._cfg:
                 self._cfg.tag_editor_sort_column = -1
@@ -214,6 +209,8 @@ class TableLayoutMixin:
             self._cfg.save()
 
     def _set_column_hidden(self, col: int, hide: bool) -> None:
+        if col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK, COL_FILENAME, COL_STATUS):
+            hide = False
         self._table.setColumnHidden(col, hide)
         self._save_column_visibility()
         self._fill_leftover_space()
@@ -231,7 +228,7 @@ class TableLayoutMixin:
             COL_TRACK_NEW,     # Track (new)
             COL_FILENAME_NEW,  # Filename (new)
         ]
-        ALWAYS_VISIBLE = {COL_FILENAME}
+        ALWAYS_VISIBLE = {COL_FILENAME, COL_STATUS}
 
         menu = QMenu(self)
         for col in COMMON_COLS:
@@ -268,7 +265,7 @@ class TableLayoutMixin:
 
     def _size_column_to_fit(self, col: int) -> None:
         """Resize one visible content column to fit its header/cells."""
-        if col == COL_CHECK or col < 0 or col >= COLUMN_COUNT:
+        if col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK) or col < 0 or col >= COLUMN_COUNT:
             return
         if self._table.isColumnHidden(col):
             return

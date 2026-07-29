@@ -3,7 +3,7 @@ ui/panels/metadata_editor/shared.py  –  Tag Editor shared constants & styling
 ==============================================================================
 Theme-aware QSS builders, the magic-operation catalogue, default column
 widths, inspector page indices, and the single Win11 check-mark painter
-used by both the header 'Select All' toggle and the per-row checkboxes.
+used by both the header 'Select All' toggle and the standalone row checkboxes.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from ui.models.metadata_table_model import (
     COL_ARTIST_CUR, COL_ARTIST_NEW, COL_ALBUM_CUR, COL_ALBUM_NEW,
     COL_TRACK_CUR, COL_TRACK_NEW,
     COL_FILENAME_NEW, COL_GENRE_CUR, COL_GENRE_NEW,
-    COL_COMMENT_CUR, COL_COMMENT_NEW, COL_STATUS,
+    COL_COMMENT_CUR, COL_COMMENT_NEW, COL_STATUS, COL_GUTTER, COL_END_GUTTER,
 )
 from ui.theme_manager import get_colors
 
@@ -129,7 +129,7 @@ DEFAULT_AUTO_OPS: frozenset[str] = frozenset({
 })
 
 DEFAULT_COL_WIDTHS: dict[int, int] = {
-    COL_CHECK:        28,  # ExplorerFileListView._SIDE_EMPTY_GUTTER
+    COL_CHECK:        24,  # Fixed checkbox column: 4 px padding on each side
     COL_FILENAME:     260,
     COL_TITLE_CUR:    130,
     COL_TITLE_NEW:    130,
@@ -145,6 +145,8 @@ DEFAULT_COL_WIDTHS: dict[int, int] = {
     COL_COMMENT_CUR:  150,
     COL_COMMENT_NEW:  150,
     COL_STATUS:       120,
+    COL_GUTTER:       17,  # 60% of the old 28 px empty gutter
+    COL_END_GUTTER:    9,  # About half of the leading empty gutter
 }
 
 
@@ -279,8 +281,8 @@ CB_SIZE = 16   # Win11 rounded check-mark box, px
 def paint_check_mark(painter: QPainter, cx: int, cy: int, checked: bool) -> None:
     """Draw the Win11-style rounded check mark centered at (cx, cy).
 
-    Single source of truth for the row checkboxes (FilenameDelegate) and the
-    header 'Select All' toggle (MetadataHeaderView) so they stay pixel-identical.
+    Single source of truth for the row checkboxes and the header 'Select All'
+    toggle so they stay pixel-identical.
     """
     colors = get_colors()
     r = CB_SIZE // 2
