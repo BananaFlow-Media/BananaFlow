@@ -9,6 +9,7 @@ import threading
 
 import pytest
 
+from core.downloader import SilentLogger
 from core.retry_policy import (
     RetryPolicy,
     is_retriable,
@@ -171,6 +172,33 @@ class TestRetryDownload:
         )
         assert result is None
         assert calls[0] == 2
+
+    @pytest.mark.parametrize("earlier_evidence", [
+        "WARNING: Unable to fetch GVS PO Token",
+        "WARNING: YouTube account cookies are no longer valid",
+        "ERROR: Sign in to confirm you're not a bot",
+    ])
+    def test_permanent_extractor_evidence_outranks_later_transfer_403(
+        self, earlier_evidence,
+    ):
+        """Use the same combined evidence shape produced by DownloadEngine."""
+        ytdlp_logger = SilentLogger()
+        ytdlp_logger.warning(earlier_evidence)
+        combined = (
+            f"{ytdlp_logger.failure_evidence} | "
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        )
+        calls = [0]
+
+        def fn():
+            calls[0] += 1
+            raise Exception(combined)
+
+        result = retry_download(
+            fn, RetryPolicy(max_retries=3, base_delay_s=0.01), job_key="combined",
+        )
+        assert result is not None
+        assert calls[0] == 1
 
     def test_bot_check_error_not_retried_by_loop(self):
         calls = [0]

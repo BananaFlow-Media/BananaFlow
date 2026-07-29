@@ -81,8 +81,9 @@ ffmpeg conversion, tagging, retry backoff and the cross-volume copy
 automatically — none of it needs to be modelled per-phase.
 
 Completion histories are also bounded independently by resolution source.
-The cohort that dominates the remaining work (live, direct, cache, prefetched,
-or unknown) prices the ETA once it has enough evidence. A mixed global history
+The cohort that dominates the remaining work (live, shared, direct, cache,
+prefetched, or unknown) prices the ETA once it has enough evidence. A mixed
+global history
 is used only as an explicitly labeled, wider-uncertainty warm-up fallback after
 that cohort has produced at least one observation; an opening cache burst can
 therefore never set the long-run rate for live misses.
@@ -158,7 +159,7 @@ _SPEED_HALF_LIFE_S = 3.0
 _ETA_SMOOTH_HALF_LIFE_S = 1.5
 
 _RESOLUTION_SOURCES = frozenset({
-    "live", "direct", "cache", "prefetched", "unknown",
+    "live", "shared", "direct", "cache", "prefetched", "unknown",
 })
 
 
@@ -227,7 +228,7 @@ class JobProgress:
     # non-overlappable wait on top of the network-transfer estimate.
     serialized:       bool            = False
     # How the final URL became available. This is pipeline provenance, not a
-    # quality judgement: direct/cache/prefetched/live all use the same matcher.
+    # quality judgement: direct/cache/prefetched/shared/live use the same matcher.
     resolve_source:    str             = "direct"
 
     @property
@@ -843,7 +844,8 @@ class BatchProgressAggregator:
         if not counts:
             return "none"
         priority = {
-            "live": 4, "direct": 3, "unknown": 2, "cache": 1, "prefetched": 0,
+            "live": 4, "shared": 4, "direct": 3, "unknown": 2,
+            "cache": 1, "prefetched": 0,
         }
         leader = max(counts, key=lambda item: (counts[item], priority.get(item, 0)))
         previous = self._last_eta_source

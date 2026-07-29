@@ -64,8 +64,9 @@ _PERMANENT_PATTERNS = [
     # refused outright and retrying changes nothing).
     re.compile(r"po[ _]?token", re.I),
     re.compile(r"cookies?.*(no longer valid|expired|invalid)", re.I),
-    re.compile(r"\b403\b|forbidden", re.I),
 ]
+
+_PERMANENT_HTTP_403_RE = re.compile(r"\b403\b|forbidden", re.I)
 
 _TEMPORARY_MEDIA_403_RE = re.compile(
     r"unable to download (?:video )?data[^\n]*\b403\b|"
@@ -85,11 +86,13 @@ def is_retriable(error_message: str) -> bool:
     that is worth retrying.
     """
     # Check permanent patterns first — they take priority
-    if is_temporary_media_403(error_message):
-        return True
     for pat in _PERMANENT_PATTERNS:
         if pat.search(error_message):
             return False
+    if is_temporary_media_403(error_message):
+        return True
+    if _PERMANENT_HTTP_403_RE.search(error_message):
+        return False
     # Check retriable patterns
     for pat in _RETRIABLE_PATTERNS:
         if pat.search(error_message):

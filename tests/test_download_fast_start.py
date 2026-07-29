@@ -141,6 +141,88 @@ class TestMatchPrefetcher:
         # Cancel landed: not every track was resolved.
         assert 0 < len(seen) < 8
 
+    def test_shutdown_joins_cancel_aware_provider_wait(self, monkeypatch):
+        from core.match_prefetcher import MatchPrefetcher
+
+        monkeypatch.setattr("core.runtime_components.warm_up_plugins", lambda: None)
+        entered = threading.Event()
+        exited = threading.Event()
+
+        def waiting_resolver(td, cookies_file=None, cancel_check=None):
+            entered.set()
+            while not cancel_check():
+                time.sleep(0.01)
+            exited.set()
+            return ""
+
+        monkeypatch.setattr("core.scraper.resolve_track_to_youtube", waiting_resolver)
+        pf = MatchPrefetcher(limit=1, max_workers=1)
+        pf.start([{"title": "provider wait", "artist": "A", "spotify_id": "wait"}])
+        assert entered.wait(timeout=1)
+        try:
+            assert pf.shutdown(timeout_s=1.0) is True
+            assert exited.is_set()
+            assert pf._thread is None or not pf._thread.is_alive()  # noqa: SLF001
+        finally:
+            pf.cancel()
+            if pf._thread is not None:  # noqa: SLF001
+                pf._thread.join(timeout=2)  # noqa: SLF001
+
+    def test_shutdown_timeout_is_bounded_and_remains_joinable(self, monkeypatch):
+        from core.match_prefetcher import MatchPrefetcher
+
+        monkeypatch.setattr("core.runtime_components.warm_up_plugins", lambda: None)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_provider(td, cookies_file=None, cancel_check=None):
+            entered.set()
+            release.wait(timeout=2)
+            return ""
+
+        monkeypatch.setattr("core.scraper.resolve_track_to_youtube", blocked_provider)
+        pf = MatchPrefetcher(limit=1, max_workers=1)
+        pf.start([{"title": "blocked", "artist": "A", "spotify_id": "blocked"}])
+        assert entered.wait(timeout=1)
+
+        try:
+            started = time.monotonic()
+            assert pf.shutdown(timeout_s=0.05) is False
+            assert time.monotonic() - started < 0.5
+            release.set()
+            assert pf.shutdown(timeout_s=1.0) is True
+        finally:
+            release.set()
+            pf.cancel()
+            if pf._thread is not None:  # noqa: SLF001
+                pf._thread.join(timeout=2)  # noqa: SLF001
+
+    def test_shutdown_retains_ownership_of_a_superseded_provider_call(self, monkeypatch):
+        from core.match_prefetcher import MatchPrefetcher
+
+        monkeypatch.setattr("core.runtime_components.warm_up_plugins", lambda: None)
+        first_entered = threading.Event()
+        first_release = threading.Event()
+
+        def resolver(td, cookies_file=None, cancel_check=None):
+            if td["spotify_id"] == "first":
+                first_entered.set()
+                first_release.wait(timeout=2)
+            return ""
+
+        monkeypatch.setattr("core.scraper.resolve_track_to_youtube", resolver)
+        pf = MatchPrefetcher(limit=1, max_workers=1)
+        pf.start([{"title": "first", "artist": "A", "spotify_id": "first"}])
+        assert first_entered.wait(timeout=1)
+        pf.start([{"title": "second", "artist": "A", "spotify_id": "second"}])
+        try:
+            assert pf.shutdown(timeout_s=0.05) is False
+            first_release.set()
+            assert pf.shutdown(timeout_s=1.0) is True
+        finally:
+            first_release.set()
+            pf.cancel()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Direct-only legacy stagger

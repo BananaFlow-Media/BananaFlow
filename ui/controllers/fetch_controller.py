@@ -184,6 +184,7 @@ class FetchController(QObject):
 
     def _on_fetch_finished(self, result, worker=None) -> None:
         if worker is not None and worker is not self._fetch_worker:
+            worker.deleteLater()
             return
         batch_failure = (
             self._batch_active
@@ -197,6 +198,8 @@ class FetchController(QObject):
         if not batch_failure:
             self.fetch_finished.emit(result)
         self._fetch_worker = None
+        if worker is not None:
+            worker.deleteLater()
         if self._batch_active:
             if self._batch_cancel_requested or getattr(result, "cancelled", False):
                 self._finish_batch(cancelled=True)
@@ -212,6 +215,7 @@ class FetchController(QObject):
 
     def _on_fetch_error(self, err: object, worker=None) -> None:
         if worker is not None and worker is not self._fetch_worker:
+            worker.deleteLater()
             return
         from error_handler import ErrorInfo
         if isinstance(err, ErrorInfo):
@@ -219,6 +223,8 @@ class FetchController(QObject):
         else:
             msg = str(err)
         self._fetch_worker = None
+        if worker is not None:
+            worker.deleteLater()
         if self._batch_active:
             logger.warning("[BatchImport] URL failed; continuing: %s", msg)
             self._batch_failed += 1

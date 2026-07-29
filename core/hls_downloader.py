@@ -234,7 +234,8 @@ def download_hls(
 def _netscape_to_cookie_header(path: str) -> str:
     """
     Parse a Netscape cookies.txt and return a single `Cookie: k=v; ...` value.
-    Lines starting with # are skipped.  Only unexpired cookies are included.
+    Comment lines are skipped, except Netscape's ``#HttpOnly_`` data rows.
+    Only well-formed, unexpired cookies are included.
     """
     from utils.cookie_store import read_cookie_store
     try:
@@ -250,7 +251,7 @@ def _netscape_text_to_cookie_header(text: str) -> str:
     parts: list[str] = []
     for line in text.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
             continue
         fields = line.split("\t")
         if len(fields) < 7:
@@ -264,7 +265,10 @@ def _netscape_text_to_cookie_header(text: str) -> str:
             if expires > 0 and expires < now:
                 continue
         except (ValueError, TypeError):
-            pass
+            continue
+        name = name.strip()
+        if not name or any(char in name for char in "\t\r\n;="):
+            continue
         parts.append(f"{name}={value}")
     return "; ".join(parts)
 

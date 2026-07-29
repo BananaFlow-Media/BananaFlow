@@ -197,9 +197,13 @@ def test_cold_match_is_single_flight_and_warm_lookup_is_local(monkeypatch):
         "title": "השם יעזור", "artist": "אודיה", "duration_sec": 190,
     }
     results = []
+    owner_track = dict(track)
+    waiter_track = dict(track)
     threads = [
-        threading.Thread(target=lambda: results.append(scraper.resolve_track_to_youtube(dict(track))))
-        for _ in range(2)
+        threading.Thread(
+            target=lambda td=td: results.append(scraper.resolve_track_to_youtube(td))
+        )
+        for td in (owner_track, waiter_track)
     ]
     threads[0].start()
     assert entered.wait(timeout=1)
@@ -214,6 +218,15 @@ def test_cold_match_is_single_flight_and_warm_lookup_is_local(monkeypatch):
         "https://www.youtube.com/watch?v=singleflight",
     ]
     assert len(calls) == 1, "the cold resolver work must be shared, not duplicated"
+    assert owner_track["_match_source"] == "live"
+    assert waiter_track["_match_source"] == "shared"
+
+    from core.batch_progress import BatchProgressAggregator
+
+    aggregator = BatchProgressAggregator()
+    aggregator.register("waiter")
+    aggregator.mark_resolution_source("waiter", waiter_track["_match_source"])
+    assert aggregator._jobs["waiter"].resolve_source == "shared"  # noqa: SLF001
 
     started = time.monotonic()
     assert scraper.resolve_track_to_youtube(dict(track)).endswith("singleflight")

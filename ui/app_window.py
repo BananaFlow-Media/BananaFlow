@@ -1871,6 +1871,24 @@ class AppWindow(FluentWindow):
 
         logger.info("[AppWindow] closeEvent — beginning shutdown sequence")
 
+        # Match prefetch owns Python threads and a resolver executor. Keep the
+        # UI and services alive until cooperative cancellation reaches the
+        # provider boundary, polling from Qt instead of blocking this thread.
+        prefetcher = getattr(self, "_match_prefetcher", None)
+        if prefetcher is not None and not prefetcher.shutdown(timeout_s=0.0):
+            event.ignore()
+            if not getattr(self, "_prefetch_shutdown_retry_scheduled", False):
+                self._prefetch_shutdown_retry_scheduled = True
+
+                def _retry_close_after_prefetch() -> None:
+                    self._prefetch_shutdown_retry_scheduled = False
+                    self.close()
+
+                QTimer.singleShot(50, _retry_close_after_prefetch)
+            logger.info("[AppWindow] Deferring close while match prefetch finishes safely")
+            return
+        self._prefetch_shutdown_retry_scheduled = False
+
         # 2. Persist state
         self._save_state()
         self._save_queue_state()
@@ -1884,9 +1902,6 @@ class AppWindow(FluentWindow):
         # 4. Cancel + join workers
         # getattr-guarded like _net_monitor/_svc below: tolerate a close that
         # fires before _build_controllers finished (e.g. a first-run crash).
-        prefetcher = getattr(self, "_match_prefetcher", None)
-        if prefetcher is not None:
-            prefetcher.cancel()  # daemon thread; signal it to stop
         dl_worker = self._download_ctrl._dl_worker  # noqa: SLF001
         if dl_worker and dl_worker.isRunning():
             logger.info("[AppWindow] Shutting down DownloadWorker…")

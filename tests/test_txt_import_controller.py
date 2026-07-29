@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
@@ -32,7 +33,7 @@ def _setup(tmp_path, monkeypatch, outcomes):
         error = Signal(object)
 
         def __init__(self, url, **_kwargs):
-            super().__init__()
+            super().__init__(_kwargs.get("parent"))
             self.url = url
             self.running = False
 
@@ -87,6 +88,70 @@ def _setup(tmp_path, monkeypatch, outcomes):
     monkeypatch.setattr(worker_module, "FetchWorker", FakeWorker)
     controller = FetchController(AppConfig())
     return controller, starts
+
+
+def test_completed_fetch_workers_do_not_accumulate_as_controller_children(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    urls = [f"https://youtu.be/{index:011d}" for index in range(40)]
+    controller, starts = _setup(
+        tmp_path, monkeypatch, {url: f"Track {index}" for index, url in enumerate(urls)},
+    )
+
+    for url in urls:
+        controller.fetch(url)
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QCoreApplication.processEvents()
+
+    assert starts == urls
+    assert controller._fetch_worker is None
+    assert controller.children() == []
+
+
+def test_real_fetch_qthreads_are_released_after_many_consecutive_completions(
+    tmp_path, monkeypatch,
+):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+    from config import AppConfig
+    from core.playlist_parser import ParseResult, SourcePlatform, TrackMeta, UrlKind
+    from ui.controllers.fetch_controller import FetchController
+    from ui.workers.fetch_worker import FetchWorker
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def parse(_self, url, on_item=None, **_kwargs):
+        track = TrackMeta(
+            title=url.rsplit("/", 1)[-1], url=url,
+            platform=SourcePlatform.YOUTUBE,
+            source_kind=UrlKind.SINGLE_VIDEO.name, source_url=url,
+        )
+        on_item(track, 1, 1)
+        return ParseResult(
+            url=url, kind=UrlKind.SINGLE_VIDEO,
+            platform=SourcePlatform.YOUTUBE, tracks=[track], total_count=1,
+        )
+
+    monkeypatch.setattr("core.playlist_parser.PlaylistParser.parse", parse)
+    controller = FetchController(AppConfig())
+    urls = [f"https://youtu.be/real{index:07d}" for index in range(30)]
+
+    for url in urls:
+        controller.fetch(url)
+        deadline = time.monotonic() + 2
+        while controller._fetch_worker is not None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        assert controller._fetch_worker is None
+
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    assert controller.findChildren(FetchWorker) == []
 
 
 def test_txt_import_processes_every_url_in_order_and_continues_after_failure(
