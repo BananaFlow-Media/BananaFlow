@@ -112,13 +112,14 @@ def test_more_menu_buttons_still_trigger_their_handlers(panel, monkeypatch):
     assert called == ["io"]
 
 
-def test_refresh_button_offers_a_full_rescan_in_its_menu(panel, tmp_path):
-    """Click is the cheap reconcile; the menu holds the full re-read."""
+def test_refresh_group_exposes_a_full_rescan_in_its_disclosure(panel, tmp_path):
+    """The primary refresh is safe; the disclosure holds the full re-read."""
     from ui.i18n import t
 
-    menu = panel._manual_refresh_btn.menu()
-    assert menu is not None
-    assert [a.text() for a in menu.actions()] == [t("meta_shell_rescan")]
+    assert panel._manual_refresh_btn.menu() is None
+    assert panel._refresh_menu_btn.menu() is None
+    assert panel._rescan_action in panel._refresh_menu.actions()
+    assert panel._rescan_action.text() == t("meta_shell_rescan")
 
     scans = []
     panel.scan_requested.connect(lambda folder, recursive: scans.append((folder, recursive)))

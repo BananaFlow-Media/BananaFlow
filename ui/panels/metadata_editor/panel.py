@@ -917,6 +917,50 @@ class MetadataEditorPanel(
             self._browse_btn.setStyleSheet(self._toolbar_button_style(browse_role))
             self._browse_btn.setIcon(FluentIcon.FOLDER.icon(color=self._toolbar_icon_color(browse_role)))
 
+        if hasattr(self, "_manual_refresh_btn"):
+            refresh_role = "neutral"
+            refresh_enabled = self._manual_refresh_btn.isEnabled()
+            self._manual_refresh_btn.setIcon(FluentIcon.SYNC.icon(
+                color=self._toolbar_icon_color(refresh_role, enabled=refresh_enabled)
+            ))
+        if hasattr(self, "_refresh_control"):
+            c = tag_editor_colors()
+            self._refresh_control.setStyleSheet(
+                f"QFrame#tagEditorRefreshControl {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; }}"
+                "QToolButton { background: transparent; color: inherit; border: none;"
+                " border-radius: 7px; padding: 0; }"
+                f"QToolButton:hover {{ background: {c.surface3}; }}"
+                f"QToolButton:pressed {{ background: {c.surface2}; }}"
+                f"QToolButton:disabled {{ color: {c.text_tertiary}; background: transparent; }}"
+                f"QToolButton#tagEditorRefreshMenuButton:hover {{ background: {c.surface3}; }}"
+            )
+        if hasattr(self, "_refresh_menu_btn"):
+            self._refresh_menu_btn.setIcon(FluentIcon.MORE.icon(
+                color=self._toolbar_icon_color("neutral", enabled=self._refresh_menu_btn.isEnabled())
+            ))
+        if hasattr(self, "_refresh_menu"):
+            c = tag_editor_colors()
+            self._refresh_menu.setStyleSheet(
+                f"QMenu#tagEditorRefreshMenu {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; padding: 3px; }}"
+            )
+        if hasattr(self, "_rescan_menu_btn"):
+            c = tag_editor_colors()
+            rescan_enabled = self._rescan_menu_btn.isEnabled()
+            self._rescan_menu_btn.setIcon(self._make_folder_refresh_icon(
+                self._toolbar_icon_color("neutral", enabled=rescan_enabled),
+                size=28,
+            ))
+            self._rescan_menu_btn.setStyleSheet(
+                f"QToolButton#tagEditorRescanAction {{ background: transparent; color: {c.text_primary};"
+                " border: none; border-radius: 7px; padding: 0 6px;"
+                " font-size: 12px; font-weight: 700; text-align: right; }}"
+                f"QToolButton#tagEditorRescanAction:hover {{ background: {c.surface3}; }}"
+                f"QToolButton#tagEditorRescanAction:pressed {{ background: {c.surface2}; }}"
+                f"QToolButton#tagEditorRescanAction:disabled {{ color: {c.text_tertiary}; }}"
+            )
+
         if hasattr(self, "_apply_btn"):
             apply_enabled = self._apply_btn.isEnabled()
             apply_role = "primary" if apply_enabled else "neutral"
@@ -962,6 +1006,33 @@ class MetadataEditorPanel(
         painter.drawPolygon(star_polygon(size * 0.22, size * 0.78, size * 0.10, size * 0.03))
 
         painter.end()
+        return QIcon(pixmap)
+
+    def _make_folder_refresh_icon(self, color: str, size: int = 28) -> QIcon:
+        """Render the combined glyph at high resolution so it stays sharp at any DPI."""
+        scale = 4
+        render_size = size * scale
+        pixmap = QPixmap(render_size, render_size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        folder_size = size
+        refresh_size = round(size * 0.50)
+        folder = FluentIcon.FOLDER.icon(color=color).pixmap(
+            QSize(folder_size * scale, folder_size * scale)
+        )
+        refresh = FluentIcon.SYNC.icon(color=color).pixmap(
+            QSize(refresh_size * scale, refresh_size * scale)
+        )
+        painter.drawPixmap(0, 0, folder)
+        painter.drawPixmap(
+            ((size - refresh_size) // 2) * scale,
+            round(size * 0.35) * scale,
+            refresh,
+        )
+        painter.end()
+        pixmap.setDevicePixelRatio(scale)
         return QIcon(pixmap)
 
     def _make_magic_wand_icon(self, color: str = "#000000", size: int = 22) -> QIcon:
@@ -1086,25 +1157,68 @@ class MetadataEditorPanel(
         a11y.describe(self._path_chip, t("meta_shell_active_folder"))
         layout.addWidget(self._path_chip)
 
-        # Two different refreshes behind one control: the click is the cheap
-        # incremental reconcile people press often; the full rescan re-reads
-        # the folder and is deliberately one step further away.
+        # Keep the related refreshes together as a compact icon group.  The
+        # primary icon reconciles safely; the compact overflow affordance opens
+        # the less-common complete re-read without suggesting a second refresh.
+        self._refresh_control = QFrame()
+        self._refresh_control.setObjectName("tagEditorRefreshControl")
+        self._refresh_control.setFixedHeight(34)
+        self._refresh_control.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        refresh_layout = QHBoxLayout(self._refresh_control)
+        refresh_layout.setContentsMargins(1, 1, 1, 1)
+        refresh_layout.setSpacing(0)
+
         self._manual_refresh_btn = self._make_toolbar_action(
             "meta_manual_refresh", FluentIcon.SYNC,
             self.manual_refresh_requested.emit, enabled=False)
         self._manual_refresh_btn.setText("")
-        self._manual_refresh_btn.setFixedSize(36, 32)
+        self._manual_refresh_btn.setFixedHeight(32)
+        self._manual_refresh_btn.setFixedWidth(34)
         self._manual_refresh_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        self._manual_refresh_btn.setAccessibleName(t("meta_manual_refresh"))
-        self._manual_refresh_btn.setPopupMode(QToolButton.MenuButtonPopup)
-        refresh_menu = QMenu(self._manual_refresh_btn)
+        a11y.describe(self._manual_refresh_btn, t("meta_manual_refresh"),
+                      tooltip=t("meta_manual_refresh"))
+        refresh_layout.addWidget(self._manual_refresh_btn)
+
+        self._refresh_menu_btn = QToolButton()
+        self._refresh_menu_btn.setObjectName("tagEditorRefreshMenuButton")
+        self._refresh_menu_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._refresh_menu_btn.setIconSize(QSize(16, 16))
+        self._refresh_menu_btn.setFixedSize(26, 32)
+        self._refresh_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        a11y.describe(self._refresh_menu_btn, t("meta_shell_refresh_menu"),
+                      tooltip=t("meta_shell_rescan_tooltip"))
+        refresh_menu = QMenu(self._refresh_control)
+        refresh_menu.setObjectName("tagEditorRefreshMenu")
         refresh_menu.setAccessibleName(t("meta_shell_refresh_menu"))
-        self._rescan_action = refresh_menu.addAction(t("meta_shell_rescan"))
+        self._rescan_menu_btn = QToolButton(refresh_menu)
+        self._rescan_menu_btn.setObjectName("tagEditorRescanAction")
+        self._rescan_menu_btn.setText(t("meta_shell_rescan"))
+        self._rescan_menu_btn.setIconSize(QSize(28, 28))
+        self._rescan_menu_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._rescan_menu_btn.setFixedHeight(32)
+        self._rescan_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        a11y.describe(self._rescan_menu_btn, t("meta_shell_rescan"),
+                      tooltip=t("meta_shell_rescan_tooltip"))
+        rescan_width = max(
+            98,
+            min(132, self._rescan_menu_btn.fontMetrics().horizontalAdvance(
+                t("meta_shell_rescan")
+            ) + 46),
+        )
+        self._rescan_menu_btn.setFixedWidth(rescan_width)
+        self._rescan_action = QWidgetAction(refresh_menu)
+        self._rescan_action.setText(t("meta_shell_rescan"))
+        self._rescan_action.setDefaultWidget(self._rescan_menu_btn)
         self._rescan_action.setToolTip(t("meta_shell_rescan_tooltip"))
         self._rescan_action.triggered.connect(self._on_scan)
+        self._rescan_menu_btn.clicked.connect(self._rescan_action.trigger)
+        self._rescan_menu_btn.clicked.connect(refresh_menu.close)
+        refresh_menu.addAction(self._rescan_action)
+        refresh_menu.setFixedWidth(rescan_width + 6)
         self._refresh_menu = refresh_menu
-        self._manual_refresh_btn.setMenu(refresh_menu)
-        layout.addWidget(self._manual_refresh_btn)
+        self._refresh_menu_btn.clicked.connect(self._show_refresh_menu)
+        refresh_layout.addWidget(self._refresh_menu_btn)
+        layout.addWidget(self._refresh_control)
 
         self._search_edit = QLineEdit()
         self._search_edit.addAction(FluentIcon.SEARCH.icon(), QLineEdit.LeadingPosition)
@@ -2654,6 +2768,17 @@ class MetadataEditorPanel(
         if not self._root_folder:
             return
         self.scan_requested.emit(self._root_folder, True)
+
+    def _show_refresh_menu(self) -> None:
+        """Open the compact rescan action aligned to its refresh group."""
+        menu = self._refresh_menu
+        menu_width = menu.sizeHint().width()
+        x = self._refresh_control.width() - menu_width if (
+            QApplication.layoutDirection() == Qt.RightToLeft
+        ) else 0
+        menu.popup(self._refresh_control.mapToGlobal(
+            QPoint(x, self._refresh_control.height() + 4)
+        ))
 
     def on_workspace_replacement_started(self, folder: Path) -> None:
         """Update the visible root only after the controller accepts replacement."""
@@ -4243,12 +4368,17 @@ class MetadataEditorPanel(
                 self._toolbar_text("meta_change_folder" if (self._root_folder and has_tracks) else "meta_browse_folder")
             )
         if hasattr(self, "_rescan_action"):
-            self._rescan_action.setEnabled(
+            can_rescan = (
                 self._root_folder is not None
                 and not self._is_scanning
                 and not self._is_applying
                 and not self._is_restoring
             )
+            self._rescan_action.setEnabled(can_rescan)
+            if hasattr(self, "_refresh_menu_btn"):
+                self._refresh_menu_btn.setEnabled(can_rescan)
+            if hasattr(self, "_rescan_menu_btn"):
+                self._rescan_menu_btn.setEnabled(can_rescan)
         self._refresh_path_chip()
         self._refresh_footer()
         self._refresh_check_pages()
