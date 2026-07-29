@@ -15,6 +15,8 @@ in explorer_view.py; dialogs in dialogs.py; shared styling in shared.py.
 
 from __future__ import annotations
 
+from . import prompts
+
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -96,7 +98,6 @@ from core.metadata_models import (
 )
 from ui import a11y
 from ui.components.empty_state_icon import EmptyStateIcon
-from ui.dialogs.styled_dialog import confirm, get_text, show_info, show_warning
 from ui.i18n import t
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_NEW,
@@ -138,7 +139,18 @@ from .shared import (
     primary_btn_style,
 )
 from .tree import ExplorerTreeWidget
-from .widgets import OpRow
+# ArtworkDropPreview is re-exported: it used to be defined here, and external
+# importers (including tests) still reach for it on this module.
+from .widgets import ArtworkDropPreview, OpRow
+
+# Panel behaviour split across mixins purely to keep each file readable. They
+# are not independent components: every method still runs on the panel and
+# reaches the panel's attributes directly, exactly as before the split.
+from .file_actions import FileActionsMixin
+from .inspector_build import InspectorBuildMixin
+from .pane_layout import PaneLayoutMixin
+from .table_layout import TableLayoutMixin
+from .tree_ops import TreeOpsMixin
 
 logger = logging.getLogger(__name__)
 
@@ -165,30 +177,14 @@ _FILE_OPERATION_ERROR_KEYS = {
 }
 
 
-class ArtworkDropPreview(QLabel):
-    """Dedicated, narrow image drop target; never intercepts table drops."""
-    def __init__(self, callback, parent=None) -> None:
-        super().__init__(parent)
-        self._callback = callback
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if len(urls) == 1 and urls[0].isLocalFile() and Path(urls[0].toLocalFile()).suffix.lower() in {".jpg", ".jpeg", ".png"}:
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if len(urls) == 1 and urls[0].isLocalFile():
-            self._callback(Path(urls[0].toLocalFile()))
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-
-class MetadataEditorPanel(QWidget):
+class MetadataEditorPanel(
+    PaneLayoutMixin,
+    InspectorBuildMixin,
+    FileActionsMixin,
+    TableLayoutMixin,
+    TreeOpsMixin,
+    QWidget,
+):
     """
     Full Tag Editor tab widget.
 
@@ -403,7 +399,7 @@ class MetadataEditorPanel(QWidget):
         if result is None:
             return None
         if result.failed:
-            show_warning(self, t("meta_error_title"),
+            prompts.show_warning(self, t("meta_error_title"),
                          "\n".join(self._file_operation_message(outcome)
                                    for outcome in result.failed))
         return result
@@ -1675,7 +1671,7 @@ class MetadataEditorPanel(QWidget):
     def _on_online_metadata(self) -> None:
         tracks = self._workspace.selected_tracks()
         if not tracks:
-            show_warning(self, t("meta_online_title"), t("meta_online_select_files")); return
+            prompts.show_warning(self, t("meta_online_title"), t("meta_online_select_files")); return
         ids = tuple(sorted(self._workspace.item_id(item) for item in tracks))
         dialog = OnlineMetadataDialog(
             self._workspace, ids, parent=self,
@@ -1909,9 +1905,9 @@ class MetadataEditorPanel(QWidget):
         snapshot = getattr(self, "_problems_snapshot", None)
         issues = [] if snapshot is None else [issue for issue in snapshot.issues if issue.id in set(issue_ids)]
         if not issues or not all(issue.fixable for issue in issues):
-            show_warning(self, t("meta_problems_title"), t("meta_problems_no_safe_fix"))
+            prompts.show_warning(self, t("meta_problems_title"), t("meta_problems_no_safe_fix"))
             return
-        value, ok = get_text(self, t("meta_problems_fix_selected"), t("meta_problems_value"), text=text)
+        value, ok = prompts.get_text(self, t("meta_problems_fix_selected"), t("meta_problems_value"), text=text)
         if not ok or not value.strip():
             return
         self.problem_fix_preview_requested.emit(list(issue_ids), value.strip())
@@ -1954,7 +1950,7 @@ class MetadataEditorPanel(QWidget):
             self._request_problem_fix(preview.issue_ids, text=preview.value)
 
     def on_problem_fix_preview_failed(self, message: str) -> None:
-        show_warning(self, t("meta_problems_title"), message)
+        prompts.show_warning(self, t("meta_problems_title"), message)
 
     def _select_inspector_tool(self, index: int) -> None:
         self._active_inspector_tool = index
@@ -1998,783 +1994,6 @@ class MetadataEditorPanel(QWidget):
             self._tree_toggle_btn.setStyleSheet(button_qss)
             self._set_tool_button_icon(self._tree_toggle_btn, FluentIcon.FOLDER)
 
-    def _set_pane_collapsed(self, pane: int, collapsed: bool) -> None:
-        """Collapse/expand a side pane (0 = tree, 2 = inspector) to/from its rail.
-
-        Expanding takes width from the table first (down to its minimum) and
-        then, if still short of the pane's open minimum, from the other side
-        pane. Collapsing hands the freed width to the table.
-        """
-        if not hasattr(self, "_body_splitter"):
-            return
-        other = 2 if pane == 0 else 0
-        rail, open_min = (
-            (self._TREE_RAIL_WIDTH, self._TREE_OPEN_MIN)
-            if pane == 0
-            else (self._INSPECTOR_RAIL_WIDTH, self._INSPECTOR_OPEN_MIN)
-        )
-        other_rail = self._INSPECTOR_RAIL_WIDTH if pane == 0 else self._TREE_RAIL_WIDTH
-
-        sizes = self._body_splitter.sizes()
-        if len(sizes) != 3:
-            sizes = list(self._DEFAULT_SPLITTER_SIZES)
-
-        if collapsed:
-            if sizes[pane] > rail + 4:
-                last = max(open_min, sizes[pane])
-                if pane == 0:
-                    self._last_tree_width = last
-                else:
-                    self._last_inspector_width = last
-            sizes[1] += max(0, sizes[pane] - rail)
-            sizes[pane] = rail
-        else:
-            last = self._last_tree_width if pane == 0 else self._last_inspector_width
-            want = max(open_min, last)
-            available = max(0, sizes[1] - self._TABLE_OPEN_MIN)
-            take = min(available, max(0, want - sizes[pane]))
-            sizes[pane] += take
-            sizes[1] -= take
-            if sizes[pane] < open_min and sizes[other] > other_rail:
-                extra = min(sizes[other] - other_rail, open_min - sizes[pane])
-                sizes[pane] += extra
-                sizes[other] -= extra
-        self._apply_body_sizes(sizes, save=True)
-
-    def _set_tree_collapsed(self, collapsed: bool) -> None:
-        self._set_pane_collapsed(0, collapsed)
-
-    def _toggle_tree_pane(self) -> None:
-        self._set_tree_collapsed(not self._left_collapsed)
-
-    def _set_inspector_collapsed(self, collapsed: bool) -> None:
-        self._set_pane_collapsed(2, collapsed)
-
-    def _apply_body_sizes(self, sizes: list[int], save: bool) -> None:
-        if not hasattr(self, "_body_splitter"):
-            return
-        sizes = self._normalize_body_sizes(list(sizes))
-        left_collapsed = sizes[0] <= self._TREE_RAIL_WIDTH + 4
-        right_collapsed = sizes[2] <= self._INSPECTOR_RAIL_WIDTH + 4
-        self._sync_collapsed_visuals(left_collapsed, right_collapsed)
-
-        self._ignore_splitter_save = True
-        try:
-            self._body_splitter.setSizes(sizes)
-        finally:
-            self._ignore_splitter_save = False
-        if save:
-            self._save_splitter_sizes(self._body_splitter)
-
-    @staticmethod
-    def _snap_side_size(size: int, rail: int, open_min: int) -> int:
-        """Sanitize a side-pane width: a pane is either collapsed to its rail
-        or open at >= its open minimum — never squished in between (stale
-        saved sizes, old configs)."""
-        if 0 < size < open_min:
-            return rail if size <= rail + 4 else open_min
-        return size
-
-    def _normalize_body_sizes(self, sizes: list[int]) -> list[int]:
-        """Clamp programmatic sizes (config restore, collapse toggles) to the
-        pane invariants. Native drags never pass through here — Qt enforces
-        the same floors via the pane widgets' minimumWidth."""
-        if len(sizes) != 3:
-            sizes = list(self._DEFAULT_SPLITTER_SIZES)
-        sizes = [max(0, int(v)) for v in sizes]
-        total = sum(sizes) or sum(self._DEFAULT_SPLITTER_SIZES)
-
-        sizes[0] = self._snap_side_size(sizes[0], self._TREE_RAIL_WIDTH, self._TREE_OPEN_MIN)
-        sizes[2] = self._snap_side_size(sizes[2], self._INSPECTOR_RAIL_WIDTH, self._INSPECTOR_OPEN_MIN)
-
-        # Keep the table at its minimum by collapsing side panes fully to
-        # their rail if needed (inspector first, then tree). A *partial* cut
-        # would leave a pane squished between its rail and open minimum --
-        # a state _snap_side_size does not allow to persist, so re-snapping
-        # a partial cut can jump it back up to its open minimum and silently
-        # undo the cut. Collapsing to rail outright is the only move that
-        # stays valid without a second snap pass.
-        side_total = sizes[0] + sizes[2]
-        if total - side_total < self._TABLE_OPEN_MIN:
-            deficit = self._TABLE_OPEN_MIN - (total - side_total)
-            if deficit > 0 and sizes[2] > self._INSPECTOR_RAIL_WIDTH:
-                deficit -= sizes[2] - self._INSPECTOR_RAIL_WIDTH
-                sizes[2] = self._INSPECTOR_RAIL_WIDTH
-            if deficit > 0 and sizes[0] > self._TREE_RAIL_WIDTH:
-                deficit -= sizes[0] - self._TREE_RAIL_WIDTH
-                sizes[0] = self._TREE_RAIL_WIDTH
-
-        sizes[1] = max(self._TABLE_OPEN_MIN, total - sizes[0] - sizes[2])
-        overflow = sum(sizes) - total
-        if overflow > 0:
-            sizes[1] = max(0, sizes[1] - overflow)
-        return sizes
-
-    def _sync_collapsed_visuals(self, left_collapsed: bool, right_collapsed: bool) -> None:
-        self._left_collapsed = left_collapsed
-        self._right_collapsed = right_collapsed
-        if hasattr(self, "_tree_rail"):
-            self._tree_rail.setVisible(left_collapsed)
-        if hasattr(self, "_tree_body"):
-            self._tree_body.setVisible(not left_collapsed)
-        if hasattr(self, "_tree_frame"):
-            self._tree_frame.setMaximumWidth(self._TREE_RAIL_WIDTH if left_collapsed else 16777215)
-        if hasattr(self, "_inspector_content"):
-            self._inspector_content.setVisible(not right_collapsed)
-        if hasattr(self, "_inspector_shell"):
-            self._inspector_shell.setMaximumWidth(self._INSPECTOR_RAIL_WIDTH if right_collapsed else 16777215)
-        self._refresh_tool_button_states()
-
-    def _pane_after_shrink(self, current: int, shrink: int, open_min: int, collapsed_width: int) -> int:
-        candidate = current - shrink
-        if candidate >= open_min:
-            return candidate
-        if candidate >= open_min - self._COLLAPSE_DRAG_MARGIN:
-            return open_min
-        return collapsed_width
-
-    def _visual_splitter_delta(self, delta: int) -> int:
-        if self._body_splitter.layoutDirection() == Qt.LayoutDirection.RightToLeft:
-            return -delta
-        return delta
-
-    def _cascade_splitter_sizes(self, handle_index: int, start_sizes: list[int], delta: int) -> list[int]:
-        delta = self._visual_splitter_delta(delta)
-        left, center, right = self._normalize_body_sizes(start_sizes)
-        total = left + center + right
-
-        if handle_index == 1:
-            if delta < 0:
-                left = self._pane_after_shrink(left, -delta, self._TREE_OPEN_MIN, self._TREE_RAIL_WIDTH)
-                center = total - left - right
-            else:
-                center_candidate = center - delta
-                if center_candidate >= self._TABLE_OPEN_MIN:
-                    center = center_candidate
-                elif center_candidate >= self._TABLE_OPEN_MIN - self._COLLAPSE_DRAG_MARGIN:
-                    center = self._TABLE_OPEN_MIN
-                else:
-                    extra = self._TABLE_OPEN_MIN - center_candidate
-                    center = self._TABLE_OPEN_MIN
-                    right = self._pane_after_shrink(right, extra, self._INSPECTOR_OPEN_MIN, self._INSPECTOR_RAIL_WIDTH)
-                left = total - center - right
-        else:
-            if delta > 0:
-                right = self._pane_after_shrink(right, delta, self._INSPECTOR_OPEN_MIN, self._INSPECTOR_RAIL_WIDTH)
-                center = total - left - right
-            else:
-                grow = -delta
-                center_candidate = center - grow
-                if center_candidate >= self._TABLE_OPEN_MIN:
-                    center = center_candidate
-                elif center_candidate >= self._TABLE_OPEN_MIN - self._COLLAPSE_DRAG_MARGIN:
-                    center = self._TABLE_OPEN_MIN
-                else:
-                    extra = self._TABLE_OPEN_MIN - center_candidate
-                    center = self._TABLE_OPEN_MIN
-                    left = self._pane_after_shrink(left, extra, self._TREE_OPEN_MIN, self._TREE_RAIL_WIDTH)
-                right = total - left - center
-
-        return self._normalize_body_sizes([left, center, right])
-
-    def eventFilter(self, obj, event) -> bool:
-        from PySide6.QtCore import QEvent
-        if hasattr(self, "_body_splitter") and obj in (self._body_splitter.handle(1), self._body_splitter.handle(2)):
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._splitter_drag = {
-                    "handle": int(obj.property("metadata_handle_index")),
-                    "x": int(event.globalPosition().x()),
-                    "sizes": self._body_splitter.sizes(),
-                }
-                return True
-            if event_type == QEvent.Type.MouseMove and self._splitter_drag is not None:
-                delta = int(event.globalPosition().x()) - int(self._splitter_drag["x"])
-                sizes = self._cascade_splitter_sizes(
-                    int(self._splitter_drag["handle"]),
-                    list(self._splitter_drag["sizes"]),
-                    delta,
-                )
-                if sizes[0] > self._TREE_RAIL_WIDTH + 4:
-                    self._last_tree_width = sizes[0]
-                if sizes[2] > self._INSPECTOR_RAIL_WIDTH + 4:
-                    self._last_inspector_width = sizes[2]
-                self._apply_body_sizes(sizes, save=False)
-                return True
-            if event_type == QEvent.Type.MouseButtonRelease and self._splitter_drag is not None:
-                self._save_splitter_sizes(self._body_splitter)
-                self._splitter_drag = None
-                return True
-        return super().eventFilter(obj, event)
-
-
-    def _build_inspector_empty(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setAlignment(Qt.AlignCenter)
-        lbl = QLabel(t("meta_select_files_prompt"))
-        lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet(f"color: {get_colors().text_tertiary}; font-size: 13px;")
-        lbl.setWordWrap(True)
-        layout.addWidget(lbl)
-        return w
-
-    def _build_inspector_folder(self) -> QScrollArea:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        layout.setAlignment(Qt.AlignTop)
-
-        self._insp_folder_title = QLabel(t("meta_inspector_no_selection_title"))
-        self._insp_folder_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        self._insp_folder_title.setWordWrap(True)
-        layout.addWidget(self._insp_folder_title)
-        note = QLabel(t("meta_inspector_no_selection_body"))
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 12px;")
-        layout.addWidget(note)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        return scroll
-
-    def _build_inspector_tracks(self) -> QScrollArea:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        layout.setAlignment(Qt.AlignTop)
-
-        self._insp_tracks_title = QLabel(t("meta_tracks_selected_count", n=0))
-        self._insp_tracks_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(self._insp_tracks_title)
-
-        self._insp_capability = QLabel()
-        self._insp_capability.setWordWrap(True)
-        self._insp_capability.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
-        layout.addWidget(self._insp_capability)
-
-        fields_grp = QGroupBox(t("meta_inspector_metadata_section"))
-        fields_layout = QVBoxLayout(fields_grp)
-        fields_layout.setSpacing(6)
-
-        self._insp_fields: dict[str, QLineEdit] = {}
-        self._insp_clear_buttons: dict[str, QToolButton] = {}
-
-        def _field(field_name: str, label: str) -> QLineEdit:
-            row = QHBoxLayout()
-            row.setSpacing(5)
-            lbl = QLabel(label)
-            # A minimum, not a fixed width: a long Hebrew field label at 200%
-            # would otherwise be cut off mid-word.
-            lbl.setMinimumWidth(96)
-            lbl.setStyleSheet("font-size: 12px;")
-            edit = QLineEdit()
-            edit.setPlaceholderText(t("meta_mixed_placeholder"))
-            # The visible QLabel is a sibling, not a buddy, so the field itself
-            # must carry the name a screen reader announces on focus.
-            lbl.setBuddy(edit)
-            a11y.describe(edit, label)
-            edit.textEdited.connect(
-                lambda text, name=field_name: self._mark_insp_field_dirty(name, text)
-            )
-            clear_btn = QToolButton()
-            clear_btn.setText(t("meta_inspector_clear_short"))
-            # Every field row has a button reading just "Clear"; only the
-            # accessible name can say which field this one clears.
-            a11y.describe(
-                clear_btn,
-                t("meta_a11y_clear_named_field", field=label),
-                tooltip=t("meta_inspector_clear_field"))
-            clear_btn.clicked.connect(
-                lambda _checked=False, name=field_name, target=edit: self._clear_insp_field(name, target)
-            )
-            row.addWidget(lbl)
-            row.addWidget(edit)
-            row.addWidget(clear_btn)
-            fields_layout.addLayout(row)
-            self._insp_fields[field_name] = edit
-            self._insp_clear_buttons[field_name] = clear_btn
-            return edit
-
-        field_specs = (
-            ("title", "meta_field_title"), ("artist", "meta_field_artist"),
-            ("album", "meta_field_album"), ("album_artist", "meta_field_album_artist"),
-            ("track_num", "meta_field_track"), ("track_total", "meta_field_track_total"),
-            ("disc_num", "meta_field_disc"), ("disc_total", "meta_field_disc_total"),
-            ("year", "meta_field_date"), ("genre", "meta_field_genre"),
-            ("comment", "meta_field_comment"), ("composer", "meta_field_composer"),
-            ("publisher", "meta_field_publisher"), ("copyright", "meta_field_copyright"),
-            ("bpm", "meta_field_bpm"), ("isrc", "meta_field_isrc"),
-            ("grouping", "meta_field_grouping"), ("sort_title", "meta_field_sort_title"),
-            ("sort_artist", "meta_field_sort_artist"), ("sort_album", "meta_field_sort_album"),
-            ("sort_album_artist", "meta_field_sort_album_artist"),
-        )
-        for field_name, label_key in field_specs:
-            _field(field_name, t(label_key))
-
-        # Compatibility aliases used by existing panel tests and handlers.
-        self._insp_title = self._insp_fields["title"]
-        self._insp_artist = self._insp_fields["artist"]
-        self._insp_album = self._insp_fields["album"]
-        self._insp_album_artist = self._insp_fields["album_artist"]
-        self._insp_track = self._insp_fields["track_num"]
-
-        btn_apply_fields = QPushButton(t("meta_apply_to_selection"))
-        btn_apply_fields.setIcon(FluentIcon.ACCEPT.icon(color="#000000"))
-        btn_apply_fields.setIconSize(QSize(14, 14))
-        btn_apply_fields.setProperty("accentRole", "primary")
-        btn_apply_fields.setStyleSheet(primary_btn_style())
-        btn_apply_fields.clicked.connect(self._on_insp_apply_fields)
-        self._selection_scope_buttons.append(btn_apply_fields)
-        fields_layout.addWidget(btn_apply_fields)
-        layout.addWidget(fields_grp)
-
-        lyrics_grp = QGroupBox(t("meta_inspector_lyrics_section"))
-        lyrics_layout = QVBoxLayout(lyrics_grp)
-        self._insp_lyrics_state = QLabel()
-        self._insp_lyrics_state.setWordWrap(True)
-        lyrics_layout.addWidget(self._insp_lyrics_state)
-        self._insp_lyrics = QTextEdit()
-        self._insp_lyrics.setAcceptRichText(False)
-        self._insp_lyrics.setMinimumHeight(120)
-        self._insp_lyrics.setLayoutDirection(Qt.LayoutDirectionAuto)
-        self._insp_lyrics.textChanged.connect(self._on_lyrics_text_changed)
-        lyrics_layout.addWidget(self._insp_lyrics)
-        lyrics_meta = QHBoxLayout()
-        self._insp_lyrics_language = QLineEdit()
-        self._insp_lyrics_language.setPlaceholderText(t("meta_lyrics_language"))
-        self._insp_lyrics_description = QLineEdit()
-        self._insp_lyrics_description.setPlaceholderText(t("meta_lyrics_description"))
-        lyrics_meta.addWidget(self._insp_lyrics_language)
-        lyrics_meta.addWidget(self._insp_lyrics_description)
-        lyrics_layout.addLayout(lyrics_meta)
-        lyrics_buttons = QHBoxLayout()
-        self._insp_lyrics_set_btn = QPushButton(t("meta_lyrics_propose_replace"))
-        self._insp_lyrics_set_btn.clicked.connect(self._on_lyrics_propose_set)
-        self._insp_lyrics_clear_btn = QPushButton(t("meta_lyrics_propose_clear"))
-        self._insp_lyrics_clear_btn.clicked.connect(self._on_lyrics_propose_clear)
-        self._insp_lyrics_revert_btn = QPushButton(t("meta_lyrics_revert_pending"))
-        self._insp_lyrics_revert_btn.clicked.connect(self._on_lyrics_revert)
-        for button in (self._insp_lyrics_set_btn, self._insp_lyrics_clear_btn, self._insp_lyrics_revert_btn):
-            lyrics_buttons.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        lyrics_layout.addLayout(lyrics_buttons)
-        layout.addWidget(lyrics_grp)
-
-        artwork_grp = QGroupBox(t("meta_inspector_artwork_section"))
-        artwork_layout = QVBoxLayout(artwork_grp)
-        self._insp_artwork_current_label = QLabel(t("meta_artwork_current"))
-        artwork_layout.addWidget(self._insp_artwork_current_label)
-        self._insp_artwork_preview = ArtworkDropPreview(self._on_artwork_drop)
-        self._insp_artwork_preview.setFixedSize(150, 150)
-        self._insp_artwork_preview.setAlignment(Qt.AlignCenter)
-        self._insp_artwork_preview.setStyleSheet("border: 1px dashed #8a8a8a; border-radius: 4px;")
-        artwork_layout.addWidget(self._insp_artwork_preview, alignment=Qt.AlignHCenter)
-        self._insp_artwork_proposed_label = QLabel(t("meta_artwork_proposed"))
-        self._insp_artwork_proposed_preview = QLabel()
-        self._insp_artwork_proposed_preview.setFixedSize(150, 150)
-        self._insp_artwork_proposed_preview.setAlignment(Qt.AlignCenter)
-        self._insp_artwork_proposed_preview.setStyleSheet("border: 1px solid #8a8a8a; border-radius: 4px;")
-        artwork_layout.addWidget(self._insp_artwork_proposed_label)
-        artwork_layout.addWidget(self._insp_artwork_proposed_preview, alignment=Qt.AlignHCenter)
-        self._insp_artwork_state = QLabel()
-        self._insp_artwork_state.setWordWrap(True)
-        artwork_layout.addWidget(self._insp_artwork_state)
-        artwork_buttons = QHBoxLayout()
-        self._insp_artwork_add_btn = QPushButton(t("meta_artwork_add"))
-        self._insp_artwork_replace_btn = QPushButton(t("meta_artwork_replace"))
-        self._insp_artwork_remove_btn = QPushButton(t("meta_artwork_remove"))
-        self._insp_artwork_paste_btn = QPushButton(t("meta_artwork_paste"))
-        self._insp_artwork_export_btn = QPushButton(t("meta_artwork_export"))
-        self._insp_artwork_revert_btn = QPushButton(t("meta_artwork_revert"))
-        self._insp_artwork_add_btn.clicked.connect(self._on_artwork_add_choose)
-        self._insp_artwork_replace_btn.clicked.connect(self._on_artwork_replace_choose)
-        self._insp_artwork_remove_btn.clicked.connect(self._on_artwork_remove)
-        self._insp_artwork_paste_btn.clicked.connect(self._on_artwork_paste)
-        self._insp_artwork_export_btn.clicked.connect(self._on_artwork_export)
-        self._insp_artwork_revert_btn.clicked.connect(self._on_artwork_revert)
-        for button in (self._insp_artwork_add_btn, self._insp_artwork_replace_btn,
-                       self._insp_artwork_remove_btn, self._insp_artwork_paste_btn,
-                       self._insp_artwork_export_btn, self._insp_artwork_revert_btn):
-            artwork_buttons.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        artwork_layout.addLayout(artwork_buttons)
-        layout.addWidget(artwork_grp)
-
-        replay_grp = QGroupBox(t("meta_inspector_replaygain_section"))
-        replay_layout = QVBoxLayout(replay_grp)
-        replay_note = QLabel(t("meta_replaygain_plain_explanation"))
-        replay_note.setWordWrap(True)
-        replay_note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
-        replay_layout.addWidget(replay_note)
-        self._insp_replay_values: dict[str, QLabel] = {}
-        for field_name, key in (
-            (REPLAYGAIN_TRACK_GAIN, "meta_replaygain_track_gain"),
-            (REPLAYGAIN_TRACK_PEAK, "meta_replaygain_track_peak"),
-            (REPLAYGAIN_ALBUM_GAIN, "meta_replaygain_album_gain"),
-            (REPLAYGAIN_ALBUM_PEAK, "meta_replaygain_album_peak"),
-            (REPLAYGAIN_REFERENCE_LOUDNESS, "meta_replaygain_reference_loudness"),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(t(key)))
-            value_label = QLabel(t("meta_inspector_empty_value"))
-            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            row.addWidget(value_label, stretch=1)
-            replay_layout.addLayout(row)
-            self._insp_replay_values[field_name] = value_label
-        replay_actions = QHBoxLayout()
-        self._insp_rg_track_btn = QPushButton(t("meta_replaygain_analyze_track"))
-        self._insp_rg_album_btn = QPushButton(t("meta_replaygain_analyze_album"))
-        self._insp_rg_cancel_btn = QPushButton(t("meta_replaygain_cancel"))
-        self._insp_rg_cancel_btn.setVisible(False)
-        self._insp_rg_track_btn.clicked.connect(self._on_replaygain_track)
-        self._insp_rg_album_btn.clicked.connect(self._on_replaygain_album)
-        self._insp_rg_cancel_btn.clicked.connect(self.replaygain_cancel_requested)
-        for button in (self._insp_rg_track_btn, self._insp_rg_album_btn):
-            replay_actions.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        replay_actions.addWidget(self._insp_rg_cancel_btn)
-        replay_layout.addLayout(replay_actions)
-        replay_clear = QHBoxLayout()
-        self._insp_rg_clear_track_btn = QPushButton(t("meta_replaygain_clear_track"))
-        self._insp_rg_clear_album_btn = QPushButton(t("meta_replaygain_clear_album"))
-        self._insp_rg_revert_btn = QPushButton(t("meta_replaygain_revert"))
-        self._insp_rg_clear_track_btn.clicked.connect(self._on_replaygain_clear_track)
-        self._insp_rg_clear_album_btn.clicked.connect(self._on_replaygain_clear_album)
-        self._insp_rg_revert_btn.clicked.connect(self._on_replaygain_revert)
-        for button in (self._insp_rg_clear_track_btn, self._insp_rg_clear_album_btn, self._insp_rg_revert_btn):
-            replay_clear.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        replay_layout.addLayout(replay_clear)
-        self._insp_rg_progress = QProgressBar()
-        self._insp_rg_progress.setVisible(False)
-        replay_layout.addWidget(self._insp_rg_progress)
-        layout.addWidget(replay_grp)
-
-        props_grp = QGroupBox(t("meta_inspector_file_properties_section"))
-        props_layout = QVBoxLayout(props_grp)
-        self._insp_properties = QLabel()
-        self._insp_properties.setWordWrap(True)
-        self._insp_properties.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        props_layout.addWidget(self._insp_properties)
-        self._insp_external_status = QLabel()
-        self._insp_external_status.setWordWrap(True)
-        props_layout.addWidget(self._insp_external_status)
-        self._insp_external_review_btn = QPushButton(t("meta_external_review_action"))
-        a11y.describe(self._insp_external_review_btn, t("meta_external_review_action"),
-                      description=t("meta_external_review_title"))
-        self._insp_external_review_btn.clicked.connect(
-            self._review_selected_external_conflict)
-        self._insp_external_review_btn.setVisible(False)
-        props_layout.addWidget(self._insp_external_review_btn)
-        layout.addWidget(props_grp)
-
-        rename_grp = QGroupBox(t("meta_rename_group"))
-        rename_layout = QVBoxLayout(rename_grp)
-        rename_layout.setSpacing(6)
-        rename_note = QLabel(t("meta_rename_note"))
-        rename_note.setWordWrap(True)
-        rename_note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
-        rename_layout.addWidget(rename_note)
-        btn_rename = QPushButton(t("meta_rename_btn"))
-        btn_rename.setIcon(FluentIcon.SAVE_AS.icon(color="#000000"))
-        btn_rename.setIconSize(QSize(14, 14))
-        btn_rename.setStyleSheet(btn_style())
-        btn_rename.clicked.connect(self._on_insp_rename_from_title)
-        self._selection_scope_buttons.append(btn_rename)
-        rename_layout.addWidget(btn_rename)
-        layout.addWidget(rename_grp)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        return scroll
-
-    def _make_op_side_button(self, glyph: str, tooltip: str, accent: bool = False) -> QPushButton:
-        """Small icon button shown on the trailing edge of an op row.
-
-        ``accent=True`` gives the button a tinted, always-visible look so
-        configurable actions (the settings gear) are easy to spot next to
-        the subtler info icon.
-        """
-        c = get_colors()
-        btn = QPushButton(glyph)
-        btn.setFixedSize(28, 28)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # The glyph is decorative, so the tooltip is the only stated meaning;
-        # it must also be the accessible name or the button is announced as an
-        # unlabelled symbol.
-        a11y.describe(btn, tooltip, tooltip=tooltip)
-        if accent:
-            btn.setStyleSheet(
-                f"QPushButton {{ border: 1px solid transparent; font-size: 14px;"
-                f"  background: transparent; color: {c.text_secondary}; border-radius: 8px; }}"
-                f"QPushButton:hover {{ background: {c.surface2}; color: {c.accent}; border-color: {c.border}; }}"
-            )
-        else:
-            btn.setStyleSheet(
-                f"QPushButton {{ border: none; background: transparent; font-size: 13px;"
-                f"  color: {c.text_secondary}; border-radius: 8px; }}"
-                f"QPushButton:hover {{ background: {c.surface2}; color: {c.accent}; }}"
-            )
-        return btn
-
-    def _refresh_op_rows_style(self) -> None:
-        """Re-apply theme-aware styling to all inspector op rows."""
-        if not hasattr(self, "_op_rows"):
-            return
-        qss = op_row_qss()
-        for row in self._op_rows:
-            row.setStyleSheet(qss)
-
-    def _build_magic_ops_widget(
-        self,
-        op_keys: Optional[tuple[str, ...]] = None,
-        *,
-        sections: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None,
-    ) -> QWidget:
-        """Build the magic operations list — modern card rows, all act on checked tracks.
-
-        Either pass `op_keys` (a flat, already-ordered list of op ids) or
-        `sections` — a list of (subheader_i18n_key, op_ids) groups — to add
-        light dividers inside a single category (e.g. "Text Cleanup" vs
-        "Clear Fields" inside the broader cleanup category).
-        """
-        container = QWidget()
-        grp_layout = QVBoxLayout(container)
-        grp_layout.setContentsMargins(0, 0, 0, 0)
-        grp_layout.setSpacing(8)
-
-        op_handlers: dict[str, object] = {
-            "title_strip":      lambda tracks: self.title_from_filename.emit(tracks, True),
-            "title_full":       lambda tracks: self.title_from_filename.emit(tracks, False),
-            "normalize_spaces": lambda tracks: self.normalize_title_spaces.emit(tracks),
-            "track_num":        lambda tracks: self.track_from_filename.emit(tracks),
-            "split_at":         lambda tracks: self.split_artist_title.emit(tracks),
-            "album_artist":     lambda tracks: self.album_artist_from_artist.emit(tracks),
-            "strip_junk":       lambda tracks: self.strip_web_junk.emit(tracks),
-            "clear_comments":   lambda tracks: self.clear_comments.emit(tracks),
-            "clear_track_num":  lambda tracks: self.clear_track_num.emit(tracks),
-            "clear_year":       lambda tracks: self.clear_year.emit(tracks),
-            "clear_genre":      lambda tracks: self.clear_genre.emit(tracks),
-            "clear_title":      lambda tracks: self.clear_title.emit(tracks),
-            "clear_artist":     lambda tracks: self.clear_artist.emit(tracks),
-            "clear_album":      lambda tracks: self.clear_album.emit(tracks),
-            "clear_album_artist": lambda tracks: self.clear_album_artist.emit(tracks),
-            "clean_filename":   lambda tracks: self.clean_filename.emit(tracks),
-            "strip_filename_numbering": lambda tracks: self.strip_filename_numbering.emit(tracks),
-        }
-        op_defs_by_key = {key: (label_key, desc_key) for key, label_key, desc_key in MAGIC_OP_DEFS}
-
-        def run_for_checked(handler) -> None:
-            tracks = self._workspace.edit_scope()
-            if not tracks:
-                self._refresh_checked_scope_state()
-                return
-            handler(tracks)
-
-        def add_row(key: str) -> None:
-            label_key, desc_key = op_defs_by_key[key]
-            label = t(label_key)
-            desc  = t(desc_key)
-            row = OpRow(label)
-            if key in op_handlers:
-                row.clicked.connect(lambda handler=op_handlers[key]: run_for_checked(handler))
-
-            if key in ("strip_junk", "clean_filename"):
-                cfg_btn = self._make_op_side_button("", t("meta_clean_cfg_tooltip"), accent=True)
-                cfg_btn.setIcon(FluentIcon.SETTING.icon())
-                cfg_btn.setIconSize(QSize(14, 14))
-                a11y.describe(cfg_btn, t("meta_a11y_configure_action", action=label),
-                              description=t("meta_clean_cfg_tooltip"))
-                cfg_btn.clicked.connect(self._on_clean_settings)
-                row.add_side_button(cfg_btn)
-
-            info_btn = self._make_op_side_button("", desc)
-            info_btn.setIcon(FluentIcon.INFO.icon())
-            info_btn.setIconSize(QSize(14, 14))
-            # A short name to announce, the full explanation as the description:
-            # the raw tooltip is a paragraph and makes a poor accessible name.
-            a11y.describe(info_btn, t("meta_a11y_about_action", action=label),
-                          description=desc)
-            info_btn.clicked.connect(lambda _, l=label, d=desc: self._show_info(l, d))
-            row.add_side_button(info_btn)
-
-            grp_layout.addWidget(row)
-            self._op_rows.append(row)
-
-        if sections is not None:
-            for i, (subheader_key, keys) in enumerate(sections):
-                header = QLabel(t(subheader_key))
-                header.setStyleSheet(
-                    f"color: {get_colors().text_tertiary}; font-size: 11px; font-weight: bold;"
-                    f"{'margin-top: 4px;' if i else ''}"
-                )
-                grp_layout.addWidget(header)
-                for key in keys:
-                    add_row(key)
-        else:
-            allowed = set(op_keys) if op_keys is not None else None
-            for key, _, _ in MAGIC_OP_DEFS:
-                if allowed is not None and key not in allowed:
-                    continue
-                add_row(key)
-
-        self._refresh_op_rows_style()
-        self._refresh_checked_scope_state()
-        return container
-
-    def _on_clean_settings(self) -> None:
-        dlg = CleanSettingsDialog(self._cfg, self)
-        dlg.exec()
-
-    def _show_info(self, title: str, desc: str) -> None:
-        show_info(self, title, desc)
-
-    def _request_delete_files(self, paths: list[Path]) -> None:
-        """Single-confirm Recycle Bin send for selected table rows.
-
-        Called from `ExplorerFileListView.keyPressEvent` on Delete. Emits
-        `delete_files_requested` only after the user confirms — the actual
-        send2trash + rescan is owned by `MetadataController.delete_files`.
-        """
-        if not paths:
-            return
-        if confirm(
-            self.window(),
-            t("meta_delete_to_trash_title"),
-            t("meta_delete_to_trash_body", n=len(paths)),
-            accept_text=t("meta_delete_to_trash_confirm"),
-            cancel_text=t("cancel_btn"),
-            danger=True,
-        ):
-            result = self._run_file_operation("recycle_paths", list(paths))
-            if result is None:
-                return
-            deleted = [outcome.source for outcome in result.succeeded]
-            if deleted:
-                self._model.remove_paths(deleted)
-                self._rebuild_tree_from_loaded_tracks()
-                self._update_summary()
-                self._refresh_checked_scope_state()
-
-    def _on_table_context_menu(self, pos: QPoint) -> None:
-        index = self._table.indexAt(pos)
-        if index.isValid() and not self._table.selectionModel().isSelected(index):
-            self._table.selectRow(index.row())
-            self._table.setCurrentIndex(index)
-        tracks = self._get_selected_tracks()
-        if not tracks:
-            return
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        open_action = menu.addAction(t("meta_open_file"))
-        reveal_action = menu.addAction(t("meta_reveal_in_explorer"))
-        copy_action = menu.addAction(t("meta_copy_path"))
-        menu.addSeparator()
-        rename_action = menu.addAction(t("meta_rename_menu")) if len(tracks) == 1 else None
-        move_action = menu.addAction(t("meta_move_menu"))
-        properties_action = menu.addAction(t("meta_properties"))
-        menu.addSeparator()
-        delete_action = menu.addAction(t("meta_delete_menu"))
-        action = menu.exec(self._table.viewport().mapToGlobal(pos))
-        if action == open_action:
-            self._open_tracks(tracks)
-        elif action == reveal_action:
-            self._reveal_tracks(tracks)
-        elif action == copy_action:
-            self._copy_paths(tracks)
-        elif rename_action is not None and action == rename_action:
-            self._rename_tracks(tracks)
-        elif action == move_action:
-            self._move_tracks(tracks)
-        elif action == properties_action:
-            self._show_properties(tracks)
-        elif action == delete_action:
-            self._request_delete_files([track.path for track in tracks])
-
-    def _open_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        self._perform_track_operation(tracks, self._file_operations.open_file)
-
-    def _reveal_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        self._perform_track_operation(tracks, self._file_operations.reveal_in_explorer)
-
-    def _copy_paths(self, tracks: list[AudioTrackItem]) -> None:
-        try:
-            paths = [self._file_operations.copy_path(track.path) for track in tracks]
-        except FileOperationError as exc:
-            show_warning(self, t("meta_error_title"), str(exc))
-            return
-        QApplication.clipboard().setText("\n".join(paths))
-
-    def _rename_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        if len(tracks) != 1:
-            return
-        track = tracks[0]
-        new_name, ok = get_text(self, t("meta_rename_dialog_title"), t("meta_rename_prompt"), text=track.path.name)
-        if not ok or not new_name.strip():
-            return
-        result = self._run_file_operation("rename_path", track.path, new_name)
-        if result is None or not result.succeeded:
-            return
-        destination = result.succeeded[0].destination
-        if track.proposed_filename == destination.name:
-            track.proposed_filename = None
-        self._model.update_file_path(track, destination)
-        self._rebuild_tree_from_loaded_tracks()
-        self._refresh_checked_scope_state()
-
-    def _move_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        if not self._root_folder:
-            return
-        folder = QFileDialog.getExistingDirectory(self, t("meta_move_choose_folder"), str(self._root_folder))
-        if not folder:
-            return
-        by_path = {track.path: track for track in tracks}
-        result = self._run_file_operation(
-            "move_paths", list(by_path), Path(folder))
-        if result is None:
-            return
-        for outcome in result.succeeded:
-            track = by_path.get(outcome.source)
-            if track is not None:
-                self._model.update_file_path(track, outcome.destination)
-        if result.succeeded:
-            self._rebuild_tree_from_loaded_tracks()
-            self._refresh_checked_scope_state()
-
-    def _show_properties(self, tracks: list[AudioTrackItem]) -> None:
-        lines: list[str] = []
-        for track in tracks:
-            try:
-                props = self._file_operations.properties(track.path)
-            except FileOperationError as exc:
-                lines.append(str(exc))
-                continue
-            lines.append(t("meta_properties_item", name=props.path.name, path=str(props.path), size=isolate_number(f"{props.size_bytes:,}"), modified=isolate_number(display_timestamp(props.modified_at))))
-        if lines:
-            show_info(self, t("meta_properties"), "\n\n".join(lines))
-
-    def _perform_track_operation(self, tracks: list[AudioTrackItem], operation) -> None:
-        errors: list[str] = []
-        for track in tracks:
-            try:
-                operation(track.path)
-            except FileOperationError as exc:
-                errors.append(str(exc))
-        if errors:
-            show_warning(self, t("meta_error_title"), "\n".join(errors))
 
     # ── Toolbar handlers ──────────────────────────────────────────────────────
 
@@ -2839,7 +2058,7 @@ class MetadataEditorPanel(QWidget):
         if not candidates:
             blocked = self._workspace.apply_blockers()
             if blocked:
-                show_warning(
+                prompts.show_warning(
                     self, t("meta_apply_blocked_title"),
                     t("meta_external_apply_blocked", n=len(blocked)))
                 self._workspace.set_selected_items([blocked[0]])
@@ -3000,7 +2219,7 @@ class MetadataEditorPanel(QWidget):
             messages = [blocked.get((record.item_id, record.field))
                         for record in selected if blocked.get((record.item_id, record.field))]
             if messages:
-                show_warning(dialog, t("meta_review_blocker_details"), "\n".join(sorted(set(messages))))
+                prompts.show_warning(dialog, t("meta_review_blocker_details"), "\n".join(sorted(set(messages))))
         details.clicked.connect(show_blocker_details)
         for button in (include, exclude, revert_field, revert_file, revert_filename,
                        revert_artwork, revert_lyrics, revert_replaygain, revert_all, details):
@@ -3084,19 +2303,19 @@ class MetadataEditorPanel(QWidget):
         try:
             records = load_tag_backup(Path(path))
         except Exception as exc:
-            show_warning(
+            prompts.show_warning(
                 self, t("md_restore_invalid_title"), t("md_restore_invalid_msg"),
                 details=str(exc),
             )
             return
         if not records:
-            show_warning(self, t("md_restore_invalid_title"), t("md_restore_empty_msg"))
+            prompts.show_warning(self, t("md_restore_invalid_title"), t("md_restore_empty_msg"))
             return
 
         existing = [p for p, _tags in records if p.exists()]
         missing_n = len(records) - len(existing)
         if not existing:
-            show_warning(self, t("md_restore_invalid_title"),
+            prompts.show_warning(self, t("md_restore_invalid_title"),
                          t("md_restore_all_missing_msg"))
             return
 
@@ -3108,7 +2327,7 @@ class MetadataEditorPanel(QWidget):
             names += "\n" + t("md_restore_more_files", n=len(existing) - 10)
         msg += "\n\n" + names
 
-        if confirm(
+        if prompts.confirm(
             self,
             t("md_restore_confirm_title"),
             msg,
@@ -3147,10 +2366,10 @@ class MetadataEditorPanel(QWidget):
             for o in outcomes if o.status in (RestoreStatus.FAILED, RestoreStatus.MISSING)
         )
         if failed:
-            show_warning(self, t("md_restore_summary_title"), summary,
+            prompts.show_warning(self, t("md_restore_summary_title"), summary,
                          details=problem_lines)
         else:
-            show_info(self, t("md_restore_summary_title"), summary,
+            prompts.show_info(self, t("md_restore_summary_title"), summary,
                       details=problem_lines)
 
         if self._root_folder:
@@ -3410,7 +2629,7 @@ class MetadataEditorPanel(QWidget):
         for field_name in completed:
             self._insp_draft_values.pop(field_name, None)
         if invalid and show_invalid:
-            show_warning(
+            prompts.show_warning(
                 self.window(),
                 t("meta_inspector_invalid_value_title"),
                 t("meta_inspector_invalid_value_body", fields=", ".join(invalid)),
@@ -3512,7 +2731,7 @@ class MetadataEditorPanel(QWidget):
         try:
             entry = load_artwork_file(path)
         except ArtworkValidationError as exc:
-            show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key))
+            prompts.show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key))
             return
         result = (self._inspector_state.propose_add_artwork(tracks, entry)
                   if add else self._inspector_state.propose_set(tracks, ARTWORK_FIELD, entry))
@@ -3539,7 +2758,7 @@ class MetadataEditorPanel(QWidget):
         tracks = self._get_selected_tracks()
         image = QApplication.clipboard().image() if tracks else QPixmap()
         if image.isNull():
-            show_warning(self.window(), t("meta_inspector_artwork_section"), t("meta_artwork_invalid_image"))
+            prompts.show_warning(self.window(), t("meta_inspector_artwork_section"), t("meta_artwork_invalid_image"))
             return
         payload = QByteArray(); buffer = QBuffer(payload); buffer.open(QBuffer.WriteOnly)
         image.save(buffer, "PNG"); buffer.close()
@@ -3547,7 +2766,7 @@ class MetadataEditorPanel(QWidget):
         try:
             entry = validate_artwork_bytes(bytes(payload))
         except ArtworkValidationError as exc:
-            show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key)); return
+            prompts.show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key)); return
         self._after_inspector_proposal(tracks, self._inspector_state.propose_set(tracks, ARTWORK_FIELD, entry), ChangeOrigin.ARTWORK_REPLACE)
 
     def _on_artwork_export(self) -> None:
@@ -3561,7 +2780,7 @@ class MetadataEditorPanel(QWidget):
         try:
             export_artwork_entries(Path(destination), tracks[0].path.stem, tracks[0].original.artwork.entries)
         except ArtworkValidationError as exc:
-            show_warning(self.window(), t("meta_artwork_export_title"), t(exc.key))
+            prompts.show_warning(self.window(), t("meta_artwork_export_title"), t(exc.key))
 
     def _on_replaygain_clear_track(self) -> None:
         self._propose_replaygain_clear({REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK})
@@ -3609,7 +2828,7 @@ class MetadataEditorPanel(QWidget):
             + "\n".join(f"  \u2068{track.path.name}\u2069" for track in group.tracks)
             for group in groups
         )
-        if confirm(
+        if prompts.confirm(
             self.window(),
             t("meta_replaygain_album_confirm_title"),
             t(
@@ -3651,222 +2870,6 @@ class MetadataEditorPanel(QWidget):
                 self._cfg.magic_auto_ops = list(self._auto_ops)
                 self._cfg.save()
 
-    def _on_section_moved(self, logical: int, old_visual: int, new_visual: int) -> None:
-        """Keep Name pinned first and the fixed empty gutter pinned last."""
-        hdr = self._table.horizontalHeader()
-
-        target_gutter_visual = COLUMN_COUNT - 1
-        if hdr.visualIndex(COL_CHECK) != target_gutter_visual:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_CHECK), target_gutter_visual)
-            finally:
-                hdr.blockSignals(False)
-
-        if logical == COL_FILENAME and new_visual != 0:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_FILENAME), 0)
-            finally:
-                hdr.blockSignals(False)
-        elif new_visual == 0 and logical != COL_FILENAME:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_FILENAME), 0)
-            finally:
-                hdr.blockSignals(False)
-
-        self._save_column_order()
-        self._fill_leftover_space()
-
-    def _fill_leftover_space(self) -> None:
-        """Grow the visually-last real content column to absorb any leftover
-        viewport width, so there's never blank space with no column in it.
-
-        COL_CHECK is pinned to the trailing edge as a deliberate thin gutter
-        (mirrors the empty-area margin on the leading edge). Deliberately a
-        *one-time* width top-up via `resizeSection` rather than Qt's
-        `Stretch` resize mode — Stretch permanently locks that column so the
-        user can no longer drag it narrower, which just traded "dead space"
-        for "a column you can't resize". This recomputes (and can grow OR
-        shrink the filler column) whenever the viewport, column set, or
-        column order changes, but a manual drag on any column in between
-        those events is left alone.
-        """
-        hdr = self._table.horizontalHeader()
-        best_col = self._visual_filler_column()
-        if best_col is None:
-            return
-
-        others_total = sum(
-            hdr.sectionSize(c) for c in range(COLUMN_COUNT)
-            if c != best_col and not self._table.isColumnHidden(c)
-        )
-        target_width = max(40, self._table.viewport().width() - others_total)
-        if target_width == hdr.sectionSize(best_col):
-            return
-
-        prev_ignore = self._ignore_header_resize
-        self._ignore_header_resize = True
-        try:
-            hdr.resizeSection(best_col, target_width)
-        finally:
-            self._ignore_header_resize = prev_ignore
-
-    def _visual_filler_column(self) -> int | None:
-        """The visually-last visible content column — the one that absorbs
-        leftover viewport width in _fill_leftover_space()."""
-        hdr = self._table.horizontalHeader()
-        best_col, best_visual = None, -1
-        for col in range(COLUMN_COUNT):
-            if col == COL_CHECK or self._table.isColumnHidden(col):
-                continue
-            visual = hdr.visualIndex(col)
-            if visual > best_visual:
-                best_visual, best_col = visual, col
-        return best_col
-
-    def _refresh_table_geometry_after_column_resize(self) -> None:
-        if not hasattr(self, "_table"):
-            return
-        hdr = self._table.horizontalHeader()
-        sb = self._table.horizontalScrollBar()
-        self._table.updateGeometries()
-        hdr.viewport().repaint()
-        self._table.viewport().repaint()
-        sb.update()
-
-    def _refresh_after_manual_column_resize(self) -> None:
-        self._refresh_table_geometry_after_column_resize()
-
-    def _flush_geometry_save(self) -> None:
-        """Debounce target — cfg fields were updated in-memory by the geometry
-        handlers; this writes them to disk once the burst has settled."""
-        if self._cfg:
-            self._cfg.save()
-
-    def _save_column_order(self) -> None:
-        if self._cfg:
-            hdr = self._table.horizontalHeader()
-            order = []
-            for visual_idx in range(COLUMN_COUNT):
-                logical_idx = hdr.logicalIndex(visual_idx)
-                order.append(logical_idx)
-            self._cfg.tag_editor_column_order = order
-            self._cfg.save()
-
-    def _on_section_resized(self, logical: int, old_size: int, new_size: int) -> None:
-        if getattr(self, "_ignore_header_resize", False):
-            return
-        if logical == COL_CHECK:
-            return
-
-        factor = self._zoom_level / 100.0
-        if factor <= 0:
-            factor = 1.0
-
-        base_width = int(new_size / factor)
-        if self._cfg:
-            widths = dict(self._cfg.tag_editor_column_widths)
-            widths[str(logical)] = base_width
-            self._cfg.tag_editor_column_widths = widths
-            self._geometry_save_timer.start()
-
-        self._refresh_after_manual_column_resize()
-
-    def _on_sort_indicator_changed(self, column: int, order: Qt.SortOrder) -> None:
-        hdr = self._table.horizontalHeader()
-        if column == COL_CHECK:
-            hdr.setSortIndicatorShown(False)
-            if self._cfg:
-                self._cfg.tag_editor_sort_column = -1
-                self._cfg.save()
-            return
-
-        hdr.setSortIndicatorShown(column != -1)
-        if self._cfg:
-            self._cfg.tag_editor_sort_column = column
-            order_val = order.value if hasattr(order, 'value') else int(order)
-            self._cfg.tag_editor_sort_order = int(order_val)
-            self._cfg.save()
-
-    def _save_column_visibility(self) -> None:
-        if self._cfg:
-            hidden_cols = []
-            for col in range(COLUMN_COUNT):
-                if self._table.isColumnHidden(col):
-                    hidden_cols.append(col)
-            self._cfg.tag_editor_column_visibility = hidden_cols
-            self._cfg.save()
-
-    def _set_column_hidden(self, col: int, hide: bool) -> None:
-        self._table.setColumnHidden(col, hide)
-        self._save_column_visibility()
-        self._fill_leftover_space()
-
-    def _on_header_context_menu(self, pos) -> None:
-        from PySide6.QtWidgets import QMenu
-
-        # Short "common" column list — mirrors the Windows Explorer header
-        # right-click menu (5-7 items, not the full attribute sheet).
-        COMMON_COLS = [
-            COL_FILENAME,      # Name  — always visible
-            COL_TITLE_NEW,     # Title (new)
-            COL_ARTIST_NEW,    # Artist (new)
-            COL_ALBUM_NEW,     # Album (new)
-            COL_TRACK_NEW,     # Track (new)
-            COL_FILENAME_NEW,  # Filename (new)
-        ]
-        ALWAYS_VISIBLE = {COL_FILENAME}
-
-        menu = QMenu(self)
-        for col in COMMON_COLS:
-            key = _HEADER_KEYS[col] if col < len(_HEADER_KEYS) else ""
-            lbl = t(key) if key else ""
-            if not lbl:
-                continue
-            action = menu.addAction(lbl)
-            action.setCheckable(True)
-            action.setChecked(not self._table.isColumnHidden(col))
-            if col in ALWAYS_VISIBLE:
-                action.setEnabled(False)
-            else:
-                action.triggered.connect(
-                    lambda checked, c=col: self._set_column_hidden(c, not checked)
-                )
-
-        menu.addSeparator()
-        menu.addAction(t("mt_size_all_to_fit")).triggered.connect(
-            self._size_all_columns_to_fit
-        )
-        menu.addSeparator()
-        menu.addAction(t("mt_more_columns")).triggered.connect(self._on_more_columns)
-
-        menu.exec(self._table.horizontalHeader().mapToGlobal(pos))
-
-    def _size_all_columns_to_fit(self) -> None:
-        """Resize every visible column to its content width (Win11 'Best fit')."""
-        for col in range(COLUMN_COUNT):
-            if not self._table.isColumnHidden(col):
-                self._table.resizeColumnToContents(col)
-        # Best-fit can leave a gap at the trailing edge — re-settle the filler.
-        self._fill_leftover_space()
-
-    def _size_column_to_fit(self, col: int) -> None:
-        """Resize one visible content column to fit its header/cells."""
-        if col == COL_CHECK or col < 0 or col >= COLUMN_COUNT:
-            return
-        if self._table.isColumnHidden(col):
-            return
-
-        self._table.resizeColumnToContents(col)
-        self._fill_leftover_space()
-
-    def _on_more_columns(self) -> None:
-        dlg = MoreColumnsDialog(self._table, self)
-        if dlg.exec() == QDialog.Accepted:
-            self._save_column_visibility()
-            self._fill_leftover_space()
 
     # ── Public slots (wired by AppWindow) ─────────────────────────────────────
 
@@ -4011,7 +3014,7 @@ class MetadataEditorPanel(QWidget):
 
     def on_conflict_resolution_finished(self, summary) -> None:
         if summary is not None and not summary.accepted:
-            show_warning(
+            prompts.show_warning(
                 self, t("meta_external_resolution_failed_title"),
                 t("meta_external_resolution_failed", detail=summary.diagnostic))
         self._update_summary()
@@ -4189,7 +3192,7 @@ class MetadataEditorPanel(QWidget):
             self.recover_requested.emit(summary)
         elif clicked is forget_btn:
             # Destructive: require an explicit second confirmation.
-            if confirm(
+            if prompts.confirm(
                 self, t("md_recovery_forget_title"), t("md_recovery_forget_msg"),
                 accept_text=t("md_recovery_forget_btn"), danger=True,
             ):
@@ -5038,185 +4041,6 @@ class MetadataEditorPanel(QWidget):
         # (or overshoot the viewport) — re-settle the filler column last.
         self._fill_leftover_space()
 
-    def _on_tree_item_moved(self, src: Path, dest: Path) -> None:
-        """Physically moves a file or folder on the disk, and updates UI.
-
-        The controller owns the lifecycle guard, the evidence and the
-        reconciliation; the panel only rebases what it displays afterwards.
-        """
-        result = self._run_file_operation("move_paths", [src], Path(dest).parent)
-        if result is not None and result.succeeded:
-            self._rebase_loaded_paths(src, result.succeeded[0].destination)
-
-    def _on_tree_context_menu(self, pos: QPoint) -> None:
-        item = self._tree.itemAt(pos)
-        if not item:
-            return
-
-        path_str = item.data(0, Qt.UserRole)
-        if not path_str:
-            return
-        path = Path(path_str)
-        is_file = item.data(0, self._ROLE_IS_FILE)
-        add_folder_action = None
-
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        open_action = menu.addAction(t("meta_open_file")) if is_file else None
-        reveal_action = menu.addAction(t("meta_reveal_in_explorer"))
-        copy_action = menu.addAction(t("meta_copy_path"))
-        properties_action = menu.addAction(t("meta_properties"))
-        menu.addSeparator()
-        if not is_file:
-            add_folder_action = menu.addAction(FluentIcon.FOLDER_ADD.icon(), t("meta_add_folder"))
-            menu.addSeparator()
-
-        rename_action = menu.addAction(FluentIcon.EDIT.icon(), t("meta_rename_menu"))
-        move_action = menu.addAction(t("meta_move_menu"))
-        delete_action = menu.addAction(FluentIcon.DELETE.icon(), t("meta_delete_menu"))
-
-        action = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if open_action is not None and action == open_action:
-            self._perform_path_operation([path], self._file_operations.open_file)
-        elif action == reveal_action:
-            self._perform_path_operation([path], self._file_operations.reveal_in_explorer)
-        elif action == copy_action:
-            self._copy_tree_path(path)
-        elif action == properties_action:
-            self._show_path_properties(path)
-        elif add_folder_action is not None and action == add_folder_action:
-            self._on_tree_add_folder(path)
-        elif action == rename_action:
-            self._on_tree_rename(path, is_file)
-        elif action == move_action:
-            self._move_tree_path(path)
-        elif action == delete_action:
-            self._on_tree_delete(path, is_file)
-
-    def _on_tree_add_folder(self, parent_path: Path) -> None:
-        new_name, ok = get_text(
-            self,
-            t("meta_new_folder_dialog_title"),
-            t("meta_new_folder_prompt"),
-            text=t("meta_new_folder_default"),
-        )
-        if not ok or not new_name.strip():
-            return
-
-        result = self._run_file_operation("create_folder", parent_path, new_name)
-        if result is not None and result.succeeded:
-            self._rebuild_tree_from_loaded_tracks()
-            self._get_or_create_folder_item(result.succeeded[0].destination)
-
-    def _on_tree_rename(self, path: Path, is_file: bool) -> None:
-        new_name, ok = get_text(
-            self,
-            t("meta_rename_dialog_title"),
-            t("meta_rename_prompt"),
-            text=path.name,
-        )
-        if not ok or not new_name.strip():
-            return
-
-        result = self._run_file_operation("rename_path", path, new_name)
-        if result is not None and result.succeeded:
-            self._rebase_loaded_paths(path, result.succeeded[0].destination)
-
-    def _on_tree_delete(self, path: Path, is_file: bool) -> None:
-        title = t("meta_delete_file_title") if is_file else t("meta_delete_folder_title")
-        text = t("meta_delete_confirm", name=path.name)
-        if not is_file:
-            text += t("meta_delete_recursive_note")
-
-        if not confirm(self, title, text, accept_text=t("meta_delete_menu"),
-                       cancel_text=t("cancel_btn"), danger=True):
-            return
-        result = self._run_file_operation("recycle_paths", [path])
-        if result is None or not result.succeeded:
-            return
-        removed = [track.path for track in self._model.get_all_tracks()
-                   if track.path == path or self._is_path_within(track.path, path)]
-        self._model.remove_paths(removed)
-        self._navigation.reconcile_after_delete(path)
-        self._rebuild_tree_from_loaded_tracks()
-        self._apply_navigation_filter()
-        self._update_summary()
-        self._refresh_checked_scope_state()
-
-    def _move_tree_path(self, path: Path) -> None:
-        if not self._root_folder:
-            return
-        folder = QFileDialog.getExistingDirectory(self, t("meta_move_choose_folder"), str(self._root_folder))
-        if not folder:
-            return
-        destination = Path(folder) / path.name
-        self._on_tree_item_moved(path, destination)
-
-    def _copy_tree_path(self, path: Path) -> None:
-        try:
-            QApplication.clipboard().setText(self._file_operations.copy_path(path))
-        except FileOperationError as exc:
-            show_warning(self, t("meta_error_title"), str(exc))
-
-    def _show_path_properties(self, path: Path) -> None:
-        try:
-            props = self._file_operations.properties(path)
-        except FileOperationError as exc:
-            show_warning(self, t("meta_error_title"), str(exc))
-            return
-        show_info(self, t("meta_properties"), t("meta_properties_item", name=props.path.name, path=str(props.path), size=isolate_number(f"{props.size_bytes:,}"), modified=isolate_number(display_timestamp(props.modified_at))))
-
-    def _perform_path_operation(self, paths: list[Path], operation) -> None:
-        errors: list[str] = []
-        for path in paths:
-            try:
-                operation(path)
-            except FileOperationError as exc:
-                errors.append(str(exc))
-        if errors:
-            show_warning(self, t("meta_error_title"), "\n".join(errors))
-
-    @staticmethod
-    def _is_path_within(path: Path, parent: Path) -> bool:
-        try:
-            path.relative_to(parent)
-            return True
-        except ValueError:
-            return False
-
-    def _rebase_loaded_paths(self, source: Path, destination: Path) -> None:
-        self._navigation.remap_folder(source, destination)
-        for track in self._model.get_all_tracks():
-            try:
-                relative = track.path.relative_to(source)
-            except ValueError:
-                continue
-            new_path = destination / relative
-            if track.proposed_filename == new_path.name:
-                track.proposed_filename = None
-            self._model.update_file_path(track, new_path)
-        self._rebuild_tree_from_loaded_tracks()
-        self._apply_navigation_filter()
-
-    def _rebuild_tree_from_loaded_tracks(self) -> None:
-        if not self._root_folder:
-            return
-        was_blocked = self._tree.blockSignals(True)
-        self._tree.setUpdatesEnabled(False)
-        self._ignore_tree_changes = True
-        try:
-            self._tree.clear()
-            self._folder_items.clear()
-            self._file_items.clear()
-            self._ensure_root_item()
-            self._add_many_to_tree(self._model.get_all_tracks())
-            current = self._navigation.current
-            if current is not None and current.is_dir():
-                self._get_or_create_folder_item(current)
-        finally:
-            self._ignore_tree_changes = False
-            self._tree.blockSignals(was_blocked)
-            self._tree.setUpdatesEnabled(True)
 
     def closeEvent(self, event) -> None:
         if not self.shutdown_artwork_workers():

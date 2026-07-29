@@ -4,8 +4,33 @@ ui/panels/metadata_editor/widgets.py  –  small Tag Editor building blocks
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
+
+
+class ArtworkDropPreview(QLabel):
+    """Dedicated, narrow image drop target; never intercepts table drops."""
+    def __init__(self, callback, parent=None) -> None:
+        super().__init__(parent)
+        self._callback = callback
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if len(urls) == 1 and urls[0].isLocalFile() and Path(urls[0].toLocalFile()).suffix.lower() in {".jpg", ".jpeg", ".png"}:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if len(urls) == 1 and urls[0].isLocalFile():
+            self._callback(Path(urls[0].toLocalFile()))
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 
 class OpRow(QFrame):
