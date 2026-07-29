@@ -3831,6 +3831,57 @@ TRANSLATIONS["en"].update(_FILESYSTEM_MONITORING_TEXTS_EN)
 TRANSLATIONS["he"].update(_FILESYSTEM_MONITORING_TEXTS_HE)
 
 
+# ── Tag Editor redesign: slim toolbar, "More" menu, and the pending-work footer ──
+_TAG_EDITOR_SHELL_TEXTS_EN = {
+    # Toolbar
+    "meta_shell_more": "More",
+    "meta_shell_more_tooltip": "Import, export, backups and restore",
+    "meta_shell_active_folder": "Active folder",
+    "meta_shell_no_folder": "No folder selected",
+    "meta_shell_rescan": "Rescan folder",
+    "meta_shell_rescan_tooltip": "Read the whole folder again from disk",
+    "meta_shell_refresh_menu": "Refresh options",
+    "meta_a11y_search_scope_note": "Filters which files are listed. It does not change what Apply writes.",
+    # Footer — idle
+    "meta_footer_ready": "Ready — nothing is waiting to be applied",
+    "meta_footer_loaded": "{total} files loaded",
+    # Footer — pending work
+    "meta_footer_pending": "{changes} pending changes in {files} files",
+    "meta_footer_pending_one_file": "{changes} pending changes in one file",
+    "meta_footer_backup_note": "A tag backup is created before writing",
+    "meta_footer_blocked_note": "{n} blocked",
+    "meta_footer_excluded_note": "{n} excluded",
+    "meta_footer_a11y": "Pending changes and apply actions",
+    "meta_footer_count_a11y": "{n} pending changes",
+}
+
+_TAG_EDITOR_SHELL_TEXTS_HE = {
+    # Toolbar
+    "meta_shell_more": "עוד",
+    "meta_shell_more_tooltip": "ייבוא, ייצוא, גיבויים ושחזור",
+    "meta_shell_active_folder": "התיקייה הפעילה",
+    "meta_shell_no_folder": "לא נבחרה תיקייה",
+    "meta_shell_rescan": "סרוק מחדש",
+    "meta_shell_rescan_tooltip": "קריאה מחדש של כל התיקייה מהדיסק",
+    "meta_shell_refresh_menu": "אפשרויות רענון",
+    "meta_a11y_search_scope_note": "מסנן אילו קבצים מוצגים. אינו משנה את מה שההחלה כותבת.",
+    # Footer — idle
+    "meta_footer_ready": "מוכן — שום שינוי אינו ממתין להחלה",
+    "meta_footer_loaded": "{total} קבצים נטענו",
+    # Footer — pending work
+    "meta_footer_pending": "{changes} שינויים ממתינים ב־{files} קבצים",
+    "meta_footer_pending_one_file": "{changes} שינויים ממתינים בקובץ אחד",
+    "meta_footer_backup_note": "גיבוי תגיות ייווצר לפני הכתיבה",
+    "meta_footer_blocked_note": "{n} חסומים",
+    "meta_footer_excluded_note": "{n} הוחרגו",
+    "meta_footer_a11y": "שינויים ממתינים ופעולות החלה",
+    "meta_footer_count_a11y": "{n} שינויים ממתינים",
+}
+
+TRANSLATIONS["en"].update(_TAG_EDITOR_SHELL_TEXTS_EN)
+TRANSLATIONS["he"].update(_TAG_EDITOR_SHELL_TEXTS_HE)
+
+
 def render_preflight_warnings(warnings) -> str:
     """Render startup preflight warnings in the active UI language.
 

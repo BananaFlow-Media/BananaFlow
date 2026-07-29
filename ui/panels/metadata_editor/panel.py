@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -72,6 +73,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 from qfluentwidgets import FluentIcon
 
@@ -447,6 +449,14 @@ class MetadataEditorPanel(
         root_layout.addWidget(self._toolbar_sep)
 
         root_layout.addWidget(self._build_body(), stretch=1)
+
+        self._footer_sep = QFrame()
+        self._footer_sep.setFrameShape(QFrame.Shape.HLine)
+        self._footer_sep.setFixedHeight(1)
+        self._footer_sep.setStyleSheet(f"background: {get_colors().border}; border: none;")
+        root_layout.addWidget(self._footer_sep)
+        root_layout.addWidget(self._build_footer())
+        self._refresh_footer()
 
         from ui.theme_manager import ThemeManager as _TM
         _tm = _TM.instance()
@@ -879,78 +889,83 @@ class MetadataEditorPanel(
         return container
 
     def _build_toolbar(self) -> QFrame:
+        """Slim toolbar: what you act on, not what you do to it.
+
+        Everything that operates on *pending changes* (undo/redo, review,
+        revert, apply) moved to the footer, next to the count it acts on.
+        Everything that operates on *stored data* (import/export, backups,
+        restore) moved behind "More". What is left is the folder itself.
+        """
         bar = QFrame()
-        bar.setFixedHeight(64)
-        bar.setLayoutDirection(Qt.LeftToRight)
+        bar.setObjectName("tagEditorToolbar")
+        bar.setFixedHeight(56)
         self._toolbar_bar = bar
 
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
-        self._io_btn = self._make_toolbar_action(
-            "meta_io_toolbar", FluentIcon.DOCUMENT, self._on_metadata_io
-        )
-        self._io_btn.setToolTip(t("meta_io_subtitle"))
-        self._io_btn.setAccessibleName(t("meta_io_title"))
-        layout.addWidget(self._io_btn)
-
-        self._restore_btn = self._make_toolbar_action(
-            "meta_restore_btn", FluentIcon.HISTORY, self._on_restore_from_backup
-        )
-        self._restore_btn.setToolTip(t("meta_restore_tooltip"))
-        layout.addWidget(self._restore_btn)
-
-        self._backup_manager_btn = self._make_toolbar_action(
-            "meta_backup_manager", FluentIcon.FOLDER, self._on_backup_manager
-        )
-        layout.addWidget(self._backup_manager_btn)
-
-        self._undo_btn = self._make_toolbar_action(
-            "meta_undo_changes", FluentIcon.RETURN, self.undo_requested.emit, enabled=False
-        )
-        self._undo_btn.setShortcut("Ctrl+Z")
-        layout.addWidget(self._undo_btn)
-        self._redo_btn = self._make_toolbar_action(
-            "meta_redo_changes", FluentIcon.SYNC, self.redo_requested.emit, enabled=False
-        )
-        self._redo_btn.setShortcut("Ctrl+Y")
-        layout.addWidget(self._redo_btn)
-
-        self._review_btn = self._make_toolbar_action(
-            "meta_review_changes", FluentIcon.VIEW, self._on_review_changes, enabled=False
-        )
-        self._review_btn.setShortcut("Ctrl+Shift+R")
-        layout.addWidget(self._review_btn)
-
-        self._revert_btn = self._make_toolbar_action(
-            "meta_revert_changes", FluentIcon.LEFT_ARROW, self._on_revert, enabled=False
-        )
-        layout.addWidget(self._revert_btn)
-
-        self._apply_btn = self._make_toolbar_action(
-            "meta_apply_changes", FluentIcon.SAVE, self._on_apply, enabled=False
-        )
-        layout.addWidget(self._apply_btn)
-
-        layout.addStretch()
-
-        self._monitoring_status = QLabel(t("meta_monitoring_disabled"))
-        self._monitoring_status.setAccessibleName(t("meta_monitoring_status"))
-        self._monitoring_status.setToolTip(t("meta_monitoring_status_tooltip"))
-        layout.addWidget(self._monitoring_status)
-        self._manual_refresh_btn = self._make_toolbar_action(
-            "meta_manual_refresh", FluentIcon.SYNC,
-            self.manual_refresh_requested.emit, enabled=False)
-        self._manual_refresh_btn.setAccessibleName(t("meta_manual_refresh"))
-        layout.addWidget(self._manual_refresh_btn)
-
-        layout.addWidget(self._make_auto_toolbar_action())
-
         self._browse_btn = self._make_toolbar_action(
             "meta_browse_folder", FluentIcon.FOLDER, self._on_browse
         )
         layout.addWidget(self._browse_btn)
+
+        # A path is not prose: it stays LTR and elides from the left so the
+        # folder name — the part that identifies it — survives truncation.
+        self._path_chip = QLabel(t("meta_shell_no_folder"))
+        self._path_chip.setObjectName("tagEditorPathChip")
+        self._path_chip.setLayoutDirection(Qt.LeftToRight)
+        self._path_chip.setTextFormat(Qt.PlainText)
+        self._path_chip.setMaximumWidth(260)
+        a11y.describe(self._path_chip, t("meta_shell_active_folder"))
+        layout.addWidget(self._path_chip)
+
+        self._monitoring_status = QLabel(t("meta_monitoring_disabled"))
+        self._monitoring_status.setObjectName("tagEditorMonitorBadge")
+        self._monitoring_status.setAccessibleName(t("meta_monitoring_status"))
+        self._monitoring_status.setToolTip(t("meta_monitoring_status_tooltip"))
+        layout.addWidget(self._monitoring_status)
+
+        # Two different refreshes behind one control: the click is the cheap
+        # incremental reconcile people press often; the full rescan re-reads
+        # the folder and is deliberately one step further away.
+        self._manual_refresh_btn = self._make_toolbar_action(
+            "meta_manual_refresh", FluentIcon.SYNC,
+            self.manual_refresh_requested.emit, enabled=False)
+        self._manual_refresh_btn.setAccessibleName(t("meta_manual_refresh"))
+        self._manual_refresh_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        refresh_menu = QMenu(self._manual_refresh_btn)
+        refresh_menu.setAccessibleName(t("meta_shell_refresh_menu"))
+        self._rescan_action = refresh_menu.addAction(t("meta_shell_rescan"))
+        self._rescan_action.setToolTip(t("meta_shell_rescan_tooltip"))
+        self._rescan_action.triggered.connect(self._on_scan)
+        self._refresh_menu = refresh_menu
+        self._manual_refresh_btn.setMenu(refresh_menu)
+        layout.addWidget(self._manual_refresh_btn)
+
+        # Auto-arrange still lives here; it moves into Tools > Auto arrange
+        # together with the rest of the inspector rework.
+        layout.addWidget(self._make_auto_toolbar_action())
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setPlaceholderText(t("meta_search_tracks"))
+        # Filtering changes what is listed, never what Apply writes, so the
+        # description says so rather than leaving it to be inferred.
+        a11y.describe(self._search_edit, t("meta_search_tracks"),
+                      description=t("meta_a11y_search_scope_note"))
+        self._search_edit.setMaximumWidth(250)
+        # Qt builds the inline clear button itself and leaves it unnamed, so a
+        # screen reader reaches an anonymous button at the end of the field.
+        for clear_button in self._search_edit.findChildren(QToolButton):
+            a11y.describe(clear_button, t("meta_a11y_clear_search"),
+                          tooltip=t("meta_a11y_clear_search"))
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        layout.addWidget(self._search_edit)
+
+        layout.addStretch()
+
+        layout.addWidget(self._build_more_button())
 
         self._scan_progress = QProgressBar()
         self._scan_progress.setFixedWidth(150)
@@ -968,6 +983,159 @@ class MetadataEditorPanel(
         self._summary_lbl.setVisible(False)
 
         return bar
+
+    def _build_footer(self) -> QFrame:
+        """Pending work and the actions that resolve it, in one place.
+
+        Apply's scope is every included, unblocked pending change — never the
+        selection and never what the filter happens to show. Putting the count
+        and the button side by side is the point: the number next to Apply is
+        the number Apply writes.
+        """
+        footer = QFrame()
+        footer.setObjectName("tagEditorFooter")
+        self._footer_bar = footer
+        a11y.describe(footer, t("meta_footer_a11y"))
+
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(9)
+
+        self._footer_count = QLabel("0")
+        self._footer_count.setObjectName("tagEditorFooterCount")
+        self._footer_count.setAlignment(Qt.AlignCenter)
+        self._footer_count.setFixedSize(30, 30)
+        layout.addWidget(self._footer_count)
+
+        self._footer_title = QLabel(t("meta_footer_ready"))
+        self._footer_title.setObjectName("tagEditorFooterTitle")
+        layout.addWidget(self._footer_title)
+
+        self._footer_desc = QLabel("")
+        self._footer_desc.setObjectName("tagEditorFooterDesc")
+        layout.addWidget(self._footer_desc)
+
+        layout.addStretch()
+
+        self._undo_btn = self._make_toolbar_action(
+            "meta_undo_changes", FluentIcon.RETURN, self.undo_requested.emit, enabled=False
+        )
+        self._undo_btn.setShortcut("Ctrl+Z")
+        layout.addWidget(self._undo_btn)
+
+        self._redo_btn = self._make_toolbar_action(
+            "meta_redo_changes", FluentIcon.SYNC, self.redo_requested.emit, enabled=False
+        )
+        self._redo_btn.setShortcut("Ctrl+Y")
+        layout.addWidget(self._redo_btn)
+
+        self._review_btn = self._make_toolbar_action(
+            "meta_review_changes", FluentIcon.VIEW, self._on_review_changes, enabled=False
+        )
+        self._review_btn.setShortcut("Ctrl+Shift+R")
+        # The shortcut is not discoverable from an icon-and-label button.
+        self._review_btn.setToolTip(
+            f'{t("meta_review_changes").strip()} (Ctrl+Shift+R)')
+        layout.addWidget(self._review_btn)
+
+        self._revert_btn = self._make_toolbar_action(
+            "meta_revert_changes", FluentIcon.LEFT_ARROW, self._on_revert, enabled=False
+        )
+        layout.addWidget(self._revert_btn)
+
+        self._apply_btn = self._make_toolbar_action(
+            "meta_apply_changes", FluentIcon.SAVE, self._on_apply, enabled=False
+        )
+        layout.addWidget(self._apply_btn)
+
+        return footer
+
+    def _refresh_footer(self) -> None:
+        """Mirror the apply scope into the footer's own summary."""
+        if not hasattr(self, "_footer_title"):
+            return
+        candidates = self._workspace.apply_candidates()
+        changed = self._workspace.changed_tracks()
+        blocked = self._workspace.apply_blockers()
+        excluded = self._workspace.excluded_tracks()
+        change_count = sum(
+            len(item.proposed.changed_fields(item.original)) + bool(item.proposed_filename)
+            for item in changed
+        )
+        file_count = len(changed)
+
+        has_work = bool(changed)
+        for widget in (self._footer_count, self._undo_btn, self._redo_btn,
+                       self._review_btn, self._revert_btn, self._apply_btn):
+            widget.setVisible(has_work)
+
+        if not has_work:
+            total = len(self._model.get_all_tracks())
+            self._footer_title.setText(t("meta_footer_ready"))
+            self._footer_desc.setText(
+                t("meta_footer_loaded", total=total) if total else "")
+            return
+
+        self._footer_count.setText(isolate_number(str(len(candidates))))
+        self._footer_count.setAccessibleName(
+            t("meta_footer_count_a11y", n=len(candidates)))
+        self._footer_title.setText(
+            t("meta_footer_pending_one_file", changes=change_count)
+            if file_count == 1
+            else t("meta_footer_pending", changes=change_count, files=file_count)
+        )
+        notes = [t("meta_footer_backup_note")]
+        if blocked:
+            notes.append(t("meta_footer_blocked_note", n=len(blocked)))
+        if excluded:
+            notes.append(t("meta_footer_excluded_note", n=len(excluded)))
+        self._footer_desc.setText(" · ".join(notes))
+
+    def _build_more_button(self) -> QToolButton:
+        """The data-management actions, kept as real buttons inside a menu.
+
+        They are hosted as QWidgetActions rather than replaced by plain
+        QActions so they remain the same QToolButtons the theme pass styles
+        and the enable/disable logic drives — moving them must not fork them
+        into a second, subtly different set of controls.
+        """
+        self._more_btn = QToolButton()
+        self._more_btn.setText(self._toolbar_text("meta_shell_more"))
+        self._more_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._more_btn.setPopupMode(QToolButton.InstantPopup)
+        a11y.describe(self._more_btn, t("meta_shell_more"),
+                      description=t("meta_shell_more_tooltip"),
+                      tooltip=t("meta_shell_more_tooltip"))
+
+        menu = QMenu(self._more_btn)
+        self._more_menu = menu
+
+        self._io_btn = self._make_toolbar_action(
+            "meta_io_toolbar", FluentIcon.DOCUMENT, self._on_metadata_io
+        )
+        self._io_btn.setToolTip(t("meta_io_subtitle"))
+        self._io_btn.setAccessibleName(t("meta_io_title"))
+
+        self._backup_manager_btn = self._make_toolbar_action(
+            "meta_backup_manager", FluentIcon.FOLDER, self._on_backup_manager
+        )
+
+        self._restore_btn = self._make_toolbar_action(
+            "meta_restore_btn", FluentIcon.HISTORY, self._on_restore_from_backup
+        )
+        self._restore_btn.setToolTip(t("meta_restore_tooltip"))
+
+        for button in (self._io_btn, self._backup_manager_btn, self._restore_btn):
+            button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            button.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+            # A button inside a menu does not dismiss it on its own.
+            button.clicked.connect(menu.close)
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(button)
+            menu.addAction(action)
+
+        self._more_btn.setMenu(menu)
+        return self._more_btn
 
     def _build_state_card(self, page: QWidget) -> tuple[QFrame, QVBoxLayout]:
         outer = QVBoxLayout(page)
@@ -1153,18 +1321,7 @@ class MetadataEditorPanel(
         self._breadcrumbs_layout.setContentsMargins(0, 0, 0, 0)
         self._breadcrumbs_layout.setSpacing(2)
         nav_bar.addWidget(self._breadcrumbs_widget, stretch=1)
-        self._search_edit = QLineEdit()
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setPlaceholderText(t("meta_search_tracks"))
-        self._search_edit.setAccessibleName(t("meta_search_tracks"))
-        self._search_edit.setMaximumWidth(250)
-        # Qt builds the inline clear button itself and leaves it unnamed, so a
-        # screen reader reaches an anonymous button at the end of the field.
-        for clear_button in self._search_edit.findChildren(QToolButton):
-            a11y.describe(clear_button, t("meta_a11y_clear_search"),
-                          tooltip=t("meta_a11y_clear_search"))
-        self._search_edit.textChanged.connect(self._on_search_text_changed)
-        nav_bar.addWidget(self._search_edit)
+        # Search now lives in the toolbar, beside the folder it searches.
         table_content_layout.addLayout(nav_bar)
         self._refresh_navigation_arrow_direction()
 
@@ -3569,7 +3726,31 @@ class MetadataEditorPanel(
             self._browse_btn.setText(
                 self._toolbar_text("meta_change_folder" if (self._root_folder and has_tracks) else "meta_browse_folder")
             )
+        if hasattr(self, "_rescan_action"):
+            self._rescan_action.setEnabled(
+                self._root_folder is not None
+                and not self._is_scanning
+                and not self._is_applying
+                and not self._is_restoring
+            )
+        self._refresh_path_chip()
+        self._refresh_footer()
         self._refresh_toolbar_action_styles()
+
+    def _refresh_path_chip(self) -> None:
+        """Show the active folder, elided from the left so the leaf survives."""
+        if not hasattr(self, "_path_chip"):
+            return
+        if self._root_folder is None:
+            self._path_chip.setText(t("meta_shell_no_folder"))
+            self._path_chip.setToolTip("")
+            return
+        full = str(self._root_folder)
+        metrics = self._path_chip.fontMetrics()
+        self._path_chip.setText(
+            metrics.elidedText(full, Qt.ElideLeft, self._path_chip.maximumWidth() - 16)
+        )
+        self._path_chip.setToolTip(full)
 
     def _refresh_selection_scope_state(self) -> None:
         selected_count = len(self._get_selected_tracks()) if hasattr(self, "_table") else 0
