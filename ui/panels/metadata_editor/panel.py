@@ -352,6 +352,7 @@ class MetadataEditorPanel(
         self._responsive_mode = "wide"
         self._responsive_forced_tree_collapse = False
         self._active_inspector_tool = 0
+        self._inspector_subtabs_mode: Optional[str] = None
         self._inspector_rail_buttons: dict[str, QPushButton] = {}
         self._inspector_mode_buttons: dict[str, QPushButton] = {}
         self._inspector_pane_modes: list[str] = []
@@ -359,7 +360,7 @@ class MetadataEditorPanel(
         self._is_scanning = False
         self._is_applying = False
         self._is_restoring = False
-        self._op_rows: list[OpRow] = []
+        self._op_rows: list[QWidget] = []
         self._checked_scope_buttons: list[QPushButton] = []
         self._selection_scope_buttons: list[QPushButton] = []
         self._insp_field_dirty: set[str] = set()
@@ -489,7 +490,7 @@ class MetadataEditorPanel(
         accent_dim = dim_hex(accent)
         self.setStyleSheet(
             f"QWidget#metadataEditorPage {{ background: {c.bg}; color: {c.text_primary};"
-            " border: none; border-radius: 0px; font-family: 'Segoe UI'; font-size: 13px; }}"
+            " border: none; border-radius: 0px; font-family: 'Segoe UI'; font-size: 13px; }"
             f"QWidget#metadataEditorPage QToolTip {{ background: {c.surface}; color: {c.text_primary};"
             f" border: 1px solid {c.border}; border-radius: 8px; padding: 5px 8px; }}"
         )
@@ -596,7 +597,7 @@ class MetadataEditorPanel(
         if hasattr(self, "_empty_state_card"):
             card_qss = (
                 f"QFrame#metadataStateCard {{ background: {c.surface}; border: 1px solid {c.border};"
-                " border-radius: 13px; }}"
+                " border-radius: 13px; }"
                 "QLabel { background: transparent; border: none; }"
             )
             title_qss = f"color: {c.text_primary}; font-size: 20px; font-weight: 800;"
@@ -719,7 +720,7 @@ class MetadataEditorPanel(
         if hasattr(self, "_path_chip"):
             self._path_chip.setStyleSheet(
                 f"QLabel {{ background: {c.surface3}; color: {c.text_secondary};"
-                " border: none; border-radius: 9px; padding: 0 10px; font-size: 12px; }}")
+                " border: none; border-radius: 9px; padding: 0 10px; font-size: 12px; }")
         if hasattr(self, "_search_edit"):
             self._search_edit.setStyleSheet(
                 f"QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
@@ -732,21 +733,21 @@ class MetadataEditorPanel(
                 f"QFrame#tagEditorTreeHeader {{ background: {c.surface2};"
                 f" border-bottom: 1px solid {c.border}; border-radius: 0; }}"
                 f"QToolButton {{ background: transparent; color: {c.text_secondary}; border: none;"
-                " border-radius: 8px; padding: 0; }}"
+                " border-radius: 8px; padding: 0; }"
                 f"QToolButton:hover {{ background: {c.surface3}; }}")
         if hasattr(self, "_tree_hint"):
             self._tree_hint.setStyleSheet(
                 f"QLabel#tagEditorTreeHint {{ background: {c.surface3}; color: {c.text_secondary};"
-                " border: none; border-radius: 9px; margin: 8px 5px; font-size: 10.5px; }}")
+                " border: none; border-radius: 9px; margin: 8px 5px; font-size: 10.5px; }")
 
         if hasattr(self, "_footer_bar"):
             self._footer_bar.setStyleSheet(
                 f"QFrame#tagEditorFooter {{ background: {c.surface}; border: none;"
-                " border-radius: 0px; }}")
+                " border-radius: 0px; }")
             self._footer_sep.setStyleSheet(f"background: {c.border}; border: none;")
             self._footer_count.setStyleSheet(
                 f"QLabel {{ background: {c.accent_soft}; color: {c.accent}; border-radius: 9px;"
-                " font-weight: 900; font-size: 13px; }}")
+                " font-weight: 900; font-size: 13px; }")
             self._footer_title.setStyleSheet(
                 f"color: {c.text_primary}; font-size: 12px; font-weight: 800;")
             self._footer_desc.setStyleSheet(f"color: {c.text_secondary}; font-size: 10.5px;")
@@ -754,7 +755,7 @@ class MetadataEditorPanel(
         if hasattr(self, "_table_card"):
             self._table_card.setStyleSheet(
                 f"QFrame#tagEditorTableCard {{ background: {c.surface}; border: 1px solid {c.border};"
-                " border-radius: 13px; }}")
+                " border-radius: 13px; }")
         if hasattr(self, "_table_status_bar"):
             self._table_status_bar.setStyleSheet(
                 f"QFrame#tagEditorTableStatus {{ background: {c.surface3};"
@@ -766,32 +767,32 @@ class MetadataEditorPanel(
                 f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; }}"
                 f"QToolButton:hover, QPushButton:hover {{ background: {c.surface3}; }}"
                 f"QToolButton#tagEditorExcludedChip {{ padding: 0 8px; border-radius: 7px;"
-                " font-size: 10.5px; font-weight: 800; }}"
+                " font-size: 10.5px; font-weight: 800; }"
                 f"QToolButton#tagEditorStaleChip {{ padding: 0 8px; border-radius: 7px;"
                 f" background: {c.warn_soft}; color: {c.warn}; border-color: {c.warn};"
-                " font-size: 10.5px; font-weight: 800; }}")
+                " font-size: 10.5px; font-weight: 800; }")
             self._nav_host.setStyleSheet(nav_qss)
         if hasattr(self, "_zoom_frame"):
             self._zoom_frame.setStyleSheet(
                 f"QFrame#tagEditorZoom {{ background: {c.surface}; border: 1px solid {c.border};"
-                " border-radius: 8px; }}"
+                " border-radius: 8px; }"
                 f"QPushButton {{ background: transparent; color: {c.text_secondary}; border: none;"
-                " border-radius: 6px; padding: 0; }}"
+                " border-radius: 6px; padding: 0; }"
                 f"QPushButton:hover {{ background: {c.surface3}; }}"
                 f"QLineEdit {{ background: transparent; color: {c.text_secondary}; border: none;"
-                " padding: 0; font-size: 10.5px; font-weight: 800; }}")
+                " padding: 0; font-size: 10.5px; font-weight: 800; }")
 
         if hasattr(self, "_inspector_header"):
             self._inspector_header.setStyleSheet(
                 f"QFrame#tagEditorInspectorHeader {{ background: {c.surface3};"
                 f" border-bottom: 1px solid {c.border}; border-radius: 0; }}"
                 f"QToolButton {{ background: transparent; color: {c.text_secondary}; border: none;"
-                " border-radius: 8px; padding: 0; }}"
+                " border-radius: 8px; padding: 0; }"
                 f"QToolButton:hover {{ background: {c.surface}; }}")
         if getattr(self, "_inspector_mode_buttons", None):
             mode_qss = (
                 f"QPushButton {{ background: transparent; color: {c.text_secondary}; border: none;"
-                " border-radius: 7px; padding: 0 8px; font-weight: 800; font-size: 11.5px; }}"
+                " border-radius: 7px; padding: 0 8px; font-weight: 800; font-size: 11.5px; }"
                 f"QPushButton:hover {{ background: {c.surface3}; }}"
                 f"QPushButton:checked {{ background: {c.accent}; color: #ffffff; }}")
             for btn in self._inspector_mode_buttons.values():
@@ -801,11 +802,11 @@ class MetadataEditorPanel(
                 f"QStackedWidget, QScrollArea {{ background: {c.surface}; border: none; }}"
                 f"QScrollArea > QWidget > QWidget {{ background: {c.surface}; }}"
                 f"QGroupBox {{ background: transparent; color: {c.text_primary}; border: none;"
-                " margin: 0; padding: 0; }}"
+                " margin: 0; padding: 0; }"
                 f"QGroupBox::title {{ color: transparent; height: 0; }}"
                 f"QLabel {{ background: transparent; color: {c.text_primary}; }}"
                 f"QLabel#tagEditorInspectorNote {{ background: {c.surface3}; color: {c.text_secondary};"
-                " border-radius: 9px; padding: 8px 10px; font-size: 10.5px; }}"
+                " border-radius: 9px; padding: 8px 10px; font-size: 10.5px; }"
                 f"QLabel#tagEditorDialogNote {{ background: {c.surface3}; color: {c.text_secondary};"
                 f" border: 1px solid {c.border}; border-radius: 9px; padding: 7px 9px; font-size: 10.5px; }}"
                 f"QLabel#tagEditorSectionTitle {{ color: {c.text_primary}; font-size: 11.5px; font-weight: 800; }}"
@@ -816,17 +817,20 @@ class MetadataEditorPanel(
                 f"QTextEdit#tagEditorLyrics {{ background: {c.surface}; color: {c.text_primary};"
                 f" border: 1px solid {c.border}; border-radius: 10px; padding: 9px; font-size: 11px; }}"
                 f"QWidget#tagEditorFieldRow QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
-                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0 9px; }}"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0 9px; font-size: 12px; }}"
                 f"QWidget#tagEditorFieldRow QLabel#tagEditorReadOnlyValue {{ background: {c.surface};"
                 f" color: {c.text_primary}; border: 1px solid {c.border}; border-radius: 8px; padding: 5px 9px; }}"
                 f"QWidget#tagEditorFieldRow QLineEdit:focus {{ border-color: {c.accent}; }}"
                 f"QWidget#tagEditorFieldRow QToolButton {{ background: {c.surface}; color: {c.text_tertiary};"
-                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; font-size: 9.5px; }}"
-                f"QToolButton#tagEditorAdvancedFields {{ background: {c.surface}; color: {c.text_secondary};"
-                f" border: 1px dashed {c.border}; border-radius: 9px; padding: 0 9px;"
-                " font-size: 10.5px; font-weight: 800; text-align: left; }}"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; font-size: 9.5px; font-weight: 800; }}"
+                f"QToolButton#tagEditorAdvancedFields {{ background: {c.surface3}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; padding: 0 10px;"
+                " font-size: 10.5px; font-weight: 800; text-align: right; }"
+                f"QToolButton#tagEditorAdvancedFields:hover {{ background: {c.accent_soft}; border-color: {c.accent}; }}"
+                f"QToolButton#tagEditorAdvancedFields:checked {{ background: {c.accent_soft}; color: {c.accent_dark};"
+                f" border-color: {c.accent}; }}"
                 f"QFrame#tagEditorPropertyTable {{ background: {c.surface}; border: 1px solid {c.border};"
-                " border-radius: 10px; }}"
+                " border-radius: 10px; }"
                 f"QFrame#tagEditorPropertyRow {{ background: transparent; border-bottom: 1px solid {c.surface3}; }}"
                 f"QLabel#tagEditorPropertyName {{ color: {c.text_secondary}; font-size: 10.5px; font-weight: 800; }}"
                 f"QLabel#tagEditorPropertyValue {{ color: {c.text_primary}; font-size: 10.5px; }}"
@@ -835,24 +839,35 @@ class MetadataEditorPanel(
                 f"QLabel#tagEditorPendingFile {{ color: {c.text_tertiary}; font-size: 9.5px; }}"
                 f"QLabel#tagEditorPendingChange, QLabel#tagEditorProblemCopy {{ color: {c.text_primary}; font-size: 10.5px; }}"
                 f"QLabel#tagEditorSeverityError {{ background: {c.danger_soft}; color: {c.danger};"
-                " border-radius: 6px; padding: 4px 6px; font-size: 9px; font-weight: 900; }}"
+                " border-radius: 6px; padding: 4px 6px; font-size: 9px; font-weight: 900; }"
                 f"QPushButton {{ background: {c.surface}; color: {c.text_primary}; border: 1px solid {c.border};"
-                " border-radius: 9px; min-height: 30px; padding: 0 9px; font-size: 10.5px; font-weight: 700; }}"
+                " border-radius: 9px; min-height: 30px; padding: 0 9px; font-size: 10.5px; font-weight: 700; }"
                 f"QPushButton:hover {{ background: {c.surface3}; }}"
                 f"QPushButton[accentRole=\"primary\"] {{ background: {c.accent}; color: #ffffff; border-color: {c.accent}; }}"
                 f"QPushButton[dangerRole=\"true\"] {{ color: {c.danger}; border-color: {c.danger}; }}"
                 f"QToolButton {{ background: {c.surface}; color: {c.text_secondary}; border: 1px solid {c.border};"
-                " border-radius: 8px; }}")
+                " border-radius: 8px; }")
         if getattr(self, "_inspector_tool_buttons", None):
             chip_qss = (
                 f"QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
                 f" border: 1px solid {c.border}; border-radius: 7px; padding: 0 9px;"
-                " font-size: 10.5px; font-weight: 800; }}"
+                " font-size: 10.5px; font-weight: 800; }"
                 f"QPushButton:hover {{ border-color: {c.accent}; }}"
                 f"QPushButton:checked {{ background: {c.accent_soft}; border-color: {c.accent};"
                 f" color: {c.accent_dark}; }}")
             for btn in self._inspector_tool_buttons:
                 btn.setStyleSheet(chip_qss)
+        if getattr(self, "_insp_clear_buttons", None):
+            clear_qss = (
+                f"QToolButton {{ background: {c.surface}; color: {c.text_tertiary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; font-size: 9.5px; font-weight: 800; }}"
+                f"QToolButton:hover {{ border-color: {c.accent}; color: {c.accent_dark}; }}"
+                f"QToolButton:disabled {{ color: {c.text_tertiary}; background: {c.bg}; }}")
+            for btn in self._insp_clear_buttons.values():
+                btn.setStyleSheet(clear_qss)
+        if hasattr(self, "_insp_advanced_btn"):
+            icon = FluentIcon.REMOVE if self._insp_advanced_btn.isChecked() else FluentIcon.ADD
+            self._insp_advanced_btn.setIcon(icon.icon(color=c.accent))
 
     def _toolbar_button_style(self, role: str) -> str:
         c = tag_editor_colors()
@@ -956,7 +971,7 @@ class MetadataEditorPanel(
             self._rescan_menu_btn.setStyleSheet(
                 f"QToolButton#tagEditorRescanAction {{ background: transparent; color: {c.text_primary};"
                 " border: none; border-radius: 7px; padding: 0 6px;"
-                " font-size: 12px; font-weight: 700; text-align: right; }}"
+                " font-size: 12px; font-weight: 700; text-align: right; }"
                 f"QToolButton#tagEditorRescanAction:hover {{ background: {c.surface3}; }}"
                 f"QToolButton#tagEditorRescanAction:pressed {{ background: {c.surface2}; }}"
                 f"QToolButton#tagEditorRescanAction:disabled {{ color: {c.text_tertiary}; }}"
@@ -2139,13 +2154,9 @@ class MetadataEditorPanel(
 
         self._inspector_pages = QStackedWidget()
         self._inspector = QStackedWidget()
-        self._inspector.setStyleSheet(
-            "QWidget { font-size: 12px; }"
-            "QGroupBox { font-weight: bold; font-size: 12px; margin-top: 10px; padding: 10px 8px 8px 8px; }"
-            "QLineEdit { font-size: 12px; min-height: 24px; padding: 3px 8px; border-radius: 0px; }"
-            "QPushButton { font-size: 12px; padding: 6px 10px; border-radius: 8px; }"
-            "QLabel { font-size: 12px; }"
-        )
+        # Field styling belongs to ``_inspector_pages`` and follows the
+        # reference design.  A local legacy stylesheet here used to override
+        # it, forcing square line edits and inherited label backgrounds.
         self._inspector.addWidget(self._build_inspector_empty())   # 0
         self._inspector.addWidget(self._build_inspector_folder())  # 1
         self._inspector.addWidget(self._build_inspector_tracks())  # 2
@@ -2162,8 +2173,7 @@ class MetadataEditorPanel(
             ("tools", t("meta_action_engine_title"),    FluentIcon.TAG,         self._build_action_engine_page()),
             ("tools", t("meta_group_from_filename"),    FluentIcon.PASTE,
              self._build_inspector_actions(
-                 ("title_strip", "title_full", "track_num", "split_at"),
-                 extra=self._build_apply_value_group())),
+                 ("title_strip", "title_full", "track_num", "split_at"))),
             ("tools", t("meta_group_cleanup"),          FluentIcon.ERASE_TOOL,
              self._build_inspector_actions(
                  None,
@@ -2401,6 +2411,10 @@ class MetadataEditorPanel(
         # (self._inspector_title_lbl) already shows the active category name,
         # so repeating it inside the page just duplicated the same text twice.
         w = QWidget()
+        # Keep this actions page white all the way to its lower edge.  Without
+        # an explicit surface Qt can expose the app's gray scroll background
+        # underneath the compact field-clear buttons.
+        w.setStyleSheet(f"background: {tag_editor_colors().surface};")
         layout = QVBoxLayout(w)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
@@ -2415,7 +2429,10 @@ class MetadataEditorPanel(
         scroll.setWidgetResizable(True)
         scroll.setWidget(w)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        surface = tag_editor_colors().surface
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {surface}; }}"
+            f"QScrollArea > QWidget > QWidget {{ background: {surface}; }}")
         return scroll
 
     def _build_duplicate_tools_page(self) -> QScrollArea:
@@ -2667,6 +2684,13 @@ class MetadataEditorPanel(
         scroll.setWidgetResizable(True)
         scroll.setFixedHeight(42)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Explicit minimum overrides the widgetResizable "avoid a scrollbar by
+        # growing" size hint (qSmartMinSize gives an explicit minimumWidth
+        # priority over the content-derived minimumSizeHint) -- without this
+        # the splitter gets shoved open to fit the widest chip row instead of
+        # showing a horizontal scrollbar.
+        scroll.setMinimumWidth(1)
         scroll.setWidget(self._inspector_subtab_host)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self._inspector_subtab_scroll = scroll
@@ -2696,6 +2720,7 @@ class MetadataEditorPanel(
             self._inspector_subtab_layout.addWidget(self._inspector_tool_buttons[index])
             self._inspector_tool_buttons[index].setVisible(True)
         self._inspector_subtab_layout.addStretch()
+        self._inspector_subtabs_mode = active_mode
 
     def _select_inspector_tool(self, index: int) -> None:
         self._active_inspector_tool = index
@@ -2703,7 +2728,12 @@ class MetadataEditorPanel(
             self._inspector_pages.setCurrentIndex(index)
         if self._right_collapsed:
             self._set_inspector_collapsed(False)
-        if hasattr(self, "_inspector_subtab_layout"):
+        # Only rebuild the chip row when the mode actually changed -- tearing
+        # the layout down and re-adding the same chips on every click (even
+        # within the same mode) resets the subtab QScrollArea's horizontal
+        # scroll position, undoing any manual scroll the user just did.
+        if (hasattr(self, "_inspector_subtab_layout")
+                and self._inspector_pane_modes[index] != self._inspector_subtabs_mode):
             self._rebuild_inspector_subtabs()
         self._refresh_tool_button_states()
 
@@ -3353,26 +3383,6 @@ class MetadataEditorPanel(
 
     # ── Inspector handlers ────────────────────────────────────────────────────
 
-    def _on_insp_folder_artist(self) -> None:
-        artist = self._insp_folder_artist.text().strip()
-        if not artist:
-            return
-        tracks = self._workspace.edit_scope()
-        if not tracks:
-            self._refresh_checked_scope_state()
-            return
-        self.artist_to_scope.emit(artist, tracks)
-
-    def _on_insp_folder_album(self) -> None:
-        album = self._insp_folder_album.text().strip()
-        if not album:
-            return
-        tracks = self._workspace.edit_scope()
-        if not tracks:
-            self._refresh_checked_scope_state()
-            return
-        self.album_to_scope.emit(album, tracks)
-
     def _on_insp_apply_fields(self) -> None:
         self._commit_inspector_draft(show_invalid=True)
         tracks = self._get_selected_tracks()
@@ -3453,6 +3463,16 @@ class MetadataEditorPanel(
         self._insp_draft_item_ids = current_ids
         self._insp_field_dirty.add(field_name)
         self._insp_draft_values[field_name] = value
+        # The green outline is a draft affordance: it appears as soon as the
+        # user touches a field, before the draft is promoted to a pending
+        # change by the Apply button.
+        edit = self._insp_fields.get(field_name)
+        if edit is not None:
+            c = tag_editor_colors()
+            edit.setStyleSheet(
+                f"QLineEdit {{ border: 1px solid {c.accent}; border-radius: 8px;"
+                f" padding: 0 9px; background: {c.surface}; }}"
+            )
 
     def _clear_insp_field(self, field_name: str, edit: QLineEdit) -> None:
         self._mark_insp_field_dirty(field_name, "")
@@ -4329,7 +4349,10 @@ class MetadataEditorPanel(
         self._refresh_navigation_controls()
 
         for row in getattr(self, "_op_rows", []):
-            row.setActionEnabled(has_edit_scope)
+            if hasattr(row, "setActionEnabled"):
+                row.setActionEnabled(has_edit_scope)
+            else:
+                row.setEnabled(has_edit_scope)
         for btn in getattr(self, "_checked_scope_buttons", []):
             btn.setEnabled(has_edit_scope)
 
@@ -4543,7 +4566,7 @@ class MetadataEditorPanel(
         snapshot = self._inspector_state.snapshot(tracks, field_names)
         pending_total = sum(track.has_changes for track in tracks)
         if snapshot.editable_count == len(tracks):
-            capability_text = t("meta_inspector_capability_all", n=len(tracks))
+            capability_text = t("meta_fields_scope_note")
         elif snapshot.editable_count:
             capability_text = t(
                 "meta_inspector_capability_some",
@@ -4578,10 +4601,14 @@ class MetadataEditorPanel(
                     edit.blockSignals(False)
             edit.setEnabled(state.supported_count > 0)
             self._insp_clear_buttons[field_name].setEnabled(state.supported_count > 0)
-            edit.setStyleSheet(
-                f"QLineEdit {{ border-bottom: 2px solid {get_colors().accent}; }}"
-                if state.pending else ""
-            )
+            if state.pending:
+                c = tag_editor_colors()
+                edit.setStyleSheet(
+                    f"QLineEdit {{ border: 1px solid {c.accent}; border-radius: 8px;"
+                    f"  padding: 0 9px; background: {c.surface}; }}"
+                )
+            else:
+                edit.setStyleSheet("")
             edit.setAccessibleDescription(
                 t("meta_inspector_field_pending_tooltip") if state.pending else ""
             )

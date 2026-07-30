@@ -86,12 +86,13 @@ from .shared import (
     PAGE_TRACKS,
     bold_font,
     btn_style,
+    compact_clear_button_qss,
     dim_hex,
     op_row_qss,
     primary_btn_style,
     tag_editor_colors,
 )
-from .widgets import OpRow
+from .widgets import OpRow, ResponsiveButtonFlow
 
 
 class InspectorBuildMixin:
@@ -142,7 +143,9 @@ class InspectorBuildMixin:
         """
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 10, 10, 10)
+        # Keep these measurements in lockstep with the approved HTML design:
+        # ``.inspector-body { padding: 11px 12px }``.
+        layout.setContentsMargins(12, 11, 12, 11)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
 
@@ -176,6 +179,11 @@ class InspectorBuildMixin:
         that turns the draft into proposals."""
         fields_grp = QGroupBox("")
         fields_grp.setObjectName("tagEditorFields")
+        # The application-wide scroll-area skin is light gray.  The reference
+        # field list is a continuous white surface, so establish that surface
+        # here instead of letting it show through between the controls.
+        fields_grp.setStyleSheet(
+            f"QGroupBox#tagEditorFields {{ background: {tag_editor_colors().surface}; border: none; }}")
         fields_layout = QVBoxLayout(fields_grp)
         fields_layout.setContentsMargins(0, 0, 0, 0)
         fields_layout.setSpacing(6)
@@ -185,34 +193,45 @@ class InspectorBuildMixin:
         self._insp_advanced_rows: list[QWidget] = []
 
         def _field(field_name: str, label: str, *, advanced: bool = False) -> QLineEdit:
+            # Field captions are UI labels, not prose: the colon is visual
+            # clutter here and makes Hebrew labels look offset from the input.
+            display_label = label.rstrip().rstrip(":").rstrip()
             row_widget = QWidget()
             row_widget.setObjectName("tagEditorFieldRow")
+            row_widget.setStyleSheet(
+                f"QWidget#tagEditorFieldRow {{ background: {tag_editor_colors().surface}; border: none; }}")
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(5)
-            lbl = QLabel(label)
+            row.setSpacing(7)
+            lbl = QLabel(display_label)
             # A minimum, not a fixed width: a long Hebrew field label at 200%
             # would otherwise be cut off mid-word.
             lbl.setFixedWidth(88)
-            lbl.setStyleSheet("font-size: 11.5px; font-weight: 700;")
+            lbl.setAlignment(Qt.AlignVCenter | Qt.AlignRight | Qt.AlignAbsolute)
+            lbl.setStyleSheet(
+                f"background: transparent; border: none; color: {tag_editor_colors().text_secondary};"
+                " font-size: 11.5px; font-weight: 700;")
             edit = QLineEdit()
             edit.setFixedHeight(29)
+            # Right alignment applies to values in every language, including
+            # LTR values such as artist names and genres.
+            edit.setAlignment(Qt.AlignVCenter | Qt.AlignRight | Qt.AlignAbsolute)
             edit.setPlaceholderText(t("meta_mixed_placeholder"))
             # The visible QLabel is a sibling, not a buddy, so the field itself
             # must carry the name a screen reader announces on focus.
             lbl.setBuddy(edit)
-            a11y.describe(edit, label)
+            a11y.describe(edit, display_label)
             edit.textEdited.connect(
                 lambda text, name=field_name: self._mark_insp_field_dirty(name, text)
             )
             clear_btn = QToolButton()
             clear_btn.setText(t("meta_inspector_clear_short"))
-            clear_btn.setFixedSize(38, 29)
+            clear_btn.setFixedSize(30, 29)
             # Every field row has a button reading just "Clear"; only the
             # accessible name can say which field this one clears.
             a11y.describe(
                 clear_btn,
-                t("meta_a11y_clear_named_field", field=label),
+                t("meta_a11y_clear_named_field", field=display_label),
                 tooltip=t("meta_inspector_clear_field"))
             clear_btn.clicked.connect(
                 lambda _checked=False, name=field_name, target=edit: self._clear_insp_field(name, target)
@@ -253,16 +272,20 @@ class InspectorBuildMixin:
 
         self._insp_advanced_btn = QToolButton()
         self._insp_advanced_btn.setObjectName("tagEditorAdvancedFields")
-        self._insp_advanced_btn.setText(t("meta_show_additional_fields") + "  ⌄")
+        self._insp_advanced_btn.setText(t("meta_show_additional_fields"))
+        self._insp_advanced_btn.setIcon(FluentIcon.ADD.icon(color=tag_editor_colors().accent))
+        self._insp_advanced_btn.setIconSize(QSize(14, 14))
         self._insp_advanced_btn.setCheckable(True)
-        self._insp_advanced_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        # LTR is intentional: it pins the plus/minus at the physical left
+        # edge, while the Hebrew label stays aligned at the right edge.
+        self._insp_advanced_btn.setLayoutDirection(Qt.LeftToRight)
+        self._insp_advanced_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._insp_advanced_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._insp_advanced_btn.setFixedHeight(31)
         self._insp_advanced_btn.clicked.connect(self._toggle_advanced_fields)
         fields_layout.addWidget(self._insp_advanced_btn)
 
         btn_apply_fields = QPushButton(t("meta_apply_to_selection"))
-        btn_apply_fields.setIcon(FluentIcon.ACCEPT.icon(color="#000000"))
-        btn_apply_fields.setIconSize(QSize(14, 14))
         btn_apply_fields.setProperty("accentRole", "primary")
         btn_apply_fields.setStyleSheet(primary_btn_style())
         btn_apply_fields.clicked.connect(self._on_insp_apply_fields)
@@ -273,9 +296,10 @@ class InspectorBuildMixin:
     def _toggle_advanced_fields(self, shown: bool) -> None:
         for row in self._insp_advanced_rows:
             row.setVisible(bool(shown))
-        self._insp_advanced_btn.setText(
-            t("meta_hide_additional_fields") + "  ⌃"
-            if shown else t("meta_show_additional_fields") + "  ⌄")
+        self._insp_advanced_btn.setText(t("meta_hide_additional_fields"))
+        self._insp_advanced_btn.setIcon(
+            (FluentIcon.REMOVE if shown else FluentIcon.ADD).icon(
+                color=tag_editor_colors().accent))
 
     def _build_lyrics_group(self) -> QGroupBox:
         """Embedded lyrics with their language and descriptor.
@@ -629,48 +653,6 @@ class InspectorBuildMixin:
         layout.addWidget(self._build_properties_group())
         layout.addStretch()
         return self._inspector_scroll(w)
-    def _build_apply_value_group(self) -> QGroupBox:
-        """Set one artist or album across the whole selection at once.
-
-        The controller has supported this from the start and it is covered by
-        tests, but the two handlers read line edits that were never built and
-        nothing ever called them -- the feature had no reachable UI at all.
-        This is that missing entry point, not a new capability.
-        """
-        group = QGroupBox(t("meta_apply_value_group"))
-        layout = QVBoxLayout(group)
-        layout.setSpacing(6)
-
-        note = QLabel(t("meta_apply_value_note"))
-        note.setWordWrap(True)
-        note.setObjectName("tagEditorInspectorNote")
-        layout.addWidget(note)
-
-        for field_key, label_key, button_key, handler in (
-            ("_insp_folder_artist", "meta_field_artist",
-             "meta_apply_artist_to_selection", self._on_insp_folder_artist),
-            ("_insp_folder_album", "meta_field_album",
-             "meta_apply_album_to_selection", self._on_insp_folder_album),
-        ):
-            row = QHBoxLayout()
-            row.setSpacing(5)
-            edit = QLineEdit()
-            edit.setPlaceholderText(t(label_key))
-            a11y.describe(edit, t(button_key))
-            edit.returnPressed.connect(handler)
-            setattr(self, field_key, edit)
-            row.addWidget(edit, stretch=1)
-
-            button = QPushButton(t(button_key))
-            button.setStyleSheet(btn_style())
-            a11y.describe(button, t(button_key))
-            button.clicked.connect(handler)
-            self._selection_scope_buttons.append(button)
-            row.addWidget(button)
-            layout.addLayout(row)
-
-        return group
-
     def _build_tools_auto_page(self) -> QScrollArea:
         """Tools > Auto arrange.
 
@@ -933,8 +915,9 @@ class InspectorBuildMixin:
         if not hasattr(self, "_op_rows"):
             return
         qss = op_row_qss()
+        compact_qss = compact_clear_button_qss()
         for row in self._op_rows:
-            row.setStyleSheet(qss)
+            row.setStyleSheet(compact_qss if row.property("cleanupCompact") else qss)
 
     def _build_magic_ops_widget(
         self,
@@ -1012,16 +995,48 @@ class InspectorBuildMixin:
             grp_layout.addWidget(row)
             self._op_rows.append(row)
 
+        def add_compact_clear_button(key: str, flow: ResponsiveButtonFlow) -> None:
+            """Add one small, consistently-red field-clear action button."""
+            label_key, desc_key = op_defs_by_key[key]
+            label = t(label_key)
+            desc = t(desc_key)
+            button = QPushButton(label)
+            button.setProperty("cleanupCompact", True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            a11y.describe(button, label, description=desc, tooltip=desc)
+            button.clicked.connect(lambda _=False, handler=op_handlers[key]: run_for_checked(handler))
+            # Compact controls remain in the common registry so scope refresh
+            # and accessibility checks cover every available operation.
+            self._op_rows.append(button)
+            flow.add_button(button)
+
         if sections is not None:
             for i, (subheader_key, keys) in enumerate(sections):
-                header = QLabel(t(subheader_key))
-                header.setStyleSheet(
-                    f"color: {tag_editor_colors().text_tertiary}; font-size: 11px; font-weight: bold;"
-                    f"{'margin-top: 4px;' if i else ''}"
-                )
+                # The title plus rule makes the two cleanup groups read as
+                # categories instead of one uninterrupted list.
+                header = QWidget()
+                header_layout = QHBoxLayout(header)
+                header_layout.setContentsMargins(0, 5 if i else 0, 0, 0)
+                header_layout.setSpacing(7)
+                title = QLabel(t(subheader_key))
+                title.setStyleSheet(
+                    f"color: {tag_editor_colors().text_secondary}; font-size: 11px; font-weight: 800;")
+                rule = QFrame()
+                rule.setFrameShape(QFrame.Shape.HLine)
+                rule.setFixedHeight(1)
+                rule.setStyleSheet(f"background: {tag_editor_colors().border}; border: none;")
+                header_layout.addWidget(title)
+                header_layout.addWidget(rule, 1)
                 grp_layout.addWidget(header)
-                for key in keys:
-                    add_row(key)
+                if subheader_key == "meta_section_clear_fields":
+                    compact_flow = ResponsiveButtonFlow()
+                    for key in keys:
+                        add_compact_clear_button(key, compact_flow)
+                    grp_layout.addWidget(compact_flow)
+                else:
+                    for key in keys:
+                        add_row(key)
         else:
             allowed = set(op_keys) if op_keys is not None else None
             for key, _, _ in MAGIC_OP_DEFS:

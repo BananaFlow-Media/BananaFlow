@@ -453,55 +453,6 @@ def test_check_external_page_is_quiet_when_the_disk_agrees(panel, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Set-one-value: a working feature that had no reachable UI
-# --------------------------------------------------------------------------- #
-
-def test_set_artist_across_selection_is_reachable_and_emits(panel, tmp_path):
-    """The handlers existed and were tested, but nothing built or called them."""
-    tracks = _load(panel, tmp_path, count=3)
-    panel._workspace.set_selected_items(tracks[:2])
-
-    emitted = []
-    panel.artist_to_scope.connect(lambda artist, items: emitted.append((artist, items)))
-
-    panel._insp_folder_artist.setText("  Ishay Ribo  ")
-    panel._on_insp_folder_artist()
-
-    assert emitted == [("Ishay Ribo", tracks[:2])]
-
-
-def test_set_album_across_selection_is_reachable_and_emits(panel, tmp_path):
-    tracks = _load(panel, tmp_path, count=2)
-    panel._workspace.set_selected_items([tracks[0]])
-
-    emitted = []
-    panel.album_to_scope.connect(lambda album, items: emitted.append((album, items)))
-
-    panel._insp_folder_album.setText("Kavana")
-    panel._on_insp_folder_album()
-
-    assert emitted == [("Kavana", [tracks[0]])]
-
-
-def test_set_value_does_nothing_without_a_value_or_a_selection(panel, tmp_path):
-    tracks = _load(panel, tmp_path, count=2)
-    emitted = []
-    panel.artist_to_scope.connect(lambda *a: emitted.append(a))
-
-    # Empty input with a selection.
-    panel._workspace.set_selected_items([tracks[0]])
-    panel._insp_folder_artist.setText("   ")
-    panel._on_insp_folder_artist()
-    assert emitted == []
-
-    # A value, but nothing selected: row selection is the editing scope.
-    panel._workspace.set_selected_items([])
-    panel._insp_folder_artist.setText("Someone")
-    panel._on_insp_folder_artist()
-    assert emitted == []
-
-
-# --------------------------------------------------------------------------- #
 # Scan failure is a visible state, not a silent one
 # --------------------------------------------------------------------------- #
 

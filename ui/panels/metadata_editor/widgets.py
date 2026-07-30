@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPainter
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 
 class ArtworkDropPreview(QLabel):
@@ -52,6 +52,89 @@ class VerticalLabel(QLabel):
         painter.translate(self.width(), 0)
         painter.rotate(90)
         painter.drawText(0, 0, self.height(), self.width(), self.alignment(), self.text())
+
+
+class ResponsiveButtonFlow(QWidget):
+    """A compact button grid that adds rows as the available width shrinks."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._buttons: list[QPushButton] = []
+        self._horizontal_spacing = 6
+        self._vertical_spacing = 6
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+    def add_button(self, button: QPushButton) -> None:
+        button.setParent(self)
+        self._buttons.append(button)
+        self._reflow()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        rows = self._rows_for_width(width)
+        if not rows:
+            return 0
+        return sum(max(button.sizeHint().height() for button in row) for row in rows) + (
+            len(rows) - 1) * self._vertical_spacing
+
+    def sizeHint(self) -> QSize:
+        if not self._buttons:
+            return QSize()
+        natural_width = sum(button.sizeHint().width() for button in self._buttons) + (
+            len(self._buttons) - 1) * self._horizontal_spacing
+        return QSize(natural_width, self.heightForWidth(natural_width))
+
+    def minimumSizeHint(self) -> QSize:
+        if not self._buttons:
+            return QSize()
+        widest = max(button.sizeHint().width() for button in self._buttons)
+        return QSize(widest, self.heightForWidth(widest))
+
+    def _rows_for_width(self, width: int) -> list[list[QPushButton]]:
+        available = max(1, width)
+        rows: list[list[QPushButton]] = [[]]
+        row_width = 0
+        for button in self._buttons:
+            button_width = button.sizeHint().width()
+            needed = button_width if not rows[-1] else self._horizontal_spacing + button_width
+            if rows[-1] and row_width + needed > available:
+                rows.append([])
+                row_width = 0
+            rows[-1].append(button)
+            row_width += button_width if row_width == 0 else needed
+        return [row for row in rows if row]
+
+    def _reflow(self) -> None:
+        rows = self._rows_for_width(self.contentsRect().width())
+        required_height = self.heightForWidth(self.contentsRect().width())
+        if self.minimumHeight() != required_height:
+            self.setMinimumHeight(required_height)
+            self.updateGeometry()
+
+        y = 0
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        for row in rows:
+            row_height = max(button.sizeHint().height() for button in row)
+            if rtl:
+                x = self.width()
+                for button in row:
+                    size = button.sizeHint()
+                    x -= size.width()
+                    button.setGeometry(x, y, size.width(), row_height)
+                    x -= self._horizontal_spacing
+            else:
+                x = 0
+                for button in row:
+                    size = button.sizeHint()
+                    button.setGeometry(x, y, size.width(), row_height)
+                    x += size.width() + self._horizontal_spacing
+            y += row_height + self._vertical_spacing
 
 class OpRow(QFrame):
     """Clickable, card-style action row with a wrapping label.
