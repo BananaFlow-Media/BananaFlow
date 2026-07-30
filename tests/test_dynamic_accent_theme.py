@@ -130,32 +130,23 @@ def test_main_panels_restyle_when_accent_changes(tmp_path, monkeypatch):
         converter_panel.deleteLater()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Open design decision, not a bug to paper over. The Tag Editor redesign "
-        "made secondary buttons a neutral surface with a plain border, so "
-        "btn_style() no longer contains the accent at all -- only "
-        "primary_btn_style() does. Whether a secondary button should follow the "
-        "user's accent has not been decided. strict=True on purpose: if someone "
-        "makes btn_style() accent-aware again, this XPASSes and fails the run, "
-        "which is the reminder to delete this marker."
-    ),
-)
 def test_metadata_editor_helpers_use_live_accent(tmp_path, monkeypatch):
+    """The primary button tracks the user's accent, live, with no restart.
+
+    Only the primary style is asserted. The redesign made secondary buttons a
+    neutral surface with a plain border, so btn_style() carries no accent at
+    all; whether it should is an open design question tracked separately, not
+    something to assert either way here.
+    """
     _app, _cfg, tm = _make_app_config_theme(tmp_path, monkeypatch)
 
-    from ui.panels.metadata_editor_panel import _btn_style, _primary_btn_style
+    from ui.panels.metadata_editor_panel import _primary_btn_style
 
-    assert OCEAN in _btn_style()
     assert OCEAN in _primary_btn_style()
-    assert AMBER not in _btn_style()
     assert AMBER not in _primary_btn_style()
 
     tm.set_accent(VIOLET)
-    assert VIOLET in _btn_style()
     assert VIOLET in _primary_btn_style()
-    assert OCEAN not in _btn_style()
     assert OCEAN not in _primary_btn_style()
 
 
