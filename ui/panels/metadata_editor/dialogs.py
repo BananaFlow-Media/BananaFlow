@@ -178,8 +178,12 @@ class AutoArrangeSettingsDialog(StyledDialog):
                 "clear_title", "clear_artist", "clear_album", "clear_album_artist",
                 "clear_track_num", "clear_year", "clear_genre", "clear_comments",
             )),
-            ("meta_rename_group", ("clean_filename", "strip_filename_numbering")),
+            ("meta_rename_group", (
+                "clean_filename", "strip_filename_numbering", "rename_from_title")),
         )
+        # Parameterised operations are deliberately absent: Auto-Order runs
+        # unattended, and there is nowhere here to supply the find text, the
+        # case mode or the starting number they each require.
 
         self._cbs: dict[str, QCheckBox] = {}
         for i, (subheader_key, keys) in enumerate(op_sections):

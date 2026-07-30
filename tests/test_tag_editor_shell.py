@@ -389,9 +389,12 @@ def test_auto_arrange_page_lists_what_it_will_run(panel):
     assert t("meta_op_title_strip_label") in text
     assert t("meta_op_track_num_label") in text
 
+    # Album-from-folder is not one of the configurable ops: Auto-Order always
+    # runs it.  Listing it is the point of the list, so it survives an
+    # otherwise empty selection rather than the page claiming nothing runs.
     panel._auto_ops = set()
     panel._refresh_auto_enabled_list()
-    assert panel._auto_enabled_list.text() == t("meta_auto_none_enabled")
+    assert panel._auto_enabled_list.text() == f"•  {t('meta_auto_always_album')}"
 
 
 def test_auto_arrange_settings_button_survives_the_move(panel):
@@ -592,11 +595,200 @@ def test_every_shell_string_is_translated(language):
             "meta_inspector_mode_edit", "meta_inspector_mode_tools",
             "meta_inspector_mode_check", "meta_auto_enabled_heading",
             "meta_pending_tab", "meta_pending_none", "meta_external_tab",
-            "meta_external_none", "meta_apply_value_group",
-            "meta_apply_artist_to_selection", "meta_apply_album_to_selection",
+            "meta_external_none", "meta_auto_always_album",
+            "meta_cleanup_warn_note", "meta_rename_ops_note",
+            "meta_clean_settings_open", "meta_dupes_never_scanned",
+            "meta_copy_tags", "meta_paste_tags",
+            "meta_op_rename_from_title_label", "meta_op_replace_text_label",
+            "meta_action_repair_encoding", "meta_action_replace_regex",
+            "meta_action_split_field",
             "meta_scan_error_title", "meta_scan_error_retry",
             "mt_col_status", "mt_status_read_only", "meta_scope_hint",
         ):
             assert t(key) != key, f"{key} untranslated in {language}"
     finally:
         set_language(previous)
+
+
+# --------------------------------------------------------------------------- #
+# Inspector: reachability and state hygiene
+#
+# Everything below encodes a defect found in the 30 July 2026 audit. Each one
+# was reachable by a real user and invisible to the existing tests.
+# --------------------------------------------------------------------------- #
+
+def _op_rows(panel):
+    from ui.panels.metadata_editor.widgets import OpRow
+    return panel.findChildren(OpRow)
+
+
+def test_advanced_fields_button_label_follows_its_state(panel):
+    """The label was pinned to "hide", so a collapsed list still said "hide"."""
+    from ui.i18n import t
+
+    button = panel._insp_advanced_btn
+    assert button.text() == t("meta_show_additional_fields")
+    button.click()
+    assert button.text() == t("meta_hide_additional_fields")
+    button.click()
+    assert button.text() == t("meta_show_additional_fields")
+
+
+def test_every_action_row_is_reachable_without_a_mouse(panel, tmp_path):
+    """OpRow is a QFrame, so focus and key handling are not free.
+
+    They shipped missing, which made every Tools action mouse-only while the
+    compact clear buttons beside them were reachable by Tab.
+    """
+    from PySide6.QtCore import Qt
+
+    _load(panel, tmp_path)
+    panel._table.selectRow(0)
+    rows = _op_rows(panel)
+    assert rows, "no action rows were built"
+    for row in rows:
+        assert row.accessibleName(), f"unnamed action row: {row.text()!r}"
+        assert row.focusPolicy() != Qt.FocusPolicy.NoFocus, f"{row.text()!r} is not a tab stop"
+
+
+def test_action_row_activates_on_space_and_enter(panel, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+
+    _load(panel, tmp_path)
+    panel._table.selectRow(0)
+    row = _op_rows(panel)[0]
+    fired = []
+    row.clicked.connect(lambda: fired.append(1))
+    for key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        row.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+    assert len(fired) == 3
+
+
+def test_disabled_action_row_leaves_the_tab_order(panel, tmp_path):
+    """A focusable row that cannot run is a keyboard dead end."""
+    from PySide6.QtCore import Qt
+
+    _load(panel, tmp_path)
+    panel._table.clearSelection()
+    for row in panel._op_rows:
+        if hasattr(row, "setActionEnabled"):
+            assert row.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
+def test_deselecting_clears_the_pages_that_describe_one_file(panel, tmp_path):
+    """Only Fields lived in the empty/folder/tracks stack.
+
+    Artwork, Lyrics, ReplayGain and Properties kept rendering the last
+    selected file -- real path, real size, real cover -- after it was
+    deselected, and the property buttons stayed enabled but did nothing.
+    """
+    tracks = _load(panel, tmp_path)
+    panel._table.selectRow(0)
+    assert panel._insp_property_values["path"].text() == str(tracks[0].path)
+    assert panel._insp_property_open_btn.isEnabled()
+    assert panel._insp_lyrics.isEnabled()
+
+    panel._table.clearSelection()
+    assert panel._insp_property_values["path"].text() == ""
+    assert not panel._insp_property_open_btn.isEnabled()
+    assert not panel._insp_property_reveal_btn.isEnabled()
+    assert not panel._insp_property_copy_btn.isEnabled()
+    assert not panel._insp_lyrics.isEnabled()
+    assert panel._insp_lyrics.toPlainText() == ""
+
+
+def test_property_buttons_need_exactly_one_file(panel, tmp_path):
+    """They name a single path; with several selected there is no answer."""
+    _load(panel, tmp_path, count=3)
+    panel._table.selectAll()
+    assert not panel._insp_property_open_btn.isEnabled()
+    panel._table.clearSelection()
+    panel._table.selectRow(1)
+    assert panel._insp_property_open_btn.isEnabled()
+
+
+@pytest.mark.parametrize("attribute", [
+    "_insp_artwork_replace_btn", "_insp_artwork_revert_btn",
+    "_insp_rg_clear_track_btn", "_insp_rg_clear_album_btn", "_insp_rg_revert_btn",
+])
+def test_wired_controls_are_not_hidden(panel, attribute):
+    """Six wired handlers were built, enabled, and then setVisible(False).
+
+    Keeping a working control off screen is the same as not having it, and it
+    is worse than not having it because the code claims otherwise.
+    """
+    assert not getattr(panel, attribute).isHidden(), f"{attribute} is built but hidden"
+
+
+def test_rename_from_title_has_a_way_in(panel, tmp_path):
+    """Its handler and controller slot existed; the button was never built."""
+    from ui.i18n import t
+
+    _load(panel, tmp_path)
+    assert t("meta_op_rename_from_title_label") in {row.text() for row in _op_rows(panel)}
+
+
+def test_parameterised_actions_are_offered_in_the_tools_pages(panel, tmp_path):
+    """Find/replace, case and numbering were reachable only inside a modal's
+    flat 23-entry combo box."""
+    from ui.i18n import t
+
+    _load(panel, tmp_path)
+    labels = {row.text() for row in _op_rows(panel)}
+    for key in ("meta_op_replace_text_label", "meta_op_change_case_label",
+                "meta_op_number_tracks_label"):
+        assert t(key) in labels
+
+
+def test_actions_page_lists_the_registry(panel, tmp_path):
+    """The page was a paragraph and one button."""
+    from core.tag_actions import builtin_registry
+
+    _load(panel, tmp_path)
+    listed = {row.text() for row in panel._action_catalog_rows}
+    assert len(listed) >= 15
+    from ui.i18n import t
+    for action in builtin_registry().actions():
+        if action.category != "clear":
+            assert t(action.name_key) in listed, f"{action.id} is not offered anywhere"
+
+
+def test_action_engine_opens_on_a_named_action(panel, tmp_path):
+    _load(panel, tmp_path)
+    dialog = panel._create_action_engine_dialog("tag.replace_text.v1")
+    try:
+        assert dialog._action_combo.currentData() == "tag.replace_text.v1"
+    finally:
+        dialog.deleteLater()
+    dialog = panel._create_action_engine_dialog("template.tags_to_filename.v1")
+    try:
+        assert dialog._tabs.currentIndex() == 1
+        assert dialog._template_combo.currentData() == "template.tags_to_filename.v1"
+    finally:
+        dialog.deleteLater()
+
+
+def test_duplicates_page_reports_the_last_scan(panel, tmp_path):
+    from ui.i18n import t
+
+    _load(panel, tmp_path)
+    assert panel._dupes_summary.text() == t("meta_dupes_never_scanned")
+    panel.on_duplicate_scan_complete([], 0.5, "hash")
+    assert panel._dupes_summary.text() == t("meta_dupes_none_found")
+    assert panel._dupes_reopen_btn.isHidden()
+
+
+def test_copy_tags_needs_one_file_and_never_copies_track_number(panel, tmp_path):
+    tracks = _load(panel, tmp_path, count=2)
+    tracks[0].original.artist = "Ishay Ribo"
+    tracks[0].original.track_num = 7
+    panel._table.selectRow(0)
+    panel._on_copy_tags()
+    assert panel._tag_clipboard.get("artist") == "Ishay Ribo"
+    assert "track_num" not in panel._tag_clipboard
+    assert panel._insp_paste_tags_btn.isEnabled()
+
+    panel._table.clearSelection()
+    assert not panel._insp_copy_tags_btn.isEnabled()
+    assert not panel._insp_paste_tags_btn.isEnabled()

@@ -64,6 +64,17 @@ def test_every_registered_action_has_a_valid_explicit_evaluation_result():
         },
         "tag.change_case.v1": {"field": "title", "mode": "lower"},
         "tag.number_tracks.v1": {"start": 1, "step": 1},
+        "tag.replace_regex.v1": {
+            "field": "title", "pattern": r"WORLD", "replace": "World",
+            "case_sensitive": True,
+        },
+        "tag.split_field.v1": {
+            "field": "title", "separator": "__", "target_field": "artist",
+            "target_first": False,
+        },
+        "tag.repair_encoding.v1": {
+            "field": "title", "all_fields": True, "codepage": "cp1255",
+        },
     }
     values = {
         "title": "hello__WORLD [HD]", "artist": "Artist", "album": "Album",

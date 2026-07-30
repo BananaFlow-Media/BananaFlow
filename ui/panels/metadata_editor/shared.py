@@ -25,12 +25,12 @@ from ui.theme_manager import get_colors
 
 @dataclass(frozen=True)
 class TagEditorColors:
-    """The HTML prototype's design tokens, with a dark-theme counterpart.
+    """The Tag Editor's design tokens, with a dark-theme counterpart.
 
-    The light values intentionally match
-    ``docs/design/tag-editor/BananaFlow_Tag_Editor_FINAL_COMPLETE.html``.
-    The accent remains the user's live application accent, whose fresh-install
-    default is the prototype green.
+    The light values originated in the HTML prototype that guided the redesign
+    (now archived under ``docs/design/tag-editor/_reference/``); they are kept
+    because they work, not because that file dictates them.  The accent remains
+    the user's live application accent, whose fresh-install default is green.
     """
 
     bg: str
@@ -53,7 +53,7 @@ class TagEditorColors:
 
 
 def tag_editor_colors() -> TagEditorColors:
-    """Return the exact light prototype palette or an equivalent dark one."""
+    """Return the Tag Editor light palette or its dark-theme equivalent."""
     c = get_colors()
     is_dark = c.bg.lower() == "#0d0d12"
     accent_color = QColor(c.accent)
@@ -121,6 +121,10 @@ MAGIC_OP_DEFS: list[tuple[str, str, str]] = [
     ("clear_album_artist",       "meta_op_clear_album_artist_label",       "meta_op_clear_album_artist_desc"),
     ("clean_filename",           "meta_op_clean_filename_label",           "meta_op_clean_filename_desc"),
     ("strip_filename_numbering", "meta_op_strip_filename_numbering_label", "meta_op_strip_filename_numbering_desc"),
+    ("rename_from_title",        "meta_op_rename_from_title_label",        "meta_op_rename_from_title_desc"),
+    ("replace_text",             "meta_op_replace_text_label",             "meta_op_replace_text_desc"),
+    ("change_case",              "meta_op_change_case_label",              "meta_op_change_case_desc"),
+    ("number_tracks",            "meta_op_number_tracks_label",            "meta_op_number_tracks_desc"),
 ]
 
 # Which ops the auto-arrange button runs by default
@@ -262,6 +266,11 @@ def op_row_qss() -> str:
         f"QFrame#metaOpRow {{ background: {c.surface}; border: 1px solid {c.border};"
         f"  border-radius: 9px; }}"
         f"QFrame#metaOpRow:hover {{ background: {c.surface2}; border-color: {c.accent}; }}"
+        # The row is keyboard-reachable, so focus has to be visible.  A
+        # two-pixel accent border rather than a colour swap, so it still reads
+        # as focused in high contrast and for colour-blind users.
+        f"QFrame#metaOpRow:focus {{ background: {c.surface2};"
+        f"  border: 2px solid {c.accent}; }}"
         f"QLabel#metaOpRowLabel {{ background: transparent; border: none;"
         f"  color: {c.text_primary}; font-size: 12px; }}"
         f"QFrame#metaOpRow[actionEnabled=\"false\"] {{ background: {c.bg}; border-color: {c.border}; }}"

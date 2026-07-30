@@ -96,7 +96,7 @@ class TagActionDialog(StyledDialog):
 
     def __init__(self, workspace, *, active_folder: Path | None = None, parent=None,
                  preset_path: Path | None = None, accept_preview=None,
-                 open_preset_transfer=None) -> None:
+                 open_preset_transfer=None, initial_action_id: str = "") -> None:
         super().__init__(parent, minimum_size=(860, 620), resize_to=(1040, 720))
         mark_tag_editor_dialog(self)
         self.setWindowTitle(t("meta_action_engine_title"))
@@ -209,9 +209,26 @@ class TagActionDialog(StyledDialog):
         self._accept_btn.clicked.connect(self.accept_preview)
         root.addWidget(make_footer(cancel_btn, self._edit_btn, self._accept_btn, leading=(self._preview_btn,)))
 
+        self._select_initial_action(initial_action_id)
         self._source_changed()
         if self._store_diagnostic:
             self._store_status.setText(t(_STORE_DIAGNOSTIC_KEYS[self._store_diagnostic]))
+
+    def _select_initial_action(self, action_id: str) -> None:
+        """Land on a specific action when a Tools row asked for one.
+
+        Both definition tabs are searched: the caller names an action, and
+        which tab it lives on (plain action or template) is this dialog's
+        business, not the caller's.
+        """
+        if not action_id:
+            return
+        for tab_index, combo in ((0, self._action_combo), (1, self._template_combo)):
+            index = combo.findData(action_id)
+            if index >= 0:
+                self._tabs.setCurrentIndex(tab_index)
+                combo.setCurrentIndex(index)
+                return
 
     def _make_definition_tab(self, kind: str) -> QComboBox:
         page = QWidget()

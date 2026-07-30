@@ -80,3 +80,130 @@ def test_controller_action_production_path_uses_workspace_change_set(tmp_path, m
         assert controller.workspace_state.change_set.records()[0].origin.value == "template"
     finally:
         controller.deleteLater()
+
+
+# --------------------------------------------------------------------------- #
+# Actions added after the 30 July 2026 audit
+# --------------------------------------------------------------------------- #
+
+def _ctx(values, item_id=1):
+    return TagActionContext(item_id, "song.mp3", ".mp3", "mp3", values)
+
+
+def test_regex_replace_supports_capture_groups():
+    action = builtin_registry().get("tag.replace_regex.v1")
+    result = action.evaluate(
+        _ctx({"title": "Ribo, Ishay"}),
+        {"field": "title", "pattern": r"(\w+), (\w+)", "replace": r"\2 \1",
+         "case_sensitive": True},
+    )
+    assert result.fields == {"title": "Ishay Ribo"}
+
+
+def test_regex_replace_reports_a_bad_pattern_instead_of_raising():
+    """A half-typed pattern must not take the live preview down."""
+    from core.tag_actions import ActionResultStatus
+
+    action = builtin_registry().get("tag.replace_regex.v1")
+    result = action.evaluate(
+        _ctx({"title": "Song"}),
+        {"field": "title", "pattern": "([unclosed", "replace": "", "case_sensitive": False},
+    )
+    assert result.status is ActionResultStatus.WARNING
+    assert result.diagnostic == "invalid_pattern"
+    assert not result.fields
+
+
+def test_split_field_moves_the_second_half_and_keeps_the_tail():
+    action = builtin_registry().get("tag.split_field.v1")
+    result = action.evaluate(
+        _ctx({"title": "Ishay Ribo - Seter - Live", "artist": ""}),
+        {"field": "title", "separator": " - ", "target_field": "artist",
+         "target_first": False},
+    )
+    # Only the first separator splits, so the tail stays with the second half
+    # rather than being silently dropped.
+    assert result.fields == {"title": "Ishay Ribo", "artist": "Seter - Live"}
+
+
+def test_split_field_without_the_separator_changes_nothing():
+    from core.tag_actions import ActionResultStatus
+
+    action = builtin_registry().get("tag.split_field.v1")
+    result = action.evaluate(
+        _ctx({"title": "Seter", "artist": ""}),
+        {"field": "title", "separator": " - ", "target_field": "artist",
+         "target_first": False},
+    )
+    assert result.status is ActionResultStatus.NO_OP
+
+
+def test_split_field_refuses_to_leave_a_half_empty():
+    from core.tag_actions import ActionResultStatus
+
+    action = builtin_registry().get("tag.split_field.v1")
+    result = action.evaluate(
+        _ctx({"title": "Seter - ", "artist": ""}),
+        {"field": "title", "separator": " - ", "target_field": "artist",
+         "target_first": False},
+    )
+    assert result.status is ActionResultStatus.WARNING
+    assert result.diagnostic == "empty_half"
+
+
+def test_encoding_repair_recovers_hebrew_stored_as_cp1255():
+    """The exact fault: cp1255 bytes in the file, decoded as Latin-1 on read."""
+    action = builtin_registry().get("tag.repair_encoding.v1")
+    original = "ישי ריבו"
+    mojibake = original.encode("cp1255").decode("latin-1")
+    assert mojibake != original
+
+    result = action.evaluate(
+        _ctx({"artist": mojibake}),
+        {"field": "artist", "all_fields": False, "codepage": "cp1255"},
+    )
+    assert result.fields == {"artist": original}
+
+
+def test_encoding_repair_leaves_correct_text_alone():
+    """Rewriting a tag that was already fine is worse than the bug."""
+    from core.tag_actions import ActionResultStatus
+
+    action = builtin_registry().get("tag.repair_encoding.v1")
+    result = action.evaluate(
+        _ctx({"artist": "ישי ריבו"}),
+        {"field": "artist", "all_fields": False, "codepage": "cp1255"},
+    )
+    assert result.status is ActionResultStatus.NO_OP
+    assert result.diagnostic == "nothing_to_repair"
+
+
+def test_encoding_repair_leaves_plain_ascii_alone():
+    from core.tag_actions import ActionResultStatus
+
+    action = builtin_registry().get("tag.repair_encoding.v1")
+    result = action.evaluate(
+        _ctx({"artist": "Ishay Ribo"}),
+        {"field": "artist", "all_fields": False, "codepage": "cp1255"},
+    )
+    assert result.status is ActionResultStatus.NO_OP
+
+
+def test_encoding_repair_can_sweep_every_text_field():
+    action = builtin_registry().get("tag.repair_encoding.v1")
+    broken = {name: value.encode("cp1255").decode("latin-1")
+              for name, value in (("title", "סתר"), ("artist", "ישי ריבו"))}
+    result = action.evaluate(
+        _ctx({**broken, "album": "Elul 5779"}),
+        {"field": "title", "all_fields": True, "codepage": "cp1255"},
+    )
+    assert result.fields == {"title": "סתר", "artist": "ישי ריבו"}
+
+
+def test_repair_mojibake_refuses_a_repair_that_still_looks_broken():
+    """A round trip that lands on U+FFFD has not recovered anything."""
+    from core.tag_actions import repair_mojibake
+
+    assert repair_mojibake("", "cp1255") is None
+    # Genuine Unicode cannot have come from a Latin-1 mis-decode.
+    assert repair_mojibake("ישי ריבו", "cp1255") is None

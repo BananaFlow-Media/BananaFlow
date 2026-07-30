@@ -24,6 +24,8 @@ _PARAMETER_KEYS = {
         "find", "replace", "case_sensitive", "mode", "start", "step",
         "smart_brackets", "remove_domains", "remove_emojis", "fix_spaces",
         "remove_web_junk", "remove_hebrew", "fix_punctuation",
+        "pattern", "separator", "target_field", "target_first",
+        "codepage", "all_fields",
     )
 }
 _RENAME_KEYS = {
@@ -60,6 +62,9 @@ _SIMPLE_KEYS = {
     "cleanup_would_empty_title": "meta_action_diag_cleanup_empty_title",
     "invalid_track_num": "meta_action_diag_invalid_track_num",
     "invalid_disc_num": "meta_action_diag_invalid_disc_num",
+    "invalid_pattern": "meta_action_diag_invalid_pattern",
+    "empty_half": "meta_action_diag_empty_half",
+    "nothing_to_repair": "meta_action_diag_nothing_to_repair",
 }
 
 

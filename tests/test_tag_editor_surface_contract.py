@@ -370,11 +370,18 @@ EXPECTED_OPS = (
 )
 
 
-def test_all_seventeen_operations_are_defined():
+def test_the_seventeen_original_operations_all_survive():
+    """This file exists to catch a *lost* affordance, not to freeze the list.
+
+    It asserted equality, which also made every new operation a test failure.
+    A superset still fails the moment one of the seventeen disappears, which
+    is the guarantee this file is actually for.
+    """
     from ui.panels.metadata_editor.shared import MAGIC_OP_DEFS
 
     assert len(EXPECTED_OPS) == 17
-    assert {op_id for op_id, _, _ in MAGIC_OP_DEFS} == set(EXPECTED_OPS)
+    defined = {op_id for op_id, _, _ in MAGIC_OP_DEFS}
+    assert set(EXPECTED_OPS) <= defined, set(EXPECTED_OPS) - defined
 
 
 def test_every_operation_has_a_label_and_description():

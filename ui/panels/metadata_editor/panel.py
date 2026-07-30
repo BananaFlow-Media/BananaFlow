@@ -361,6 +361,10 @@ class MetadataEditorPanel(
         self._is_applying = False
         self._is_restoring = False
         self._op_rows: list[QWidget] = []
+        # Rows on the Actions page. They open the action engine rather than
+        # running against the table selection, so they follow the engine's
+        # availability, not the selection's.
+        self._action_catalog_rows: list[QWidget] = []
         self._checked_scope_buttons: list[QPushButton] = []
         self._selection_scope_buttons: list[QPushButton] = []
         self._insp_field_dirty: set[str] = set()
@@ -368,6 +372,11 @@ class MetadataEditorPanel(
         self._insp_draft_values: dict[str, str] = {}
         self._insp_populating = False
         self._replaygain_analysis_running = False
+        # Result of the last duplicate scan, so the Duplicates page can report
+        # it and reopen the manager without rescanning.
+        self._last_duplicate_scan: tuple | None = None
+        # Tag values copied from one file, pending a paste onto others.
+        self._tag_clipboard: dict[str, object] = {}
 
         self._build()
         self._workspace.changed.connect(self._on_workspace_state_changed)
@@ -505,32 +514,19 @@ class MetadataEditorPanel(
         if hasattr(self, "_summary_lbl"):
             self._summary_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 11px;")
 
+        # The Auto-Order control used to be one gradient-filled frame tinted
+        # with nine derived accent shades.  It is now a plain container holding
+        # two ordinary buttons, so only the soft tint and the primary text
+        # colour are still needed; the other shades were computed on every
+        # theme change and used by nothing.
         accent_color = QColor(accent)
         if accent_color.isValid():
             r, g, b, _ = accent_color.getRgb()
-            accent_hover = accent_color.darker(110).name()
             accent_soft = f"rgba({r}, {g}, {b}, 0.16)"
-            accent_magic_2 = f"rgba({r}, {g}, {b}, 0.28)"
-            accent_glow_1 = f"rgba({r}, {g}, {b}, 0.12)"
-            accent_glow_2 = f"rgba({r}, {g}, {b}, 0.18)"
-            accent_glow_3 = f"rgba({r}, {g}, {b}, 0.42)"
-            accent_glow_hover_1 = f"rgba({r}, {g}, {b}, 0.16)"
-            accent_glow_hover_2 = f"rgba({r}, {g}, {b}, 0.28)"
-            accent_glow_hover_3 = f"rgba({r}, {g}, {b}, 0.58)"
-            accent_border = f"rgba({r}, {g}, {b}, 0.58)"
             primary_text = "#ffffff" if accent_color.lightness() < 170 else "#111827"
         else:
             r, g, b = 0, 0, 0
-            accent_hover = accent_dim
             accent_soft = c.surface2
-            accent_magic_2 = c.surface2
-            accent_glow_1 = c.surface
-            accent_glow_2 = c.surface2
-            accent_glow_3 = c.border
-            accent_glow_hover_1 = c.surface2
-            accent_glow_hover_2 = c.border
-            accent_glow_hover_3 = c.border
-            accent_border = c.border
             primary_text = "#ffffff"
 
         toolbar_neutral = self._toolbar_button_style("neutral")
@@ -546,8 +542,6 @@ class MetadataEditorPanel(
             self._auto_container.setStyleSheet(
                 "QFrame#autoOrderSplitButton { background: transparent; border: none; }"
             )
-        if hasattr(self, "_auto_separator"):
-            self._auto_separator.setStyleSheet(f"background: {accent_border}; border: none;")
         if hasattr(self, "_auto_btn") and hasattr(self, "_auto_cfg_btn"):
             self._auto_btn.setIcon(self._make_magic_wand_icon(color=auto_text))
             self._auto_cfg_btn.setIcon(FluentIcon.SETTING.icon(color=auto_text))
@@ -1118,9 +1112,6 @@ class MetadataEditorPanel(
         self._auto_cfg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_cfg_btn.setEnabled(False)
         self._auto_cfg_btn.clicked.connect(self._on_auto_arrange_settings)
-
-        self._auto_separator = QFrame()
-        self._auto_separator.setVisible(False)
 
         self._auto_btn = QToolButton()
         self._auto_btn.setText(self._toolbar_text("meta_auto_btn"))
@@ -2173,12 +2164,19 @@ class MetadataEditorPanel(
             ("tools", t("meta_action_engine_title"),    FluentIcon.TAG,         self._build_action_engine_page()),
             ("tools", t("meta_group_from_filename"),    FluentIcon.PASTE,
              self._build_inspector_actions(
-                 ("title_strip", "title_full", "track_num", "split_at"))),
+                 ("title_strip", "title_full", "track_num", "split_at"),
+                 note_key="meta_filename_ops_note")),
             ("tools", t("meta_group_cleanup"),          FluentIcon.ERASE_TOOL,
              self._build_inspector_actions(
                  None,
+                 note_key="meta_cleanup_warn_note",
+                 settings_key="meta_clean_settings_open",
+                 settings_handler=self._on_clean_settings,
                  sections=(
-                     ("meta_section_text_cleanup", ("normalize_spaces", "strip_junk", "album_artist")),
+                     ("meta_section_text_cleanup", (
+                         "normalize_spaces", "strip_junk", "album_artist",
+                         "replace_text", "change_case", "number_tracks",
+                     )),
                      ("meta_section_clear_fields", (
                          "clear_title", "clear_artist", "clear_album", "clear_album_artist",
                          "clear_track_num", "clear_year", "clear_genre", "clear_comments",
@@ -2186,7 +2184,11 @@ class MetadataEditorPanel(
                  ),
              )),
             ("tools", t("meta_rename_group"),           FluentIcon.DOCUMENT,
-             self._build_inspector_actions(("clean_filename", "strip_filename_numbering"))),
+             self._build_inspector_actions(
+                 ("clean_filename", "strip_filename_numbering", "rename_from_title"),
+                 note_key="meta_rename_ops_note",
+                 settings_key="meta_clean_settings_open",
+                 settings_handler=self._on_clean_settings)),
             ("check", t("meta_duplicates_tools_title"), FluentIcon.FINGERPRINT, self._build_duplicate_tools_page()),
             ("tools", t("meta_online_title"),           FluentIcon.SEARCH,      self._build_online_metadata_page()),
             ("check", t("meta_problems_title"),         FluentIcon.INFO,        self._build_problems_page()),
@@ -2251,40 +2253,115 @@ class MetadataEditorPanel(
 
         shell_layout.addWidget(self._inspector_content, stretch=1)
         shell_layout.addWidget(self._inspector_rail)
+        # Explicit rather than relying on a later page's build to do it: the
+        # Actions page is built first and its rows would otherwise be styled
+        # only as a side effect of the pages that happen to follow it.
+        self._refresh_op_rows_style()
         self._select_inspector_tool(0)
         return shell
 
-    def _build_action_engine_page(self) -> QWidget:
+    # Registry categories, in the order they are offered on the Actions page.
+    # "clear" is deliberately absent: those eight live as compact buttons on
+    # the Clean Up page and would only be noise repeated here.
+    _ACTION_CATEGORY_KEYS: tuple[tuple[str, str], ...] = (
+        ("template", "meta_action_category_template"),
+        ("cleanup", "meta_action_category_cleanup"),
+        ("edit", "meta_action_category_edit"),
+        ("organize", "meta_action_category_organize"),
+        ("filename_to_tags", "meta_group_from_filename"),
+        ("filename", "meta_action_category_filename"),
+    )
+
+    def _build_action_engine_page(self) -> QScrollArea:
+        """Tools > Actions.
+
+        The page was a paragraph and one button, which made the registry's
+        most capable actions -- the two template converters, find and replace,
+        case conversion, track numbering -- reachable only by opening a modal
+        and hunting through a flat 23-entry combo box.  Listing them here is
+        what makes them findable; each row opens the engine on that action.
+        """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 14, 12, 14)
         layout.setSpacing(10)
-        title = QLabel(t("meta_action_engine_page_title"))
-        title.setWordWrap(True)
-        title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(title)
+        layout.setAlignment(Qt.AlignTop)
+
         body = QLabel(t("meta_action_engine_page_body"))
         body.setWordWrap(True)
+        body.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(body)
+
         self._action_engine_btn = QPushButton(t("meta_action_engine_open"))
         self._action_engine_btn.setIcon(FluentIcon.TAG.icon())
         self._action_engine_btn.setAccessibleName(t("meta_action_engine_open"))
-        self._action_engine_btn.clicked.connect(self._on_action_engine)
+        self._action_engine_btn.setProperty("accentRole", "primary")
+        self._action_engine_btn.setStyleSheet(primary_btn_style())
+        # Not a bare connect: QPushButton.clicked would pass its checked flag
+        # straight into initial_action_id.
+        self._action_engine_btn.clicked.connect(lambda: self._on_action_engine())
         layout.addWidget(self._action_engine_btn)
-        layout.addStretch()
-        return page
 
-    def _create_action_engine_dialog(self) -> TagActionDialog:
+        from core.tag_actions import builtin_registry
+        by_category: dict[str, list] = {}
+        for action in builtin_registry().actions():
+            by_category.setdefault(action.category, []).append(action)
+
+        for category, header_key in self._ACTION_CATEGORY_KEYS:
+            actions = by_category.get(category, ())
+            if not actions:
+                continue
+            header = QLabel(t(header_key))
+            header.setStyleSheet(
+                f"color: {tag_editor_colors().text_secondary};"
+                " font-size: 11px; font-weight: 800; margin-top: 4px;")
+            layout.addWidget(header)
+            for action in actions:
+                label = t(action.name_key)
+                row = OpRow(label)
+                a11y.describe(row, label, description=t(action.description_key))
+                row.clicked.connect(
+                    lambda action_id=action.id: self._on_action_engine(action_id))
+                info = self._make_op_side_button("", t(action.description_key))
+                info.setIcon(FluentIcon.INFO.icon())
+                info.setIconSize(QSize(14, 14))
+                a11y.describe(info, t("meta_a11y_about_action", action=label),
+                              description=t(action.description_key))
+                info.clicked.connect(
+                    lambda _=False, l=label, d=t(action.description_key): self._show_info(l, d))
+                row.add_side_button(info)
+                layout.addWidget(row)
+                # A separate registry from _op_rows on purpose: those run on
+                # the table selection and are greyed without one, while these
+                # open the engine, which carries its own scope picker.
+                self._action_catalog_rows.append(row)
+
+        layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        return scroll
+
+    def _create_action_engine_dialog(self, initial_action_id: str = "") -> TagActionDialog:
         return TagActionDialog(
             self._workspace,
             active_folder=self._navigation.current,
             parent=self,
             accept_preview=self._accept_tag_action_preview,
             open_preset_transfer=self._on_metadata_io,
+            initial_action_id=initial_action_id,
         )
 
-    def _on_action_engine(self) -> None:
-        dialog = self._create_action_engine_dialog()
+    def _on_action_engine(self, initial_action_id: str = "") -> None:
+        """Open the action engine, optionally landing on one action.
+
+        The parameterised operations in the Tools pages route here: they are
+        real actions in the registry, but they need a value before they can
+        run, and the engine is where values are entered and previewed.
+        """
+        dialog = self._create_action_engine_dialog(initial_action_id)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._model.refresh_all()
             self._update_summary()
@@ -2405,6 +2482,9 @@ class MetadataEditorPanel(
         op_keys: Optional[tuple[str, ...]],
         *,
         sections: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None,
+        note_key: str = "",
+        settings_key: str = "",
+        settings_handler=None,
         extra: Optional[QWidget] = None,
     ) -> QScrollArea:
         # No inline title here — the persistent inspector header
@@ -2420,7 +2500,24 @@ class MetadataEditorPanel(
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
 
+        if note_key:
+            note = QLabel(t(note_key))
+            note.setWordWrap(True)
+            note.setObjectName("tagEditorInspectorNote")
+            layout.addWidget(note)
+
         layout.addWidget(self._build_magic_ops_widget(op_keys, sections=sections))
+        if settings_key and settings_handler is not None:
+            # A full-width entry rather than only the gear on one row: the
+            # settings govern the whole page, and a 28px icon on a single
+            # operation is not where anyone looks for them.
+            settings_btn = QPushButton(t(settings_key))
+            settings_btn.setIcon(FluentIcon.SETTING.icon(color=get_colors().text_primary))
+            settings_btn.setIconSize(QSize(14, 14))
+            settings_btn.setStyleSheet(btn_style())
+            a11y.describe(settings_btn, t(settings_key))
+            settings_btn.clicked.connect(settings_handler)
+            layout.addWidget(settings_btn)
         if extra is not None:
             layout.addWidget(extra)
         layout.addStretch()
@@ -2436,11 +2533,22 @@ class MetadataEditorPanel(
         return scroll
 
     def _build_duplicate_tools_page(self) -> QScrollArea:
+        """Check > Duplicates.
+
+        The page used to be a lone button, so the only way to learn whether
+        the folder even has duplicates was to open the full manager.  It now
+        reports what the last scan found before you commit to that.
+        """
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
+
+        note = QLabel(t("meta_dupes_page_note"))
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
+        layout.addWidget(note)
 
         self._dupes_btn = QPushButton(self._toolbar_text("meta_find_duplicates"))
         self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color=get_colors().text_primary))
@@ -2451,6 +2559,23 @@ class MetadataEditorPanel(
                       tooltip=t("meta_dupes_tooltip"))
         self._dupes_btn.clicked.connect(self._on_find_duplicates)
         layout.addWidget(self._dupes_btn)
+
+        self._dupes_summary = QLabel(t("meta_dupes_never_scanned"))
+        self._dupes_summary.setWordWrap(True)
+        layout.addWidget(self._dupes_summary)
+
+        self._dupes_groups = QWidget()
+        self._dupes_groups_layout = QVBoxLayout(self._dupes_groups)
+        self._dupes_groups_layout.setContentsMargins(0, 0, 0, 0)
+        self._dupes_groups_layout.setSpacing(6)
+        layout.addWidget(self._dupes_groups)
+
+        self._dupes_reopen_btn = QPushButton(t("meta_dupes_reopen"))
+        self._dupes_reopen_btn.setStyleSheet(btn_style())
+        self._dupes_reopen_btn.setVisible(False)
+        self._dupes_reopen_btn.clicked.connect(self._reopen_duplicate_manager)
+        layout.addWidget(self._dupes_reopen_btn)
+
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -2459,6 +2584,57 @@ class MetadataEditorPanel(
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         return scroll
+
+    @staticmethod
+    def _duplicate_group_list(groups) -> list:
+        """Normalise the two shapes the duplicate scan can return."""
+        return list(getattr(groups, "groups", groups) or ())
+
+    def _render_duplicate_groups(self, groups) -> None:
+        """Summarise the last duplicate scan without reopening the manager."""
+        if not hasattr(self, "_dupes_groups_layout"):
+            return
+        self._clear_dynamic_layout(self._dupes_groups_layout)
+        entries = self._duplicate_group_list(groups)
+        if not entries:
+            self._dupes_summary.setText(t("meta_dupes_none_found"))
+            self._dupes_reopen_btn.setVisible(False)
+            return
+        total = sum(len(getattr(group, "files", group) or ()) for group in entries)
+        self._dupes_summary.setText(
+            t("meta_dupes_summary", groups=len(entries), files=total))
+        for group in entries[:20]:
+            files = list(getattr(group, "files", group) or ())
+            row = QFrame()
+            row.setObjectName("tagEditorPendingItem")
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(8, 7, 8, 7)
+            row_layout.setSpacing(2)
+            name = QLabel(t("meta_dupes_group_title",
+                            name=Path(files[0]).name if files else "",
+                            n=len(files)))
+            name.setObjectName("tagEditorPendingFile")
+            name.setLayoutDirection(Qt.LeftToRight)
+            name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            where = QLabel(str(Path(files[0]).parent) if files else "")
+            where.setObjectName("tagEditorPendingChange")
+            where.setWordWrap(True)
+            where.setLayoutDirection(Qt.LeftToRight)
+            row_layout.addWidget(name)
+            row_layout.addWidget(where)
+            self._dupes_groups_layout.addWidget(row)
+        self._dupes_reopen_btn.setVisible(True)
+
+    def _reopen_duplicate_manager(self) -> None:
+        """Show the manager again for a scan that already ran."""
+        cached = getattr(self, "_last_duplicate_scan", None)
+        if cached is None:
+            return
+        groups, elapsed, strategy = cached
+        from ui.dialogs.duplicate_files_dialog import DuplicateFilesDialog
+        dlg = DuplicateFilesDialog(groups, elapsed, strategy, self._root_folder, parent=self)
+        if dlg.exec() == QDialog.Accepted and dlg.files_to_delete:
+            self.delete_duplicates_requested.emit(dlg.files_to_delete)
 
     def _build_problems_page(self) -> QScrollArea:
         page = QWidget()
@@ -3360,10 +3536,64 @@ class MetadataEditorPanel(
             self._inspector_title_lbl.setText(t("meta_inspector_no_selection_header"))
             self._inspector_selection_lbl.clear()
             self._inspector.setCurrentIndex(PAGE_FOLDER)
+            self._clear_inspector_pages()
         else:
             self._inspector_title_lbl.setText(t("meta_inspector_no_selection_header"))
             self._inspector_selection_lbl.clear()
             self._inspector.setCurrentIndex(PAGE_EMPTY)
+            self._clear_inspector_pages()
+
+    def _clear_inspector_pages(self) -> None:
+        """Blank the pages that describe one selection when there is none.
+
+        Only the Fields page lives in the empty/folder/tracks stack, so
+        Artwork, Lyrics, ReplayGain and Properties used to keep rendering the
+        last file the user had selected -- with its real path, size and cover
+        -- long after it was deselected.  Worse, the three property buttons
+        stayed enabled and silently did nothing, because their handlers read a
+        selection that was no longer there.
+        """
+        self._cancel_artwork_thumbnails()
+
+        if hasattr(self, "_insp_lyrics"):
+            self._lyrics_refreshing = True
+            try:
+                self._insp_lyrics.clear()
+                self._insp_lyrics_language.clear()
+                self._insp_lyrics_description.clear()
+            finally:
+                self._lyrics_refreshing = False
+            self._lyrics_dirty = False
+            self._insp_lyrics_state.setText(t("meta_inspector_no_selection_header"))
+            # The editor itself must go dead too: an enabled text box invites
+            # typing lyrics that belong to nothing.
+            self._insp_lyrics.setEnabled(False)
+            self._insp_lyrics_language.setEnabled(False)
+            self._insp_lyrics_description.setEnabled(False)
+
+        if hasattr(self, "_insp_artwork_preview"):
+            for preview, text_key in (
+                (self._insp_artwork_preview, "meta_artwork_none_short"),
+                (self._insp_artwork_proposed_preview, "meta_artwork_drop_prompt"),
+            ):
+                preview.setPixmap(QPixmap())
+                preview.setText(t(text_key))
+            self._insp_artwork_state.setText(t("meta_inspector_no_selection_header"))
+
+        if hasattr(self, "_insp_replay_values"):
+            for label in self._insp_replay_values.values():
+                label.setText(t("meta_inspector_empty_value"))
+
+        if hasattr(self, "_insp_property_values"):
+            for label in self._insp_property_values.values():
+                label.clear()
+            self._insp_property_table.setVisible(False)
+            self._insp_properties.setText(t("meta_inspector_no_selection_header"))
+            self._insp_properties.setVisible(True)
+            self._insp_external_status.clear()
+            self._insp_external_review_btn.setVisible(False)
+
+        self._refresh_selection_scope_state()
 
 
     def _on_select_all_toggled(self, checked: bool) -> None:
@@ -3676,6 +3906,55 @@ class MetadataEditorPanel(
                 affected=result.affected_count,
                 unsupported=result.unsupported_count,
             ))
+
+    # Fields copied from one file, waiting to be pasted onto others. Artwork,
+    # lyrics and ReplayGain are excluded because each has its own page and its
+    # own safety rules. Three text fields are excluded on purpose because they
+    # identify one recording and must never be duplicated across files:
+    # track_num, isrc, and the per-title sort fields.
+    _TAG_CLIPBOARD_FIELDS = (
+        "title", "artist", "album", "album_artist", "genre", "year", "comment",
+        "composer", "publisher", "copyright", "bpm", "grouping",
+        "disc_num", "disc_total", "track_total",
+    )
+
+    def _on_copy_tags(self) -> None:
+        """Remember one file's tag values so they can be pasted onto others."""
+        tracks = self._get_selected_tracks()
+        if len(tracks) != 1:
+            prompts.show_warning(self.window(), t("meta_copy_tags"),
+                                 t("meta_copy_tags_needs_one"))
+            return
+        source = tracks[0].proposed.effective_tags(tracks[0].original)
+        values = {
+            name: value
+            for name in self._TAG_CLIPBOARD_FIELDS
+            if (value := source.field_value(name)) not in (None, "")
+        }
+        self._tag_clipboard = values
+        # Track number is excluded on purpose: copying it across files would
+        # give every track in the selection the same number.
+        self._insp_tag_clipboard_lbl.setText(
+            t("meta_tag_clipboard_holds", n=len(values), name=tracks[0].path.name)
+            if values else t("meta_tag_clipboard_empty_source")
+        )
+        self._insp_paste_tags_btn.setEnabled(bool(values))
+
+    def _on_paste_tags(self) -> None:
+        """Propose the copied values for every selected file."""
+        values = getattr(self, "_tag_clipboard", None)
+        tracks = self._get_selected_tracks()
+        if not values or not tracks:
+            return
+        affected = unsupported = 0
+        for name, value in values.items():
+            result = self._inspector_state.propose_set(tracks, name, value)
+            affected += result.affected_count
+            unsupported += result.unsupported_count
+        self._after_inspector_proposal(tracks, origin=ChangeOrigin.MANUAL)
+        if unsupported:
+            self._insp_capability.setText(
+                t("meta_inspector_partial_scope", affected=affected, unsupported=unsupported))
 
     def _on_insp_rename_from_title(self) -> None:
         tracks = self._get_selected_tracks()
@@ -4102,12 +4381,11 @@ class MetadataEditorPanel(
             self.on_status_update(t("meta_problems_cancelled"))
             self._update_summary()
             return
-        if hasattr(groups, "groups"):
-            if not groups.groups:
-                self.on_status_update(t("meta_no_duplicates_found", elapsed=elapsed))
-                self._update_summary()
-                return
-        elif not groups:
+        # Keep the result so the Duplicates page can describe it, and so the
+        # manager can be reopened without paying for a second scan.
+        self._last_duplicate_scan = (groups, elapsed, strategy)
+        self._render_duplicate_groups(groups)
+        if not self._duplicate_group_list(groups):
             self.on_status_update(t("meta_no_duplicates_found", elapsed=elapsed))
             self._update_summary()
             return
@@ -4394,7 +4672,10 @@ class MetadataEditorPanel(
         if hasattr(self, "_dupes_btn"):
             self._dupes_btn.setEnabled(self._root_folder is not None and not self._is_scanning)
         if hasattr(self, "_action_engine_btn"):
-            self._action_engine_btn.setEnabled(has_tracks and not self._is_scanning and not self._is_applying)
+            engine_available = has_tracks and not self._is_scanning and not self._is_applying
+            self._action_engine_btn.setEnabled(engine_available)
+            for row in getattr(self, "_action_catalog_rows", ()):
+                row.setActionEnabled(engine_available)
         if hasattr(self, "_backup_manager_btn"):
             self._backup_manager_btn.setEnabled(not self._is_applying and not self._is_restoring)
         if hasattr(self, "_insp_folder_title"):
@@ -4445,6 +4726,19 @@ class MetadataEditorPanel(
             self._online_open_button.setEnabled(has_selection)
         for btn in getattr(self, "_selection_scope_buttons", []):
             btn.setEnabled(has_selection)
+        # Open / Reveal / Copy path address one file by name; with several
+        # selected there is no single answer, so they need a stricter rule than
+        # the rest of the selection-scoped controls.
+        if hasattr(self, "_insp_property_open_btn"):
+            for btn in (self._insp_property_open_btn, self._insp_property_reveal_btn,
+                        self._insp_property_copy_btn):
+                btn.setEnabled(selected_count == 1)
+        if hasattr(self, "_insp_copy_tags_btn"):
+            # Copy reads exactly one file; paste needs something on the
+            # clipboard as well as somewhere to put it.
+            self._insp_copy_tags_btn.setEnabled(selected_count == 1)
+            self._insp_paste_tags_btn.setEnabled(
+                has_selection and bool(getattr(self, "_tag_clipboard", None)))
         if getattr(self, "_replaygain_analysis_running", False):
             self._insp_rg_track_btn.setEnabled(False)
             self._insp_rg_album_btn.setEnabled(False)
@@ -4710,8 +5004,12 @@ class MetadataEditorPanel(
             artwork_text += " " + t("meta_artwork_invalid_image")
         self._insp_artwork_state.setText(artwork_text)
         editable_artwork = artwork_state.supported_count > 0
-        can_add = editable_artwork and all(track.format_id != "m4a" for track in tracks)
-        self._insp_artwork_add_btn.setEnabled(can_add)
+        # "Choose image" is the adaptive entry point: it appends when the file
+        # has no cover and can hold several, and replaces otherwise.  It used
+        # to be disabled outright for M4A (single-cover format), which -- with
+        # Replace hidden at the time -- left no way at all to set a cover on an
+        # M4A file.
+        self._insp_artwork_add_btn.setEnabled(editable_artwork)
         self._insp_artwork_replace_btn.setEnabled(editable_artwork)
         removable = any(track.original.artwork.entries or track.original.artwork.diagnostics for track in tracks)
         self._insp_artwork_remove_btn.setEnabled(editable_artwork and removable)

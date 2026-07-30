@@ -142,6 +142,18 @@ class OpRow(QFrame):
     Replaces a plain QPushButton so long Hebrew labels wrap to multiple
     lines instead of being elided/cut off, and gives the inspector a
     modern, touch-friendly look.
+
+    It has to earn back what QPushButton gave away for free: keyboard focus,
+    Space/Enter activation and an accessible name.  Without those the whole
+    action list is mouse-only, which is how it shipped -- the eight compact
+    clear buttons on the same page were reachable by Tab while these nine
+    rows were not.
+
+    It stays a QFrame rather than becoming a QAbstractButton because the
+    info and settings controls live *inside* the row; a button nested in a
+    button is a worse thing to hand a screen reader than a named, focusable
+    frame.  The cost is that the row is announced by its name and not as a
+    button role.
     """
     clicked = Signal()
 
@@ -151,6 +163,9 @@ class OpRow(QFrame):
         self._action_enabled = True
         self.setProperty("actionEnabled", "true")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Tab reaches it, and a click still moves focus here so the focus ring
+        # follows the pointer the way a real button does.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._row_layout = QHBoxLayout(self)
         self._row_layout.setContentsMargins(10, 9, 10, 9)
         self._row_layout.setSpacing(6)
@@ -161,6 +176,15 @@ class OpRow(QFrame):
         # is the click target.
         self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._row_layout.addWidget(self._label, 1)
+        self.setAccessibleName(text)
+
+    def setText(self, text: str) -> None:
+        """Keep the visible label and the announced name in step."""
+        self._label.setText(text)
+        self.setAccessibleName(text)
+
+    def text(self) -> str:
+        return self._label.text()
 
     def add_side_button(self, btn: QPushButton) -> None:
         self._row_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
@@ -169,9 +193,17 @@ class OpRow(QFrame):
         self._action_enabled = enabled
         self.setProperty("actionEnabled", "true" if enabled else "false")
         self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
+        # A row that cannot be run must not be a tab stop either, or keyboard
+        # users land on it and nothing happens.
+        self.setFocusPolicy(
+            Qt.FocusPolicy.StrongFocus if enabled else Qt.FocusPolicy.NoFocus)
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
+
+    def _activate(self) -> None:
+        if self._action_enabled:
+            self.clicked.emit()
 
     def mouseReleaseEvent(self, event) -> None:
         if (self._action_enabled
@@ -179,3 +211,12 @@ class OpRow(QFrame):
                 and self.rect().contains(event.position().toPoint())):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        # Space and Enter are what a screen-reader user presses on something
+        # announced as a button; Return is what a sighted keyboard user tries.
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._activate()
+            event.accept()
+            return
+        super().keyPressEvent(event)

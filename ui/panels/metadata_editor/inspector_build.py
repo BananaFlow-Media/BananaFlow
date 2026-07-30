@@ -143,8 +143,8 @@ class InspectorBuildMixin:
         """
         w = QWidget()
         layout = QVBoxLayout(w)
-        # Keep these measurements in lockstep with the approved HTML design:
-        # ``.inspector-body { padding: 11px 12px }``.
+        # Every inspector body uses this padding; keeping it identical across
+        # the pages is what stops the panel shifting as you switch tabs.
         layout.setContentsMargins(12, 11, 12, 11)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
@@ -291,12 +291,42 @@ class InspectorBuildMixin:
         btn_apply_fields.clicked.connect(self._on_insp_apply_fields)
         self._selection_scope_buttons.append(btn_apply_fields)
         fields_layout.addWidget(btn_apply_fields)
+
+        # Copy one file's tags onto others.  Deliberately two steps rather than
+        # a "copy from the row above" shortcut: the copied set is shown in the
+        # status line before it can be pasted anywhere.
+        transfer = QHBoxLayout()
+        transfer.setSpacing(6)
+        self._insp_copy_tags_btn = QPushButton(t("meta_copy_tags"))
+        self._insp_copy_tags_btn.setStyleSheet(btn_style())
+        a11y.describe(self._insp_copy_tags_btn, t("meta_copy_tags"),
+                      description=t("meta_copy_tags_hint"))
+        self._insp_copy_tags_btn.clicked.connect(self._on_copy_tags)
+        self._insp_paste_tags_btn = QPushButton(t("meta_paste_tags"))
+        self._insp_paste_tags_btn.setStyleSheet(btn_style())
+        a11y.describe(self._insp_paste_tags_btn, t("meta_paste_tags"),
+                      description=t("meta_paste_tags_hint"))
+        self._insp_paste_tags_btn.clicked.connect(self._on_paste_tags)
+        self._insp_paste_tags_btn.setEnabled(False)
+        for button in (self._insp_copy_tags_btn, self._insp_paste_tags_btn):
+            transfer.addWidget(button)
+            self._selection_scope_buttons.append(button)
+        fields_layout.addLayout(transfer)
+
+        self._insp_tag_clipboard_lbl = QLabel("")
+        self._insp_tag_clipboard_lbl.setWordWrap(True)
+        self._insp_tag_clipboard_lbl.setObjectName("tagEditorDialogNote")
+        fields_layout.addWidget(self._insp_tag_clipboard_lbl)
         return fields_grp
 
     def _toggle_advanced_fields(self, shown: bool) -> None:
         for row in self._insp_advanced_rows:
             row.setVisible(bool(shown))
-        self._insp_advanced_btn.setText(t("meta_hide_additional_fields"))
+        # Both halves have to follow ``shown``: the label used to be pinned to
+        # "hide", so once the rows were collapsed the button claimed it would
+        # hide fields that were already hidden.
+        self._insp_advanced_btn.setText(t(
+            "meta_hide_additional_fields" if shown else "meta_show_additional_fields"))
         self._insp_advanced_btn.setIcon(
             (FluentIcon.REMOVE if shown else FluentIcon.ADD).icon(
                 color=tag_editor_colors().accent))
@@ -409,22 +439,20 @@ class InspectorBuildMixin:
         self._insp_artwork_paste_btn.clicked.connect(self._on_artwork_paste)
         self._insp_artwork_export_btn.clicked.connect(self._on_artwork_export)
         self._insp_artwork_revert_btn.clicked.connect(self._on_artwork_revert)
-        visible_buttons = (
-            self._insp_artwork_add_btn, self._insp_artwork_paste_btn,
-            self._insp_artwork_export_btn, self._insp_artwork_remove_btn,
-        )
+        # Add and Replace stay separate rows rather than one adaptive button:
+        # guessing which one the user meant is fine as a default, but it must
+        # not be the only way to say "append this as a second picture".
+        # Revert is here for the same reason Lyrics has one -- a pending
+        # artwork proposal was otherwise only undoable by reverting the whole
+        # file from the footer.
         self._insp_artwork_remove_btn.setProperty("dangerRole", True)
-        for index, button in enumerate(visible_buttons):
+        for index, button in enumerate((
+            self._insp_artwork_add_btn, self._insp_artwork_paste_btn,
+            self._insp_artwork_export_btn, self._insp_artwork_replace_btn,
+            self._insp_artwork_revert_btn, self._insp_artwork_remove_btn,
+        )):
             artwork_buttons.addWidget(button, index // 2, index % 2)
             self._selection_scope_buttons.append(button)
-        # The production editor distinguishes append, replace and revert.
-        # The prototype presents one Choose action and four visible buttons,
-        # so keep the extra entry points available to code without adding
-        # visual controls the reference does not have.
-        self._insp_artwork_replace_btn.setVisible(False)
-        self._insp_artwork_revert_btn.setVisible(False)
-        self._selection_scope_buttons.extend(
-            (self._insp_artwork_replace_btn, self._insp_artwork_revert_btn))
         artwork_layout.addLayout(artwork_buttons)
         artwork_support = QLabel(t("meta_artwork_support_note"))
         artwork_support.setObjectName("tagEditorDialogNote")
@@ -487,19 +515,18 @@ class InspectorBuildMixin:
         self._insp_rg_clear_track_btn.clicked.connect(self._on_replaygain_clear_track)
         self._insp_rg_clear_album_btn.clicked.connect(self._on_replaygain_clear_album)
         self._insp_rg_revert_btn.clicked.connect(self._on_replaygain_revert)
+        # The separate track/album clears are the whole point of the docstring
+        # above: an album value is shared across files and a track value is
+        # not, so collapsing them into one "clear everything" button takes the
+        # safe choice away rather than simplifying it.
         for index, button in enumerate((
             self._insp_rg_track_btn, self._insp_rg_album_btn,
-            self._insp_rg_clear_all_btn, self._insp_rg_cancel_btn,
+            self._insp_rg_clear_track_btn, self._insp_rg_clear_album_btn,
+            self._insp_rg_clear_all_btn, self._insp_rg_revert_btn,
+            self._insp_rg_cancel_btn,
         )):
             replay_actions.addWidget(button, index // 2, index % 2)
             self._selection_scope_buttons.append(button)
-        self._insp_rg_clear_track_btn.setVisible(False)
-        self._insp_rg_clear_album_btn.setVisible(False)
-        self._insp_rg_revert_btn.setVisible(False)
-        self._selection_scope_buttons.extend((
-            self._insp_rg_clear_track_btn, self._insp_rg_clear_album_btn,
-            self._insp_rg_revert_btn,
-        ))
         replay_layout.addLayout(replay_actions)
         self._insp_rg_progress = QProgressBar()
         self._insp_rg_progress.setVisible(False)
@@ -563,6 +590,10 @@ class InspectorBuildMixin:
         for button in (self._insp_property_open_btn, self._insp_property_reveal_btn,
                        self._insp_property_copy_btn):
             prop_actions.addWidget(button)
+            # All three act on exactly one selected file.  Without this they
+            # stayed enabled after a deselect and their handlers just returned,
+            # so the click did nothing and said nothing.
+            self._selection_scope_buttons.append(button)
         props_layout.addLayout(prop_actions)
         self._insp_external_status = QLabel()
         self._insp_external_status.setWordWrap(True)
@@ -590,25 +621,6 @@ class InspectorBuildMixin:
         tracks = self._get_selected_tracks()
         if len(tracks) == 1:
             QApplication.clipboard().setText(str(tracks[0].path))
-
-    def _build_rename_group(self) -> QGroupBox:
-        """Physical rename derived from the title. Still only a proposal: nothing
-        reaches the filesystem before Apply."""
-        rename_grp = QGroupBox(t("meta_rename_group"))
-        rename_layout = QVBoxLayout(rename_grp)
-        rename_layout.setSpacing(6)
-        rename_note = QLabel(t("meta_rename_note"))
-        rename_note.setWordWrap(True)
-        rename_note.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
-        rename_layout.addWidget(rename_note)
-        btn_rename = QPushButton(t("meta_rename_btn"))
-        btn_rename.setIcon(FluentIcon.SAVE_AS.icon(color="#000000"))
-        btn_rename.setIconSize(QSize(14, 14))
-        btn_rename.setStyleSheet(btn_style())
-        btn_rename.clicked.connect(self._on_insp_rename_from_title)
-        self._selection_scope_buttons.append(btn_rename)
-        rename_layout.addWidget(btn_rename)
-        return rename_grp
 
     def _build_edit_artwork_page(self) -> QScrollArea:
         """Edit > Artwork."""
@@ -693,18 +705,21 @@ class InspectorBuildMixin:
         return self._inspector_scroll(w)
 
     def _refresh_auto_enabled_list(self) -> None:
-        """Mirror the auto-arrange settings into the page that runs them."""
+        """Mirror the auto-arrange settings into the page that runs them.
+
+        The album-from-folder step is listed first and marked as always on.
+        It runs on every Auto-Order regardless of the settings, so leaving it
+        out made the list of "operations this runs" quietly incomplete.
+        """
         if not hasattr(self, "_auto_enabled_list"):
             return
-        labels = [
+        labels = [t("meta_auto_always_album")]
+        labels += [
             t(label_key)
             for op_id, label_key, _desc in MAGIC_OP_DEFS
             if op_id in self._auto_ops
         ]
-        self._auto_enabled_list.setText(
-            "\n".join(f"•  {label}" for label in labels)
-            if labels else t("meta_auto_none_enabled")
-        )
+        self._auto_enabled_list.setText("\n".join(f"•  {label}" for label in labels))
 
     def _build_check_pending_page(self) -> QScrollArea:
         """Check > Pending changes.
@@ -916,7 +931,7 @@ class InspectorBuildMixin:
             return
         qss = op_row_qss()
         compact_qss = compact_clear_button_qss()
-        for row in self._op_rows:
+        for row in (*self._op_rows, *getattr(self, "_action_catalog_rows", ())):
             row.setStyleSheet(compact_qss if row.property("cleanupCompact") else qss)
 
     def _build_magic_ops_widget(
@@ -955,6 +970,15 @@ class InspectorBuildMixin:
             "clear_album_artist": lambda tracks: self.clear_album_artist.emit(tracks),
             "clean_filename":   lambda tracks: self.clean_filename.emit(tracks),
             "strip_filename_numbering": lambda tracks: self.strip_filename_numbering.emit(tracks),
+            "rename_from_title": lambda tracks: self.rename_from_title.emit(tracks),
+        }
+        # Parameterised operations cannot run from a single click, so they hand
+        # off to the action engine with that action already selected. Their
+        # labels end with an ellipsis to say so before the click.
+        parameterised_ops: dict[str, str] = {
+            "replace_text":  "tag.replace_text.v1",
+            "change_case":   "tag.change_case.v1",
+            "number_tracks": "tag.number_tracks.v1",
         }
         op_defs_by_key = {key: (label_key, desc_key) for key, label_key, desc_key in MAGIC_OP_DEFS}
 
@@ -970,7 +994,14 @@ class InspectorBuildMixin:
             label = t(label_key)
             desc  = t(desc_key)
             row = OpRow(label)
-            if key in op_handlers:
+            # The row is focusable, so it is announced on its own; the "what
+            # does this do" paragraph behind the info button is its description
+            # rather than something only a mouse user can reach.
+            a11y.describe(row, label, description=desc)
+            if key in parameterised_ops:
+                row.clicked.connect(
+                    lambda action_id=parameterised_ops[key]: self._on_action_engine(action_id))
+            elif key in op_handlers:
                 row.clicked.connect(lambda handler=op_handlers[key]: run_for_checked(handler))
 
             if key in ("strip_junk", "clean_filename"):
