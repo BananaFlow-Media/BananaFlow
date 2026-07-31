@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QByteArray, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_CUR, COL_TITLE_NEW,
@@ -152,6 +153,57 @@ DEFAULT_COL_WIDTHS: dict[int, int] = {
     COL_GUTTER:       17,  # 60% of the old 28 px empty gutter
     COL_END_GUTTER:    9,  # About half of the leading empty gutter
 }
+
+
+# The collapsed inspector rail's glyphs, taken verbatim from the reference
+# prototype's icon table.  FluentIcon has no counterpart that reads the same at
+# 18 px: EDIT boxes the pencil and CERTIFICATE draws a badge rather than the
+# circled tick.  "tools" is deliberately absent -- that one stays on
+# FluentIcon.DEVELOPER_TOOLS.
+_RAIL_ICON_SVG = {
+    "edit": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    "check": '<path d="M9 11l3 3L22 4"/><path d="M21 12a9 9 0 1 1-5.3-8.2"/>',
+}
+
+_RAIL_ICON_TEMPLATE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"'
+    ' stroke="{color}" stroke-width="1.9" stroke-linecap="round"'
+    ' stroke-linejoin="round">{paths}</svg>'
+)
+
+
+def rail_icon(name: str, color: str, size: int = 18) -> QIcon:
+    """Render a reference rail glyph, tinted for the current theme.
+
+    Kept at 4x rather than scaled back down, the way the Tag Editor's other
+    hand-drawn icons are: Qt then has the resolution to stay sharp at any DPI.
+    """
+    render_size = size * 4
+    svg = _RAIL_ICON_TEMPLATE.format(color=color, paths=_RAIL_ICON_SVG[name])
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(render_size, render_size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    renderer.render(painter, QRectF(0, 0, render_size, render_size))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def rail_btn_style() -> str:
+    """The collapsed rail's icon button -- the prototype's ``.btn.icononly``.
+
+    Every mode carries the same card, open or not: the reference draws no
+    selected state here, and a rail that is only visible while the inspector is
+    collapsed has no open pane to point at.
+    """
+    c = tag_editor_colors()
+    return (
+        f"QPushButton {{ background: {c.surface}; border: 1px solid {c.border};"
+        f"  border-radius: 9px; padding: 0; }}"
+        f"QPushButton:hover {{ background: {c.surface3}; }}"
+        f"QPushButton:pressed {{ background: {c.surface2}; }}"
+    )
 
 
 def btn_style() -> str:

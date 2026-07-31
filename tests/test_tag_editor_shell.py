@@ -372,6 +372,63 @@ def test_subtabs_show_only_the_active_mode(panel):
     assert shown == edit_buttons
 
 
+def test_collapsed_rail_draws_every_mode_as_the_same_card(panel):
+    """The reference's `.btn.icononly`: a card per mode, and no selected state.
+
+    Before, only the active mode was boxed and the other two were bare glyphs,
+    which read as three unrelated marks floating on the strip.
+    """
+    from ui.panels.metadata_editor.shared import rail_btn_style
+
+    assert set(panel._inspector_rail_buttons) == {"edit", "tools", "check"}
+    for mode in ("edit", "tools", "check"):
+        panel._open_inspector_mode(mode)
+        styles = {m: b.styleSheet() for m, b in panel._inspector_rail_buttons.items()}
+        assert len(set(styles.values())) == 1, f"{mode} active split the rail: {styles}"
+        assert styles[mode] == rail_btn_style()
+
+
+def test_collapsed_rail_buttons_keep_the_reference_geometry(panel):
+    for btn in panel._inspector_rail_buttons.values():
+        assert (btn.width(), btn.height()) == (32, 32)
+        assert (btn.iconSize().width(), btn.iconSize().height()) == (18, 18)
+        assert not btn.icon().isNull()
+
+
+def test_collapsed_rail_glyphs_retint_when_the_theme_flips(panel, monkeypatch):
+    """The tint is cached per palette, so prove the cache still lets go."""
+    from types import SimpleNamespace
+    from ui.panels.metadata_editor import shared
+
+    def glyphs():
+        return [btn.icon().pixmap(18, 18).toImage()
+                for btn in panel._inspector_rail_buttons.values()]
+
+    monkeypatch.setattr(
+        shared, "get_colors",
+        lambda: SimpleNamespace(bg="#fbfaff", accent="#10A37F"))
+    panel._refresh_tool_button_states()
+    light = glyphs()
+
+    monkeypatch.setattr(
+        shared, "get_colors",
+        lambda: SimpleNamespace(
+            bg="#0d0d12", accent="#10A37F", surface="#16161f", surface2="#1e1e2a",
+            border="#252533", text_primary="#eeeef5", text_secondary="#9aa0b5",
+            text_tertiary="#6b7280"))
+    panel._refresh_tool_button_states()
+
+    assert all(a != b for a, b in zip(light, glyphs()))
+
+
+def test_collapsed_rail_keeps_the_fluent_tools_glyph(panel):
+    """Edit and Check took the reference glyphs; Tools deliberately did not."""
+    from qfluentwidgets import FluentIcon
+    from ui.panels.metadata_editor.panel import MetadataEditorPanel
+
+    assert MetadataEditorPanel._RAIL_FLUENT_ICONS == {"tools": FluentIcon.DEVELOPER_TOOLS}
+
+
 def test_edit_panes_cover_the_whole_track_inspector(panel):
     """Fields, artwork, lyrics, ReplayGain and properties are now siblings."""
     for name in ("_insp_fields", "_insp_artwork_add_btn", "_insp_lyrics",

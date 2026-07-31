@@ -149,6 +149,8 @@ from .shared import (
     mark_tag_editor_dialog,
     op_row_qss,
     primary_btn_style,
+    rail_btn_style,
+    rail_icon,
     tag_editor_colors,
 )
 from .tree import ExplorerTreeWidget
@@ -354,6 +356,8 @@ class MetadataEditorPanel(
         self._active_inspector_tool = 0
         self._inspector_subtabs_mode: Optional[str] = None
         self._inspector_rail_buttons: dict[str, QPushButton] = {}
+        # Tint the rail glyphs were last rasterised at; see _refresh_tool_button_states.
+        self._rail_icon_tint: Optional[str] = None
         self._inspector_mode_buttons: dict[str, QPushButton] = {}
         self._inspector_pane_modes: list[str] = []
         self._apply_refresh_counter = 0
@@ -2101,6 +2105,23 @@ class MetadataEditorPanel(
         button.setIcon(fluent_icon.icon(color=get_colors().text_secondary))
         button.setIconSize(QSize(18, 18))
 
+    # "tools" keeps its FluentIcon; the other two use the reference glyphs,
+    # which FluentIcon has no close match for.
+    _RAIL_FLUENT_ICONS = {"tools": FluentIcon.DEVELOPER_TOOLS}
+
+    def _set_rail_button_icon(self, button: QPushButton, mode: str) -> None:
+        """Icon for one collapsed-rail mode button, tinted for the current theme.
+
+        All three take the prototype's ``.btn`` foreground, so the FluentIcon
+        one does not read a shade lighter than the two drawn from the reference.
+        """
+        color = tag_editor_colors().text_primary
+        fluent_icon = self._RAIL_FLUENT_ICONS.get(mode)
+        button.setText("")
+        button.setIcon(fluent_icon.icon(color=color) if fluent_icon is not None
+                       else rail_icon(mode, color))
+        button.setIconSize(QSize(18, 18))
+
     def _build_inspector_shell(self) -> QFrame:
         shell = QFrame()
         shell.setMinimumWidth(self._INSPECTOR_RAIL_WIDTH)
@@ -2228,22 +2249,22 @@ class MetadataEditorPanel(
         self._inspector_rail = QFrame()
         self._inspector_rail.setFixedWidth(self._INSPECTOR_RAIL_WIDTH)
         rail_layout = QVBoxLayout(self._inspector_rail)
-        rail_layout.setContentsMargins(5, 6, 5, 6)
+        # The prototype's `.collapsed-inspector`: padding 8px 0, gap 6, centred.
+        rail_layout.setContentsMargins(0, 8, 0, 8)
         rail_layout.setSpacing(6)
 
         # Collapsed, the rail offers the three modes rather than every pane:
         # a 40px strip cannot carry twelve legible targets.
-        for mode, icon in (("edit", FluentIcon.EDIT), ("tools", FluentIcon.DEVELOPER_TOOLS),
-                           ("check", FluentIcon.CERTIFICATE)):
+        for mode in ("edit", "tools", "check"):
             btn = QPushButton()
-            btn.setFixedSize(30, 30)
-            self._set_tool_button_icon(btn, icon)
+            btn.setFixedSize(32, 32)
+            self._set_rail_button_icon(btn, mode)
             label = self._inspector_mode_label(mode)
             a11y.describe(btn, label, tooltip=label)
             btn.clicked.connect(
                 lambda _=False, m=mode: self._open_inspector_mode(m))
             self._inspector_rail_buttons[mode] = btn
-            rail_layout.addWidget(btn)
+            rail_layout.addWidget(btn, alignment=Qt.AlignHCenter)
             rail_label = QLabel(label)
             rail_label.setAlignment(Qt.AlignCenter)
             rail_label.setStyleSheet(
@@ -2923,18 +2944,16 @@ class MetadataEditorPanel(
         """Track which pane is open.
 
         Appearance for the mode tabs and sub-tab chips comes from their
-        stylesheets' :checked rule (see _apply_shell_theme), so this only sets
-        state. Checked state is also what carries "this one is open" to a
-        screen reader and in high contrast, where a background colour does not.
+        stylesheets' :checked rule (see _apply_shell_theme), so for those this
+        only sets state. Checked state is also what carries "this one is open"
+        to a screen reader and in high contrast, where a background colour does
+        not. The collapsed rail is the exception: it is restyled outright,
+        because it needs its icons re-tinted after a theme change.
         """
         c = get_colors()
         button_qss = (
             "QPushButton { background: transparent; border: none; border-radius: 8px; padding: 3px; }"
             f"QPushButton:hover {{ background: {c.surface2}; }}"
-        )
-        active_qss = (
-            f"QPushButton {{ background: {c.surface2}; border: 1px solid {c.border};"
-            " border-radius: 8px; padding: 3px; }"
         )
         open_pane = self._active_inspector_tool
         expanded = not self._right_collapsed
@@ -2948,9 +2967,20 @@ class MetadataEditorPanel(
         for mode, btn in getattr(self, "_inspector_mode_buttons", {}).items():
             btn.setChecked(mode == active_mode and expanded)
 
-        # The collapsed rail is icon-only, so it keeps the icon-button styling.
+        # The collapsed rail's three modes are cards, all alike -- no selected
+        # state, as in the reference.  Re-icon here too: the tint is theme-bound
+        # and this is the one place the rail is refreshed after a theme change.
+        # Only when the tint actually moved, though -- a splitter drag lands
+        # here on every mouse move, and rasterising three glyphs per pixel is
+        # not what that path is for.
+        rail_qss = rail_btn_style()
+        rail_tint = tag_editor_colors().text_primary
+        retint = rail_tint != self._rail_icon_tint
         for mode, btn in getattr(self, "_inspector_rail_buttons", {}).items():
-            btn.setStyleSheet(active_qss if mode == active_mode else button_qss)
+            btn.setStyleSheet(rail_qss)
+            if retint:
+                self._set_rail_button_icon(btn, mode)
+        self._rail_icon_tint = rail_tint
         if hasattr(self, "_tree_toggle_btn"):
             self._tree_toggle_btn.setStyleSheet(button_qss)
             self._set_tool_button_icon(self._tree_toggle_btn, FluentIcon.FOLDER)
