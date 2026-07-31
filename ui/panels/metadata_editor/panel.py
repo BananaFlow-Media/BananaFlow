@@ -569,8 +569,16 @@ class MetadataEditorPanel(
                 f"QToolButton:hover {{ background: {c.surface3}; }}"
                 f"QToolButton:disabled {{ color: {c.text_tertiary}; }}"
             )
+        # The two that lead somewhere carry the accent; the two that only
+        # navigate stay quiet.
+        for name, style in (("_dupes_btn", primary_btn_style()),
+                            ("_dupes_reopen_btn", primary_btn_style()),
+                            ("_dupes_results_btn", btn_style()),
+                            ("_dupes_rescan_btn", btn_style())):
+            if hasattr(self, name):
+                getattr(self, name).setStyleSheet(style)
         if hasattr(self, "_dupes_btn"):
-            self._dupes_btn.setStyleSheet(btn_style())
+            self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color="#ffffff"))
 
         # Splitter handle
         if hasattr(self, "_body_splitter"):
@@ -846,6 +854,19 @@ class MetadataEditorPanel(
                 f"QLabel#tagEditorPendingChange, QLabel#tagEditorProblemCopy {{ color: {c.text_primary}; font-size: 10.5px; }}"
                 f"QLabel#tagEditorSeverityError {{ background: {c.danger_soft}; color: {c.danger};"
                 " border-radius: 6px; padding: 4px 6px; font-size: 9px; font-weight: 900; }"
+                f"QLabel#tagEditorDupesMeta {{ color: {c.accent_dark}; font-size: 9.5px; font-weight: 800; }}"
+                f"QLabel#tagEditorDupesStatus {{ border-radius: 9px; padding: 8px 10px;"
+                " font-size: 10.5px; font-weight: 700; }"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"running\"] {{ background: {c.surface3};"
+                f" color: {c.text_secondary}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"idle\"] {{ background: {c.surface3};"
+                f" color: {c.text_secondary}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"clean\"] {{ background: {c.accent_soft};"
+                f" color: {c.accent_dark}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"found\"] {{ background: {c.warn_soft};"
+                f" color: {c.warn}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"error\"] {{ background: {c.danger_soft};"
+                f" color: {c.danger}; }}"
                 f"QPushButton {{ background: {c.surface}; color: {c.text_primary}; border: 1px solid {c.border};"
                 " border-radius: 9px; min-height: 30px; padding: 0 9px; font-size: 10.5px; font-weight: 700; }"
                 f"QPushButton:hover {{ background: {c.surface3}; }}"
@@ -2218,7 +2239,10 @@ class MetadataEditorPanel(
                  note_key="meta_rename_ops_note",
                  settings_key="meta_clean_settings_open",
                  settings_handler=self._on_clean_settings)),
-            ("check", t("meta_duplicates_tools_title"), FluentIcon.FINGERPRINT, self._build_duplicate_tools_page()),
+            # The scan is an action, so it sits with the other actions under
+            # Tools; what the scan found is a verdict to come back to, so it
+            # lives on its own Check pane (index 15) instead.
+            ("tools", t("meta_duplicates_tools_title"), FluentIcon.FINGERPRINT, self._build_duplicate_tools_page()),
             ("tools", t("meta_online_title"),           FluentIcon.SEARCH,      self._build_online_metadata_page()),
             ("check", t("meta_problems_title"),         FluentIcon.INFO,        self._build_problems_page()),
             # Everything past here is new to the redesign.
@@ -2229,6 +2253,8 @@ class MetadataEditorPanel(
             ("tools", t("meta_auto_btn").strip(),                  FluentIcon.BRUSH,   self._build_tools_auto_page()),
             ("check", t("meta_pending_tab"),                       FluentIcon.VIEW,    self._build_check_pending_page()),
             ("check", t("meta_external_tab"),                      FluentIcon.SYNC,    self._build_check_external_page()),
+            ("check", t("meta_dupes_results_title"),               FluentIcon.FINGERPRINT,
+             self._build_duplicate_results_page()),
         ]
 
         self._inspector_pane_modes: list[str] = []
@@ -2561,12 +2587,16 @@ class MetadataEditorPanel(
             f"QScrollArea > QWidget > QWidget {{ background: {surface}; }}")
         return scroll
 
-    def _build_duplicate_tools_page(self) -> QScrollArea:
-        """Check > Duplicates.
+    # Index of the Check pane that reports the scan, referenced from the Tools
+    # pane that starts it and from the scan callbacks.
+    _DUPES_RESULTS_PANE = 15
 
-        The page used to be a lone button, so the only way to learn whether
-        the folder even has duplicates was to open the full manager.  It now
-        reports what the last scan found before you commit to that.
+    def _build_duplicate_tools_page(self) -> QScrollArea:
+        """Tools > Duplicate Cleanup.
+
+        Starting a scan is the action; reading its verdict is not, so this
+        page carries only the trigger and a way over to the Check pane that
+        holds the findings.
         """
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -2576,21 +2606,73 @@ class MetadataEditorPanel(
 
         note = QLabel(t("meta_dupes_page_note"))
         note.setWordWrap(True)
-        note.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
+        note.setObjectName("tagEditorInspectorNote")
         layout.addWidget(note)
 
+        # The pane's one action, so it carries the accent the way every other
+        # tools pane gives its primary button.
         self._dupes_btn = ElidedPushButton(self._toolbar_text("meta_find_duplicates"))
-        self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color=get_colors().text_primary))
+        self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color="#ffffff"))
         self._dupes_btn.setIconSize(QSize(16, 16))
         self._dupes_btn.setEnabled(False)
+        self._dupes_btn.setStyleSheet(primary_btn_style())
         a11y.describe(self._dupes_btn, t("meta_find_duplicates"),
                       description=t("meta_dupes_tooltip"),
                       tooltip=t("meta_dupes_tooltip"))
         self._dupes_btn.clicked.connect(self._on_find_duplicates)
         layout.addWidget(self._dupes_btn)
 
+        # Splitting the findings onto the Check pane left this one with nothing
+        # that reacts to the click, so a scan of a large folder read as a dead
+        # button. The action has to report on itself where it was started.
+        self._dupes_status = QLabel("")
+        self._dupes_status.setWordWrap(True)
+        self._dupes_status.setObjectName("tagEditorDupesStatus")
+        self._dupes_status.setProperty("dupeState", "running")
+        self._dupes_status.setVisible(False)
+        layout.addWidget(self._dupes_status)
+
+        self._dupes_results_btn = ElidedPushButton(t("meta_dupes_show_results"))
+        self._dupes_results_btn.setIcon(FluentIcon.CHEVRON_RIGHT.icon(color=get_colors().text_primary))
+        self._dupes_results_btn.setIconSize(QSize(12, 12))
+        self._dupes_results_btn.setStyleSheet(btn_style())
+        self._dupes_results_btn.setVisible(False)
+        a11y.describe(self._dupes_results_btn, t("meta_dupes_show_results"),
+                      tooltip=t("meta_dupes_show_results"))
+        self._dupes_results_btn.clicked.connect(
+            lambda: self._select_inspector_tool(self._DUPES_RESULTS_PANE))
+        layout.addWidget(self._dupes_results_btn)
+
+        layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(w)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        return scroll
+
+    def _build_duplicate_results_page(self) -> QScrollArea:
+        """Check > Duplicates.
+
+        Findings used to disappear with the manager dialog, so the only way
+        back to them was to rescan.  They are kept here instead, summarised,
+        with the manager one click away.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignTop)
+
+        note = QLabel(t("meta_dupes_results_note"))
+        note.setWordWrap(True)
+        note.setObjectName("tagEditorInspectorNote")
+        layout.addWidget(note)
+
         self._dupes_summary = QLabel(t("meta_dupes_never_scanned"))
         self._dupes_summary.setWordWrap(True)
+        self._dupes_summary.setObjectName("tagEditorSectionTitle")
         layout.addWidget(self._dupes_summary)
 
         self._dupes_groups = QWidget()
@@ -2599,11 +2681,22 @@ class MetadataEditorPanel(
         self._dupes_groups_layout.setSpacing(6)
         layout.addWidget(self._dupes_groups)
 
+        # Deleting is what this pane leads to, so the manager gets the accent
+        # and the way back to a fresh scan stays a quiet secondary.
         self._dupes_reopen_btn = ElidedPushButton(t("meta_dupes_reopen"))
-        self._dupes_reopen_btn.setStyleSheet(btn_style())
+        self._dupes_reopen_btn.setStyleSheet(primary_btn_style())
         self._dupes_reopen_btn.setVisible(False)
+        a11y.describe(self._dupes_reopen_btn, t("meta_dupes_reopen"),
+                      tooltip=t("meta_dupes_reopen"))
         self._dupes_reopen_btn.clicked.connect(self._reopen_duplicate_manager)
         layout.addWidget(self._dupes_reopen_btn)
+
+        self._dupes_rescan_btn = ElidedPushButton(t("meta_dupes_rescan"))
+        self._dupes_rescan_btn.setStyleSheet(btn_style())
+        a11y.describe(self._dupes_rescan_btn, t("meta_dupes_rescan"),
+                      tooltip=t("meta_dupes_tooltip"))
+        self._dupes_rescan_btn.clicked.connect(self._on_rescan_duplicates)
+        layout.addWidget(self._dupes_rescan_btn)
 
         layout.addStretch()
 
@@ -2619,52 +2712,116 @@ class MetadataEditorPanel(
         """Normalise the two shapes the duplicate scan can return."""
         return list(getattr(groups, "groups", groups) or ())
 
+    @staticmethod
+    def _duplicate_group_paths(group) -> list:
+        """The files in one group.
+
+        A DuplicateGroup calls them ``paths``; a group that arrived as a bare
+        sequence is already the list.  Reading a ``files`` attribute that no
+        shape has ever had raised straight out of the scan-complete slot, so
+        no manager dialog ever opened for a folder that did have duplicates.
+        """
+        paths = getattr(group, "paths", None)
+        if paths is not None:
+            return list(paths)
+        return list(group) if isinstance(group, (list, tuple, set)) else []
+
+    def _set_duplicate_status(self, text: str, state: str = "running") -> None:
+        """Report scan progress on the Tools pane that started it.
+
+        ``state`` drives the colour through the pane stylesheet: a scan in
+        flight, a verdict, and a failure must not look alike.
+        """
+        if not hasattr(self, "_dupes_status"):
+            return
+        self._dupes_status.setText(text)
+        self._dupes_status.setVisible(bool(text))
+        if self._dupes_status.property("dupeState") != state:
+            self._dupes_status.setProperty("dupeState", state)
+            # Qt only re-evaluates property selectors on an explicit repolish.
+            self._dupes_status.style().unpolish(self._dupes_status)
+            self._dupes_status.style().polish(self._dupes_status)
+
+    def _on_rescan_duplicates(self) -> None:
+        """Run a fresh scan from the findings pane, showing it where it runs."""
+        if not self._root_folder:
+            return
+        self._select_inspector_tool(self._inspector_tool_titles.index(
+            t("meta_duplicates_tools_title")))
+        self._on_find_duplicates()
+
+    def _reset_duplicate_results(self) -> None:
+        """Forget the last scan, so the Check pane reads as never-scanned."""
+        self._last_duplicate_scan = None
+        if not hasattr(self, "_dupes_groups_layout"):
+            return
+        self._clear_dynamic_layout(self._dupes_groups_layout)
+        self._dupes_summary.setText(t("meta_dupes_never_scanned"))
+        self._dupes_reopen_btn.setVisible(False)
+        self._dupes_results_btn.setVisible(False)
+        self._set_duplicate_status("")
+
     def _render_duplicate_groups(self, groups) -> None:
         """Summarise the last duplicate scan without reopening the manager."""
         if not hasattr(self, "_dupes_groups_layout"):
             return
         self._clear_dynamic_layout(self._dupes_groups_layout)
         entries = self._duplicate_group_list(groups)
+        # A scan that found nothing is still a result worth returning to, so
+        # the Tools page keeps pointing at it either way.
+        self._dupes_results_btn.setVisible(True)
         if not entries:
             self._dupes_summary.setText(t("meta_dupes_none_found"))
             self._dupes_reopen_btn.setVisible(False)
             return
-        total = sum(len(getattr(group, "files", group) or ()) for group in entries)
+        total = sum(len(self._duplicate_group_paths(group)) for group in entries)
         self._dupes_summary.setText(
             t("meta_dupes_summary", groups=len(entries), files=total))
         for group in entries[:20]:
-            files = list(getattr(group, "files", group) or ())
+            files = self._duplicate_group_paths(group)
             row = QFrame()
             row.setObjectName("tagEditorPendingItem")
             row_layout = QVBoxLayout(row)
-            row_layout.setContentsMargins(8, 7, 8, 7)
-            row_layout.setSpacing(2)
+            row_layout.setContentsMargins(9, 8, 9, 8)
+            row_layout.setSpacing(3)
             name = ElidedLabel(t("meta_dupes_group_title",
                                  name=Path(files[0]).name if files else "",
                                  n=len(files)),
                                mode=Qt.TextElideMode.ElideMiddle)
-            name.setObjectName("tagEditorPendingFile")
+            name.setObjectName("tagEditorPendingChange")
             name.setLayoutDirection(Qt.LeftToRight)
             name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             where = QLabel(str(Path(files[0]).parent) if files else "")
-            where.setObjectName("tagEditorPendingChange")
+            where.setObjectName("tagEditorPendingFile")
             where.setWordWrap(True)
             where.setLayoutDirection(Qt.LeftToRight)
             row_layout.addWidget(name)
             row_layout.addWidget(where)
+            # Which of the two strategies matched this group decides whether
+            # deleting from it is safe, so it is stated on the group itself
+            # rather than left to the manager dialog.
+            confidence_key = getattr(group, "confidence_key", None)
+            if confidence_key:
+                evidence = QLabel(t(confidence_key))
+                evidence.setObjectName("tagEditorDupesMeta")
+                evidence.setWordWrap(True)
+                row_layout.addWidget(evidence)
             self._dupes_groups_layout.addWidget(row)
         self._dupes_reopen_btn.setVisible(True)
+
+    def _open_duplicate_manager(self, groups, elapsed: float, strategy: str) -> None:
+        """Show the manager for a scan result and forward what it selected."""
+        from ui.dialogs.duplicate_files_dialog import DuplicateFilesDialog
+        dlg = DuplicateFilesDialog(groups, elapsed, strategy, self._root_folder, parent=self)
+        if dlg.exec() == QDialog.Accepted and dlg.files_to_delete:
+            self.delete_duplicates_requested.emit(dlg.files_to_delete)
 
     def _reopen_duplicate_manager(self) -> None:
         """Show the manager again for a scan that already ran."""
         cached = getattr(self, "_last_duplicate_scan", None)
         if cached is None:
             return
-        groups, elapsed, strategy = cached
-        from ui.dialogs.duplicate_files_dialog import DuplicateFilesDialog
-        dlg = DuplicateFilesDialog(groups, elapsed, strategy, self._root_folder, parent=self)
-        if dlg.exec() == QDialog.Accepted and dlg.files_to_delete:
-            self.delete_duplicates_requested.emit(dlg.files_to_delete)
+        self._open_duplicate_manager(*cached)
 
     def _build_problems_page(self) -> QScrollArea:
         page = QWidget()
@@ -2925,8 +3082,8 @@ class MetadataEditorPanel(
                 item.widget().setParent(None)
         visual_order = {
             "edit": (0, 8, 9, 10, 11),
-            "tools": (12, 1, 2, 3, 4, 6),
-            "check": (13, 7, 5, 14),
+            "tools": (12, 1, 2, 3, 4, 5, 6),
+            "check": (13, 7, self._DUPES_RESULTS_PANE, 14),
         }
         for index in visual_order[active_mode]:
             self._inspector_subtab_layout.addWidget(self._inspector_tool_buttons[index])
@@ -3063,6 +3220,9 @@ class MetadataEditorPanel(
         self._apply_btn.setEnabled(False)
         self._revert_btn.setEnabled(False)
         self._dupes_btn.setEnabled(False)
+        # Findings belong to the folder they were found in; carrying them into
+        # the next one would have the Check pane describe files no longer here.
+        self._reset_duplicate_results()
         self._set_scan_loading(True)
         self._summary_lbl.setText(t("meta_scanning"))
 
@@ -3430,6 +3590,7 @@ class MetadataEditorPanel(
             return
         self._dupes_btn.setEnabled(False)
         self._summary_lbl.setText(t("meta_searching_duplicates"))
+        self._set_duplicate_status(t("meta_searching_duplicates"))
         self.find_duplicates_requested.emit(self._root_folder, True)  # always recursive
 
     # ── Tree handlers ─────────────────────────────────────────────────────────
@@ -4418,30 +4579,35 @@ class MetadataEditorPanel(
             self.unsaved_choice_requested.emit("cancel")
 
     def on_duplicate_scan_progress(self, done: int, total: int, eta: str) -> None:
-        self._summary_lbl.setText(t("meta_searching_duplicates_progress", done=done, total=total, eta=eta))
+        progress = t("meta_searching_duplicates_progress", done=done, total=total, eta=eta)
+        self._summary_lbl.setText(progress)
+        self._set_duplicate_status(progress)
 
     def on_duplicate_scan_complete(self, groups, elapsed: float, strategy: str) -> None:
         self._dupes_btn.setEnabled(True)
         if getattr(groups, "cancelled", False):
             self.on_status_update(t("meta_problems_cancelled"))
+            self._set_duplicate_status(t("meta_problems_cancelled"), "idle")
             self._update_summary()
             return
         # Keep the result so the Duplicates page can describe it, and so the
         # manager can be reopened without paying for a second scan.
         self._last_duplicate_scan = (groups, elapsed, strategy)
         self._render_duplicate_groups(groups)
+        # The verdict the Check pane now holds, echoed where the scan was run.
+        self._set_duplicate_status(
+            self._dupes_summary.text(),
+            "found" if self._duplicate_group_list(groups) else "clean")
         if not self._duplicate_group_list(groups):
             self.on_status_update(t("meta_no_duplicates_found", elapsed=elapsed))
             self._update_summary()
             return
 
-        from ui.dialogs.duplicate_files_dialog import DuplicateFilesDialog
-        dlg = DuplicateFilesDialog(groups, elapsed, strategy, self._root_folder, parent=self)
-        if dlg.exec() == QDialog.Accepted and dlg.files_to_delete:
-            self.delete_duplicates_requested.emit(dlg.files_to_delete)
+        self._open_duplicate_manager(groups, elapsed, strategy)
 
     def on_duplicate_scan_error(self, msg: str) -> None:
         self._dupes_btn.setEnabled(True)
+        self._set_duplicate_status(t("meta_duplicate_search_error", msg=msg), "error")
         self.on_status_update(t("meta_duplicate_search_error", msg=msg))
         self._update_summary()
 

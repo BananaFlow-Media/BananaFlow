@@ -177,11 +177,7 @@ class DuplicateFilesDialog(StyledDialog):
     def _make_header(self, c) -> QLabel:
         n_groups = len(self._groups)
         n_files  = sum(len(v) for v in self._groups.values())
-        strat = (
-            t("duplicates_strategy_size")
-            if self._strategy == "size"
-            else t("duplicates_strategy_md5")
-        )
+        strat = t("duplicates_strategy_md5")
         lbl = QLabel(t(
             "duplicates_header",
             n_files=n_files,
@@ -236,10 +232,7 @@ class DuplicateFilesDialog(StyledDialog):
 
             if self._result is not None:
                 group = self._result.groups[group_idx - 1]
-                confidence_key = ("duplicates_confidence_possible" if group.confidence.value == "possible"
-                                  else "duplicates_confidence_same_audio" if group.evidence.value == "audio_payload"
-                                  else "duplicates_confidence_same_file")
-                evidence = QLabel(t(confidence_key))
+                evidence = QLabel(t(group.confidence_key))
                 evidence.setObjectName("duplicateEvidenceLabel")
                 evidence.setWordWrap(True)
                 content_layout.addWidget(evidence)

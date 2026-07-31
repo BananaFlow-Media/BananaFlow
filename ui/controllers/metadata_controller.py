@@ -24,7 +24,9 @@ from core.metadata_models import AudioTrackItem, TagEditSession, TrackStatus
 from core.tag_actions import LEGACY_ACTION_IDS, builtin_registry
 from core.tag_action_presets import PresetStep
 from core.tag_action_service import TagActionService
-from core.metadata_validation import MetadataValidationEngine, ProblemFixPreview, ValidationSnapshot
+from core.metadata_validation import (
+    DuplicateScanResult, MetadataValidationEngine, ProblemFixPreview, ValidationSnapshot,
+)
 from ui.i18n import t
 from ui.controllers.tag_editor_workspace_state import TagEditorWorkspaceState
 from ui.services.file_operation_service import FileOperationError, FileOperationService
@@ -2446,8 +2448,21 @@ class MetadataController(QObject):
     def _on_dup_finished(self, groups: dict, elapsed: float, strategy: str) -> None:
         result = groups
         worker = self.sender()
-        if worker is not self._dup_worker or (hasattr(result, "request_id") and
-                (result.request_id != self._dup_request_id or result.generation != self._dup_generation)):
+        if worker is not self._dup_worker:
+            return
+        if hasattr(result, "request_id") and result.request_id != self._dup_request_id:
+            return                      # a newer scan already owns the panel
+        if hasattr(result, "generation") and result.generation != self._dup_generation:
+            # The workspace was reloaded mid-scan, so these findings describe
+            # files that are no longer the loaded set and nothing may be
+            # applied from them.  The panel still has to hear that the scan
+            # ended: dropping this in silence left it reporting "searching"
+            # with no scan running and no way to start another.
+            self._dup_worker = None
+            self.duplicate_scan_complete.emit(
+                DuplicateScanResult(generation=self.workspace_state.generation,
+                                    request_id=self._dup_request_id, cancelled=True),
+                elapsed, strategy)
             return
         if hasattr(result, "groups"):
             result = self._attach_duplicate_workspace_ids(result)
@@ -2461,7 +2476,7 @@ class MetadataController(QObject):
         else:  # Compatibility with any external legacy worker.
             n_groups = len(groups)
             n_files = sum(len(value) for value in groups.values())
-        strat_lbl = t("md_strategy_size") if strategy == "size" else t("md_strategy_md5")
+        strat_lbl = t("md_strategy_md5")
         self.status_update.emit(
             t("md_duplicates_found_summary", n_files=n_files, n_groups=n_groups, strat=strat_lbl, elapsed=elapsed)
         )

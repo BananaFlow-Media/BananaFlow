@@ -67,6 +67,19 @@ class DuplicateGroup:
     def safe_for_destructive_resolution(self) -> bool:
         return self.confidence is DuplicateConfidence.HIGH
 
+    @property
+    def confidence_key(self) -> str:
+        """i18n key describing how this group was matched.
+
+        Both the manager dialog and the inspector pane have to say the same
+        thing about a group, so the mapping lives with the evidence itself.
+        """
+        if self.confidence is not DuplicateConfidence.HIGH:
+            return "duplicates_confidence_possible"
+        if self.evidence is DuplicateEvidence.AUDIO_PAYLOAD:
+            return "duplicates_confidence_same_audio"
+        return "duplicates_confidence_same_file"
+
 
 @dataclass(frozen=True)
 class DuplicateScanResult:

@@ -314,15 +314,26 @@ def test_untrustworthy_column_order_falls_back_to_defaults(panel, bad):
 
 
 # --------------------------------------------------------------------------- #
-# Inspector: three modes, fifteen panes
+# Inspector: three modes, sixteen panes
 # --------------------------------------------------------------------------- #
 
-def test_inspector_exposes_all_fifteen_panes(panel):
-    assert len(panel._inspector_tool_buttons) == 15
-    assert panel._inspector_pages.count() == 15
+def test_inspector_exposes_all_sixteen_panes(panel):
+    assert len(panel._inspector_tool_buttons) == 16
+    assert panel._inspector_pages.count() == 16
     counts = {mode: panel._inspector_pane_modes.count(mode)
               for mode in ("edit", "tools", "check")}
-    assert counts == {"edit": 5, "tools": 6, "check": 4}
+    assert counts == {"edit": 5, "tools": 7, "check": 4}
+
+
+def test_duplicate_scan_is_a_tool_and_its_findings_are_a_check(panel):
+    """Starting the scan is an action; its verdict is something to revisit."""
+    from ui.i18n import t
+
+    trigger = panel._inspector_tool_titles.index(t("meta_duplicates_tools_title"))
+    findings = panel._inspector_tool_titles.index(t("meta_dupes_results_title"))
+    assert panel._inspector_pane_modes[trigger] == "tools"
+    assert panel._inspector_pane_modes[findings] == "check"
+    assert findings == panel._DUPES_RESULTS_PANE
 
 
 def test_legacy_tool_indices_still_mean_what_they_meant(panel):
@@ -917,9 +928,93 @@ def test_duplicates_page_reports_the_last_scan(panel, tmp_path):
 
     _load(panel, tmp_path)
     assert panel._dupes_summary.text() == t("meta_dupes_never_scanned")
+    assert panel._dupes_results_btn.isHidden()
     panel.on_duplicate_scan_complete([], 0.5, "hash")
     assert panel._dupes_summary.text() == t("meta_dupes_none_found")
     assert panel._dupes_reopen_btn.isHidden()
+    # "Nothing found" is still a result, and the Tools pane has to offer the
+    # way back to it.
+    assert not panel._dupes_results_btn.isHidden()
+    panel._dupes_results_btn.click()
+    assert panel._inspector_pages.currentIndex() == panel._DUPES_RESULTS_PANE
+
+
+def _dupe_result(tmp_path, *, n_groups=1):
+    from core.metadata_validation import (
+        DuplicateConfidence, DuplicateEvidence, DuplicateGroup, DuplicateScanResult,
+    )
+
+    groups = tuple(
+        DuplicateGroup(
+            id=f"g{i}",
+            paths=(str(tmp_path / f"{i}a.mp3"), str(tmp_path / f"{i}b.mp3")),
+            evidence=DuplicateEvidence.AUDIO_PAYLOAD,
+            confidence=DuplicateConfidence.HIGH,
+            strategy="md5",
+        )
+        for i in range(n_groups)
+    )
+    return DuplicateScanResult(groups=groups)
+
+
+def test_findings_render_from_a_real_scan_result(panel, tmp_path, monkeypatch):
+    """DuplicateGroup calls them `paths`; reading `files` blew up the slot."""
+    from ui.i18n import t
+
+    monkeypatch.setattr(panel, "_open_duplicate_manager", lambda *a: None)
+    _load(panel, tmp_path)
+    panel.on_duplicate_scan_complete(_dupe_result(tmp_path, n_groups=2), 1.25, "md5")
+
+    assert panel._dupes_summary.text() == t("meta_dupes_summary", groups=2, files=4)
+    assert panel._dupes_groups_layout.count() == 2
+    assert not panel._dupes_reopen_btn.isHidden()
+
+
+def test_each_group_states_which_strategy_matched_it(panel, tmp_path, monkeypatch):
+    """Size-only matches are not safe to delete from; the pane has to say so."""
+    from core.metadata_validation import DuplicateConfidence, DuplicateEvidence
+
+    monkeypatch.setattr(panel, "_open_duplicate_manager", lambda *a: None)
+    _load(panel, tmp_path)
+    result = _dupe_result(tmp_path)
+    assert result.groups[0].confidence_key == "duplicates_confidence_same_audio"
+
+    from dataclasses import replace
+    possible = replace(result.groups[0], evidence=DuplicateEvidence.SIZE_ONLY,
+                       confidence=DuplicateConfidence.POSSIBLE, strategy="size")
+    assert possible.confidence_key == "duplicates_confidence_possible"
+
+
+def test_the_scan_reports_itself_where_it_was_started(panel, tmp_path):
+    """The Tools pane holds no findings, so it must still show the scan run."""
+    from ui.i18n import t
+
+    _load(panel, tmp_path)
+    assert panel._dupes_status.isHidden()
+
+    panel._on_find_duplicates()
+    assert panel._dupes_status.text() == t("meta_searching_duplicates")
+    assert not panel._dupes_status.isHidden()
+
+    panel.on_duplicate_scan_progress(3, 10, "~4s")
+    assert "3" in panel._dupes_status.text()
+
+    panel.on_duplicate_scan_complete([], 0.5, "hash")
+    assert panel._dupes_status.text() == t("meta_dupes_none_found")
+
+    panel.on_duplicate_scan_error("boom")
+    assert "boom" in panel._dupes_status.text()
+
+
+def test_loading_another_folder_drops_the_previous_findings(panel, tmp_path):
+    from ui.i18n import t
+
+    _load(panel, tmp_path)
+    panel.on_duplicate_scan_complete([], 0.5, "hash")
+    panel.on_workspace_replacement_started(tmp_path)
+    assert panel._last_duplicate_scan is None
+    assert panel._dupes_summary.text() == t("meta_dupes_never_scanned")
+    assert panel._dupes_results_btn.isHidden()
 
 
 def test_copy_tags_needs_one_file_and_never_copies_track_number(panel, tmp_path):
