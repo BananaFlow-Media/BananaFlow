@@ -30,20 +30,28 @@ def _make_panel(tmp_path, monkeypatch):
 
 @pytest.fixture
 def panel(tmp_path, monkeypatch):
-    app, widget = _make_panel(tmp_path, monkeypatch)
+    _app, widget = _make_panel(tmp_path, monkeypatch)
     try:
         yield widget
     finally:
-        # These tests build a deep Qt widget tree.  Process its deferred
-        # destruction while the interpreter is still alive instead of leaving
-        # the native objects for Qt/Python shutdown, which can segfault after
-        # an otherwise fully passing test file on CI.
-        from PySide6.QtCore import QEvent
-
-        widget.close()
         widget.deleteLater()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_qt_after_shell_tests():
+    """Flush the module's Qt lifetime once no later test can reuse its widgets."""
+    yield
+    try:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is not None:
+        app.closeAllWindows()
         app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+        app.quit()
 
 
 def _load(panel, tmp_path, *, count=2, changed=0):
@@ -638,7 +646,6 @@ def test_every_inspector_pane_fits_the_narrowest_open_inspector(language, tmp_pa
     which put four of their pages 100-600px past what the pane can offer.
     Both languages, because the label that overflows differs between them.
     """
-    from PySide6.QtCore import QEvent
     from PySide6.QtWidgets import QApplication
     from ui.i18n import current_language, set_language
 
@@ -674,8 +681,6 @@ def test_every_inspector_pane_fits_the_narrowest_open_inspector(language, tmp_pa
         if panel is not None:
             panel.hide()
             panel.deleteLater()
-            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            QApplication.processEvents()
 
 
 def test_a_long_file_name_does_not_widen_the_check_pages(panel, tmp_path):
