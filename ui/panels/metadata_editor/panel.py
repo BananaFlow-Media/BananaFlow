@@ -3097,7 +3097,11 @@ class MetadataEditorPanel(
         while self._inspector_subtab_layout.count():
             item = self._inspector_subtab_layout.takeAt(0)
             if item.widget() is not None:
-                item.widget().setParent(None)
+                # Keep the button in the inspector's QObject tree.  Detaching
+                # it with setParent(None) leaves inactive mode buttons alive
+                # only through Python references, which can make Qt/PySide
+                # tear them down in the wrong order at interpreter exit.
+                item.widget().setVisible(False)
         visual_order = {
             "edit": (0, 8, 9, 10, 11),
             "tools": (12, 1, 2, 3, 4, 5, 6),
