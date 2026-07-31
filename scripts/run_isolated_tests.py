@@ -346,6 +346,8 @@ def run_once(
         "--tb=short",
         "-p",
         "no:cacheprovider",
+        "-p",
+        "scripts.isolated_pytest_result",
         f"--junitxml={junit}",
     ]
 
@@ -354,10 +356,12 @@ def run_once(
     # Popen + communicate(timeout) rather than a shell pipeline: piping pytest
     # into another process would replace pytest's exit code with that process's,
     # which is the whole failure mode this runner exists to avoid.
+    result_env = dict(env_extra or {})
+    result_env["BANANAFLOW_ISOLATED_JUNIT"] = str(junit)
     process = subprocess.Popen(
         command,
         cwd=str(repo_root),
-        env=build_env(repo_root, env_extra),
+        env=build_env(repo_root, result_env),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

@@ -37,23 +37,6 @@ def panel(tmp_path, monkeypatch):
         widget.deleteLater()
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _close_qt_after_shell_tests():
-    """Flush the module's Qt lifetime once no later test can reuse its widgets."""
-    yield
-    try:
-        from PySide6.QtCore import QEvent
-        from PySide6.QtWidgets import QApplication
-    except ImportError:
-        return
-    app = QApplication.instance()
-    if app is not None:
-        app.closeAllWindows()
-        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        app.processEvents()
-        app.quit()
-
-
 def _load(panel, tmp_path, *, count=2, changed=0):
     from core.metadata_models import AudioTrackItem, OriginalTags, ScanResult
 
