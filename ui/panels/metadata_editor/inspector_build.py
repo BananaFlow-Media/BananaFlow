@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFileIconProvider,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -92,7 +91,13 @@ from .shared import (
     primary_btn_style,
     tag_editor_colors,
 )
-from .widgets import OpRow, ResponsiveButtonFlow
+from .widgets import (
+    ElidedLabel,
+    ElidedPushButton,
+    ElidedToolButton,
+    OpRow,
+    ResponsiveButtonFlow,
+)
 
 
 class InspectorBuildMixin:
@@ -203,9 +208,9 @@ class InspectorBuildMixin:
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(7)
-            lbl = QLabel(display_label)
-            # A minimum, not a fixed width: a long Hebrew field label at 200%
-            # would otherwise be cut off mid-word.
+            # Fixed so the caption column stays aligned down the page; it
+            # elides rather than widening when a label outgrows the column.
+            lbl = ElidedLabel(display_label)
             lbl.setFixedWidth(88)
             lbl.setAlignment(Qt.AlignVCenter | Qt.AlignRight | Qt.AlignAbsolute)
             lbl.setStyleSheet(
@@ -270,7 +275,7 @@ class InspectorBuildMixin:
         self._insp_album_artist = self._insp_fields["album_artist"]
         self._insp_track = self._insp_fields["track_num"]
 
-        self._insp_advanced_btn = QToolButton()
+        self._insp_advanced_btn = ElidedToolButton()
         self._insp_advanced_btn.setObjectName("tagEditorAdvancedFields")
         self._insp_advanced_btn.setText(t("meta_show_additional_fields"))
         self._insp_advanced_btn.setIcon(FluentIcon.ADD.icon(color=tag_editor_colors().accent))
@@ -285,7 +290,7 @@ class InspectorBuildMixin:
         self._insp_advanced_btn.clicked.connect(self._toggle_advanced_fields)
         fields_layout.addWidget(self._insp_advanced_btn)
 
-        btn_apply_fields = QPushButton(t("meta_apply_to_selection"))
+        btn_apply_fields = ElidedPushButton(t("meta_apply_to_selection"))
         btn_apply_fields.setProperty("accentRole", "primary")
         btn_apply_fields.setStyleSheet(primary_btn_style())
         btn_apply_fields.clicked.connect(self._on_insp_apply_fields)
@@ -295,23 +300,22 @@ class InspectorBuildMixin:
         # Copy one file's tags onto others.  Deliberately two steps rather than
         # a "copy from the row above" shortcut: the copied set is shown in the
         # status line before it can be pasted anywhere.
-        transfer = QHBoxLayout()
-        transfer.setSpacing(6)
-        self._insp_copy_tags_btn = QPushButton(t("meta_copy_tags"))
+        transfer = ResponsiveButtonFlow(fill=True)
+        self._insp_copy_tags_btn = ElidedPushButton(t("meta_copy_tags"))
         self._insp_copy_tags_btn.setStyleSheet(btn_style())
         a11y.describe(self._insp_copy_tags_btn, t("meta_copy_tags"),
                       description=t("meta_copy_tags_hint"))
         self._insp_copy_tags_btn.clicked.connect(self._on_copy_tags)
-        self._insp_paste_tags_btn = QPushButton(t("meta_paste_tags"))
+        self._insp_paste_tags_btn = ElidedPushButton(t("meta_paste_tags"))
         self._insp_paste_tags_btn.setStyleSheet(btn_style())
         a11y.describe(self._insp_paste_tags_btn, t("meta_paste_tags"),
                       description=t("meta_paste_tags_hint"))
         self._insp_paste_tags_btn.clicked.connect(self._on_paste_tags)
         self._insp_paste_tags_btn.setEnabled(False)
         for button in (self._insp_copy_tags_btn, self._insp_paste_tags_btn):
-            transfer.addWidget(button)
+            transfer.add_button(button)
             self._selection_scope_buttons.append(button)
-        fields_layout.addLayout(transfer)
+        fields_layout.addWidget(transfer)
 
         self._insp_tag_clipboard_lbl = QLabel("")
         self._insp_tag_clipboard_lbl.setWordWrap(True)
@@ -364,20 +368,19 @@ class InspectorBuildMixin:
         lyrics_meta.addWidget(self._insp_lyrics_language)
         lyrics_meta.addWidget(self._insp_lyrics_description)
         lyrics_layout.addLayout(lyrics_meta)
-        lyrics_buttons = QHBoxLayout()
-        lyrics_buttons.setSpacing(6)
-        self._insp_lyrics_set_btn = QPushButton(t("meta_lyrics_propose_replace"))
+        lyrics_buttons = ResponsiveButtonFlow(fill=True)
+        self._insp_lyrics_set_btn = ElidedPushButton(t("meta_lyrics_propose_replace"))
         self._insp_lyrics_set_btn.setProperty("accentRole", "primary")
         self._insp_lyrics_set_btn.clicked.connect(self._on_lyrics_propose_set)
-        self._insp_lyrics_clear_btn = QPushButton(t("meta_lyrics_propose_clear"))
+        self._insp_lyrics_clear_btn = ElidedPushButton(t("meta_lyrics_propose_clear"))
         self._insp_lyrics_clear_btn.setProperty("dangerRole", True)
         self._insp_lyrics_clear_btn.clicked.connect(self._on_lyrics_propose_clear)
-        self._insp_lyrics_revert_btn = QPushButton(t("meta_lyrics_revert_pending"))
+        self._insp_lyrics_revert_btn = ElidedPushButton(t("meta_lyrics_revert_pending"))
         self._insp_lyrics_revert_btn.clicked.connect(self._on_lyrics_revert)
         for button in (self._insp_lyrics_set_btn, self._insp_lyrics_clear_btn, self._insp_lyrics_revert_btn):
-            lyrics_buttons.addWidget(button)
+            lyrics_buttons.add_button(button)
             self._selection_scope_buttons.append(button)
-        lyrics_layout.addLayout(lyrics_buttons)
+        lyrics_layout.addWidget(lyrics_buttons)
         return lyrics_grp
 
     def _build_artwork_group(self) -> QGroupBox:
@@ -393,46 +396,44 @@ class InspectorBuildMixin:
         artwork_note.setWordWrap(True)
         artwork_layout.addWidget(artwork_note)
 
-        cover_grid = QHBoxLayout()
-        cover_grid.setContentsMargins(0, 0, 0, 0)
-        cover_grid.setSpacing(9)
-        current_col = QVBoxLayout()
-        current_col.setSpacing(5)
-        self._insp_artwork_current_label = QLabel(t("meta_artwork_current"))
-        self._insp_artwork_current_label.setObjectName("tagEditorSectionTitle")
-        current_col.addWidget(self._insp_artwork_current_label)
-        self._insp_artwork_preview = ArtworkDropPreview(self._on_artwork_drop)
-        self._insp_artwork_preview.setFixedSize(132, 132)
-        self._insp_artwork_preview.setObjectName("tagEditorCoverCurrent")
-        self._insp_artwork_preview.setAlignment(Qt.AlignCenter)
-        current_col.addWidget(self._insp_artwork_preview, alignment=Qt.AlignHCenter)
-        cover_grid.addLayout(current_col, 1)
+        # Two 132px covers side by side need 273px before anything else on the
+        # page gets a say, which is more than the pane's own floor. In a flow
+        # they sit abreast while there is room and stack once there is not.
+        cover_grid = ResponsiveButtonFlow(fill=True)
 
-        proposed_col = QVBoxLayout()
-        proposed_col.setSpacing(5)
-        self._insp_artwork_proposed_label = QLabel(t("meta_artwork_proposed"))
-        self._insp_artwork_proposed_label.setObjectName("tagEditorSectionTitle")
-        self._insp_artwork_proposed_preview = ArtworkDropPreview(self._on_artwork_drop)
-        self._insp_artwork_proposed_preview.setFixedSize(132, 132)
-        self._insp_artwork_proposed_preview.setObjectName("tagEditorCoverProposed")
-        self._insp_artwork_proposed_preview.setAlignment(Qt.AlignCenter)
-        proposed_col.addWidget(self._insp_artwork_proposed_label)
-        proposed_col.addWidget(self._insp_artwork_proposed_preview, alignment=Qt.AlignHCenter)
-        cover_grid.addLayout(proposed_col, 1)
-        artwork_layout.addLayout(cover_grid)
+        def _cover_column(caption: str, object_name: str) -> tuple[QWidget, QLabel, ArtworkDropPreview]:
+            column = QWidget()
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            column_layout.setSpacing(5)
+            label = ElidedLabel(caption)
+            label.setObjectName("tagEditorSectionTitle")
+            preview = ArtworkDropPreview(self._on_artwork_drop)
+            preview.setFixedSize(132, 132)
+            preview.setObjectName(object_name)
+            preview.setAlignment(Qt.AlignCenter)
+            column_layout.addWidget(label)
+            column_layout.addWidget(preview, alignment=Qt.AlignHCenter)
+            return column, label, preview
+
+        current_col, self._insp_artwork_current_label, self._insp_artwork_preview = _cover_column(
+            t("meta_artwork_current"), "tagEditorCoverCurrent")
+        proposed_col, self._insp_artwork_proposed_label, self._insp_artwork_proposed_preview = _cover_column(
+            t("meta_artwork_proposed"), "tagEditorCoverProposed")
+        cover_grid.add_widget(current_col)
+        cover_grid.add_widget(proposed_col)
+        artwork_layout.addWidget(cover_grid)
         self._insp_artwork_state = QLabel()
         self._insp_artwork_state.setWordWrap(True)
         self._insp_artwork_state.setObjectName("tagEditorDialogNote")
         artwork_layout.addWidget(self._insp_artwork_state)
-        artwork_buttons = QGridLayout()
-        artwork_buttons.setHorizontalSpacing(7)
-        artwork_buttons.setVerticalSpacing(7)
-        self._insp_artwork_add_btn = QPushButton(t("meta_artwork_choose_image"))
-        self._insp_artwork_replace_btn = QPushButton(t("meta_artwork_replace"))
-        self._insp_artwork_remove_btn = QPushButton(t("meta_artwork_remove"))
-        self._insp_artwork_paste_btn = QPushButton(t("meta_artwork_paste"))
-        self._insp_artwork_export_btn = QPushButton(t("meta_artwork_export"))
-        self._insp_artwork_revert_btn = QPushButton(t("meta_artwork_revert"))
+        artwork_buttons = ResponsiveButtonFlow(fill=True)
+        self._insp_artwork_add_btn = ElidedPushButton(t("meta_artwork_choose_image"))
+        self._insp_artwork_replace_btn = ElidedPushButton(t("meta_artwork_replace"))
+        self._insp_artwork_remove_btn = ElidedPushButton(t("meta_artwork_remove"))
+        self._insp_artwork_paste_btn = ElidedPushButton(t("meta_artwork_paste"))
+        self._insp_artwork_export_btn = ElidedPushButton(t("meta_artwork_export"))
+        self._insp_artwork_revert_btn = ElidedPushButton(t("meta_artwork_revert"))
         self._insp_artwork_add_btn.clicked.connect(self._on_artwork_choose_adaptive)
         self._insp_artwork_replace_btn.clicked.connect(self._on_artwork_replace_choose)
         self._insp_artwork_remove_btn.clicked.connect(self._on_artwork_remove)
@@ -446,14 +447,14 @@ class InspectorBuildMixin:
         # artwork proposal was otherwise only undoable by reverting the whole
         # file from the footer.
         self._insp_artwork_remove_btn.setProperty("dangerRole", True)
-        for index, button in enumerate((
+        for button in (
             self._insp_artwork_add_btn, self._insp_artwork_paste_btn,
             self._insp_artwork_export_btn, self._insp_artwork_replace_btn,
             self._insp_artwork_revert_btn, self._insp_artwork_remove_btn,
-        )):
-            artwork_buttons.addWidget(button, index // 2, index % 2)
+        ):
+            artwork_buttons.add_button(button)
             self._selection_scope_buttons.append(button)
-        artwork_layout.addLayout(artwork_buttons)
+        artwork_layout.addWidget(artwork_buttons)
         artwork_support = QLabel(t("meta_artwork_support_note"))
         artwork_support.setObjectName("tagEditorDialogNote")
         artwork_support.setWordWrap(True)
@@ -487,29 +488,28 @@ class InspectorBuildMixin:
             row = QHBoxLayout(row_frame)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(7)
-            field_label = QLabel(t(key))
+            field_label = ElidedLabel(t(key))
             field_label.setFixedWidth(120)
             row.addWidget(field_label)
-            value_label = QLabel(t("meta_inspector_empty_value"))
+            value_label = ElidedLabel(t("meta_inspector_empty_value"))
             value_label.setObjectName("tagEditorReadOnlyValue")
             value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(value_label, stretch=1)
             replay_layout.addWidget(row_frame)
             self._insp_replay_values[field_name] = value_label
-        replay_actions = QGridLayout()
-        replay_actions.setSpacing(7)
-        self._insp_rg_track_btn = QPushButton(t("meta_replaygain_analyze_track"))
-        self._insp_rg_album_btn = QPushButton(t("meta_replaygain_analyze_album"))
-        self._insp_rg_cancel_btn = QPushButton(t("meta_replaygain_cancel"))
+        replay_actions = ResponsiveButtonFlow(fill=True)
+        self._insp_rg_track_btn = ElidedPushButton(t("meta_replaygain_analyze_track"))
+        self._insp_rg_album_btn = ElidedPushButton(t("meta_replaygain_analyze_album"))
+        self._insp_rg_cancel_btn = ElidedPushButton(t("meta_replaygain_cancel"))
         self._insp_rg_cancel_btn.setVisible(False)
         self._insp_rg_track_btn.clicked.connect(self._on_replaygain_track)
         self._insp_rg_album_btn.clicked.connect(self._on_replaygain_album)
         self._insp_rg_cancel_btn.clicked.connect(self.replaygain_cancel_requested)
         self._insp_rg_track_btn.setProperty("accentRole", "primary")
-        self._insp_rg_clear_track_btn = QPushButton(t("meta_replaygain_clear_track"))
-        self._insp_rg_clear_album_btn = QPushButton(t("meta_replaygain_clear_album"))
-        self._insp_rg_revert_btn = QPushButton(t("meta_replaygain_revert"))
-        self._insp_rg_clear_all_btn = QPushButton(t("meta_replaygain_propose_clear"))
+        self._insp_rg_clear_track_btn = ElidedPushButton(t("meta_replaygain_clear_track"))
+        self._insp_rg_clear_album_btn = ElidedPushButton(t("meta_replaygain_clear_album"))
+        self._insp_rg_revert_btn = ElidedPushButton(t("meta_replaygain_revert"))
+        self._insp_rg_clear_all_btn = ElidedPushButton(t("meta_replaygain_propose_clear"))
         self._insp_rg_clear_all_btn.setProperty("dangerRole", True)
         self._insp_rg_clear_all_btn.clicked.connect(self._on_replaygain_clear_all)
         self._insp_rg_clear_track_btn.clicked.connect(self._on_replaygain_clear_track)
@@ -519,15 +519,15 @@ class InspectorBuildMixin:
         # above: an album value is shared across files and a track value is
         # not, so collapsing them into one "clear everything" button takes the
         # safe choice away rather than simplifying it.
-        for index, button in enumerate((
+        for button in (
             self._insp_rg_track_btn, self._insp_rg_album_btn,
             self._insp_rg_clear_track_btn, self._insp_rg_clear_album_btn,
             self._insp_rg_clear_all_btn, self._insp_rg_revert_btn,
             self._insp_rg_cancel_btn,
-        )):
-            replay_actions.addWidget(button, index // 2, index % 2)
+        ):
+            replay_actions.add_button(button)
             self._selection_scope_buttons.append(button)
-        replay_layout.addLayout(replay_actions)
+        replay_layout.addWidget(replay_actions)
         self._insp_rg_progress = QProgressBar()
         self._insp_rg_progress.setVisible(False)
         replay_layout.addWidget(self._insp_rg_progress)
@@ -562,10 +562,13 @@ class InspectorBuildMixin:
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(9, 7, 9, 7)
             row_layout.setSpacing(8)
-            label = QLabel(t(label_key))
+            label = ElidedLabel(t(label_key))
             label.setObjectName("tagEditorPropertyName")
             label.setFixedWidth(100)
-            value = QLabel("")
+            # The path row holds a full absolute path: as a plain QLabel its
+            # minimum width was the path itself, which dragged the whole page
+            # past the pane and off the right-hand edge.
+            value = ElidedLabel("", mode=Qt.TextElideMode.ElideMiddle)
             value.setObjectName("tagEditorPropertyValue")
             value.setTextInteractionFlags(Qt.TextSelectableByMouse)
             value.setLayoutDirection(Qt.LeftToRight)
@@ -579,26 +582,25 @@ class InspectorBuildMixin:
         self._insp_properties.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._insp_properties.setVisible(False)
         props_layout.addWidget(self._insp_properties)
-        prop_actions = QHBoxLayout()
-        prop_actions.setSpacing(6)
-        self._insp_property_open_btn = QPushButton(t("meta_property_open"))
-        self._insp_property_reveal_btn = QPushButton(t("meta_property_reveal"))
-        self._insp_property_copy_btn = QPushButton(t("meta_property_copy_path"))
+        prop_actions = ResponsiveButtonFlow(fill=True)
+        self._insp_property_open_btn = ElidedPushButton(t("meta_property_open"))
+        self._insp_property_reveal_btn = ElidedPushButton(t("meta_property_reveal"))
+        self._insp_property_copy_btn = ElidedPushButton(t("meta_property_copy_path"))
         self._insp_property_open_btn.clicked.connect(self._on_property_open)
         self._insp_property_reveal_btn.clicked.connect(self._on_property_reveal)
         self._insp_property_copy_btn.clicked.connect(self._on_property_copy_path)
         for button in (self._insp_property_open_btn, self._insp_property_reveal_btn,
                        self._insp_property_copy_btn):
-            prop_actions.addWidget(button)
+            prop_actions.add_button(button)
             # All three act on exactly one selected file.  Without this they
             # stayed enabled after a deselect and their handlers just returned,
             # so the click did nothing and said nothing.
             self._selection_scope_buttons.append(button)
-        props_layout.addLayout(prop_actions)
+        props_layout.addWidget(prop_actions)
         self._insp_external_status = QLabel()
         self._insp_external_status.setWordWrap(True)
         props_layout.addWidget(self._insp_external_status)
-        self._insp_external_review_btn = QPushButton(t("meta_external_review_action"))
+        self._insp_external_review_btn = ElidedPushButton(t("meta_external_review_action"))
         a11y.describe(self._insp_external_review_btn, t("meta_external_review_action"),
                       description=t("meta_external_review_title"))
         self._insp_external_review_btn.clicked.connect(
@@ -691,6 +693,7 @@ class InspectorBuildMixin:
         layout.addWidget(album_note)
 
         heading = QLabel(t("meta_auto_enabled_heading"))
+        heading.setWordWrap(True)
         heading.setStyleSheet(
             f"color: {tag_editor_colors().text_tertiary}; font-size: 11px; font-weight: bold;")
         layout.addWidget(heading)
@@ -749,7 +752,7 @@ class InspectorBuildMixin:
         self._pending_items_layout.setSpacing(6)
         layout.addWidget(self._pending_items)
 
-        self._pending_review_btn = QPushButton(t("meta_review_changes").strip())
+        self._pending_review_btn = ElidedPushButton(t("meta_review_changes").strip())
         self._pending_review_btn.setStyleSheet(btn_style())
         self._pending_review_btn.clicked.connect(self._on_review_changes)
         layout.addWidget(self._pending_review_btn)
@@ -784,7 +787,7 @@ class InspectorBuildMixin:
         self._external_items_layout.setSpacing(7)
         layout.addWidget(self._external_items)
 
-        self._external_review_all_btn = QPushButton(t("meta_external_review_action"))
+        self._external_review_all_btn = ElidedPushButton(t("meta_external_review_action"))
         self._external_review_all_btn.setStyleSheet(btn_style())
         self._external_review_all_btn.clicked.connect(
             self._review_selected_external_conflict)
@@ -824,7 +827,11 @@ class InspectorBuildMixin:
             row_layout.setSpacing(8)
             copy = QVBoxLayout()
             copy.setSpacing(2)
-            filename = QLabel(item.path.name if item is not None else str(record.item_id))
+            # Elided, not plain: a plain QLabel reports its whole text as its
+            # minimum width, so one long file name was enough to push this
+            # page past the pane and hide the rest of the row.
+            filename = ElidedLabel(item.path.name if item is not None else str(record.item_id),
+                                   mode=Qt.TextElideMode.ElideMiddle)
             filename.setObjectName("tagEditorPendingFile")
             filename.setLayoutDirection(Qt.LeftToRight)
             filename.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -855,19 +862,19 @@ class InspectorBuildMixin:
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(8, 7, 8, 7)
             row_layout.setSpacing(8)
-            severity = QLabel(t("meta_external_blocker_badge"))
+            severity = ElidedLabel(t("meta_external_blocker_badge"))
             severity.setObjectName("tagEditorSeverityError")
             row_layout.addWidget(severity)
             copy = QVBoxLayout()
             copy.setSpacing(2)
-            name = QLabel(track.path.name)
+            name = ElidedLabel(track.path.name, mode=Qt.TextElideMode.ElideMiddle)
             name.setStyleSheet("font-weight: 800; font-size: 11px;")
-            state = QLabel(t(f"meta_external_state_{getattr(track, 'external_state', 'current')}"))
+            state = ElidedLabel(t(f"meta_external_state_{getattr(track, 'external_state', 'current')}"))
             state.setObjectName("tagEditorProblemCopy")
             copy.addWidget(name)
             copy.addWidget(state)
             row_layout.addLayout(copy, 1)
-            review = QPushButton(t("meta_external_review_short"))
+            review = ElidedPushButton(t("meta_external_review_short"))
             review.clicked.connect(
                 lambda _checked=False, target=track: self._open_external_item(target))
             row_layout.addWidget(review)
@@ -1031,7 +1038,7 @@ class InspectorBuildMixin:
             label_key, desc_key = op_defs_by_key[key]
             label = t(label_key)
             desc = t(desc_key)
-            button = QPushButton(label)
+            button = ElidedPushButton(label)
             button.setProperty("cleanupCompact", True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)

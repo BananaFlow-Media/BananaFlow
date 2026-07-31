@@ -156,7 +156,15 @@ from .shared import (
 from .tree import ExplorerTreeWidget
 # ArtworkDropPreview is re-exported: it used to be defined here, and external
 # importers (including tests) still reach for it on this module.
-from .widgets import ArtworkDropPreview, OpRow, VerticalLabel
+from .widgets import (
+    ArtworkDropPreview,
+    ElidedLabel,
+    ElidedPushButton,
+    ElidedToolButton,
+    OpRow,
+    ResponsiveButtonFlow,
+    VerticalLabel,
+)
 
 # Panel behaviour split across mixins purely to keep each file readable. They
 # are not independent components: every method still runs on the panel and
@@ -1104,7 +1112,7 @@ class MetadataEditorPanel(
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self._auto_cfg_btn = QToolButton()
+        self._auto_cfg_btn = ElidedToolButton()
         self._auto_cfg_btn.setText(t("meta_auto_configure_actions"))
         self._auto_cfg_btn.setIcon(FluentIcon.SETTING.icon(color=get_colors().text_primary))
         self._auto_cfg_btn.setIconSize(QSize(16, 16))
@@ -1117,7 +1125,7 @@ class MetadataEditorPanel(
         self._auto_cfg_btn.setEnabled(False)
         self._auto_cfg_btn.clicked.connect(self._on_auto_arrange_settings)
 
-        self._auto_btn = QToolButton()
+        self._auto_btn = ElidedToolButton()
         self._auto_btn.setText(self._toolbar_text("meta_auto_btn"))
         self._auto_btn.setIcon(self._make_magic_wand_icon(color=get_colors().text_primary))
         self._auto_btn.setIconSize(QSize(17, 17))
@@ -2313,7 +2321,7 @@ class MetadataEditorPanel(
         body.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(body)
 
-        self._action_engine_btn = QPushButton(t("meta_action_engine_open"))
+        self._action_engine_btn = ElidedPushButton(t("meta_action_engine_open"))
         self._action_engine_btn.setIcon(FluentIcon.TAG.icon())
         self._action_engine_btn.setAccessibleName(t("meta_action_engine_open"))
         self._action_engine_btn.setProperty("accentRole", "primary")
@@ -2434,10 +2442,10 @@ class MetadataEditorPanel(
     def _build_online_metadata_page(self) -> QWidget:
         page = QWidget(); layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 14, 12, 14); layout.setSpacing(10)
-        title = QLabel(t("meta_online_title")); title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        title = QLabel(t("meta_online_title")); title.setWordWrap(True); title.setStyleSheet("font-weight: bold; font-size: 13px;")
         body = QLabel(t("meta_online_explicit_search_hint")); body.setWordWrap(True)
         self._online_scope_label = QLabel(t("meta_online_scope", n=0)); self._online_scope_label.setWordWrap(True)
-        self._online_open_button = QPushButton(t("meta_online_open")); self._online_open_button.setAccessibleName(t("meta_online_open"))
+        self._online_open_button = ElidedPushButton(t("meta_online_open")); self._online_open_button.setAccessibleName(t("meta_online_open"))
         self._online_open_button.clicked.connect(self._on_online_metadata)
         for widget in (title, body, self._online_scope_label, self._online_open_button): layout.addWidget(widget)
         layout.addStretch(); return page
@@ -2532,7 +2540,7 @@ class MetadataEditorPanel(
             # A full-width entry rather than only the gear on one row: the
             # settings govern the whole page, and a 28px icon on a single
             # operation is not where anyone looks for them.
-            settings_btn = QPushButton(t(settings_key))
+            settings_btn = ElidedPushButton(t(settings_key))
             settings_btn.setIcon(FluentIcon.SETTING.icon(color=get_colors().text_primary))
             settings_btn.setIconSize(QSize(14, 14))
             settings_btn.setStyleSheet(btn_style())
@@ -2571,7 +2579,7 @@ class MetadataEditorPanel(
         note.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(note)
 
-        self._dupes_btn = QPushButton(self._toolbar_text("meta_find_duplicates"))
+        self._dupes_btn = ElidedPushButton(self._toolbar_text("meta_find_duplicates"))
         self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color=get_colors().text_primary))
         self._dupes_btn.setIconSize(QSize(16, 16))
         self._dupes_btn.setEnabled(False)
@@ -2591,7 +2599,7 @@ class MetadataEditorPanel(
         self._dupes_groups_layout.setSpacing(6)
         layout.addWidget(self._dupes_groups)
 
-        self._dupes_reopen_btn = QPushButton(t("meta_dupes_reopen"))
+        self._dupes_reopen_btn = ElidedPushButton(t("meta_dupes_reopen"))
         self._dupes_reopen_btn.setStyleSheet(btn_style())
         self._dupes_reopen_btn.setVisible(False)
         self._dupes_reopen_btn.clicked.connect(self._reopen_duplicate_manager)
@@ -2631,9 +2639,10 @@ class MetadataEditorPanel(
             row_layout = QVBoxLayout(row)
             row_layout.setContentsMargins(8, 7, 8, 7)
             row_layout.setSpacing(2)
-            name = QLabel(t("meta_dupes_group_title",
-                            name=Path(files[0]).name if files else "",
-                            n=len(files)))
+            name = ElidedLabel(t("meta_dupes_group_title",
+                                 name=Path(files[0]).name if files else "",
+                                 n=len(files)),
+                               mode=Qt.TextElideMode.ElideMiddle)
             name.setObjectName("tagEditorPendingFile")
             name.setLayoutDirection(Qt.LeftToRight)
             name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -2665,7 +2674,10 @@ class MetadataEditorPanel(
         self._problems_summary = QLabel(t("meta_problems_empty"))
         self._problems_summary.setWordWrap(True)
         layout.addWidget(self._problems_summary)
-        filters = QHBoxLayout()
+        # Four filters in a fixed row wanted 852px -- three times the pane's
+        # own minimum -- so everything past the third combo was cut off with
+        # no way to scroll to it.
+        filters = ResponsiveButtonFlow(fill=True)
         self._problems_severity = QComboBox()
         self._problems_severity.addItem(t("meta_problems_all"), "")
         for key in ("information", "warning", "error", "blocker"):
@@ -2685,11 +2697,13 @@ class MetadataEditorPanel(
         self._problems_category.currentIndexChanged.connect(self._render_problems)
         self._problems_state.currentIndexChanged.connect(self._render_problems)
         self._problems_search.textChanged.connect(self._render_problems)
-        filters.addWidget(self._problems_severity)
-        filters.addWidget(self._problems_category)
-        filters.addWidget(self._problems_state)
-        filters.addWidget(self._problems_search, stretch=1)
-        layout.addLayout(filters)
+        for control in (self._problems_severity, self._problems_category,
+                        self._problems_state, self._problems_search):
+            # A combo box elides its own current entry once it is allowed to
+            # shrink; without this its widest item is a hard floor.
+            control.setMinimumWidth(96)
+            filters.add_widget(control)
+        layout.addWidget(filters)
         self._problems_table = QTableWidget(0, 7)
         self._problems_table.setHorizontalHeaderLabels([t("meta_problems_severity"), t("meta_problems_problem"),
                                                          t("meta_problems_category"), t("meta_problems_state"),
@@ -2701,17 +2715,18 @@ class MetadataEditorPanel(
         self._problem_selected_ids: set[str] = set()
         self._problems_table.itemSelectionChanged.connect(self._remember_problem_selection)
         layout.addWidget(self._problems_table, stretch=1)
-        controls = QHBoxLayout()
-        refresh = QPushButton(t("meta_problems_revalidate"))
+        controls = ResponsiveButtonFlow(fill=True)
+        refresh = ElidedPushButton(t("meta_problems_revalidate"))
         refresh.setAccessibleName(t("meta_problems_revalidate"))
         refresh.clicked.connect(self._begin_revalidate_problems)
-        fix = QPushButton(t("meta_problems_fix_selected"))
+        fix = ElidedPushButton(t("meta_problems_fix_selected"))
         fix.setAccessibleName(t("meta_problems_fix_selected"))
         fix.clicked.connect(self._on_fix_selected_problems)
-        select_all = QPushButton(t("meta_problems_select_all")); select_all.clicked.connect(self._problems_table.selectAll)
-        clear = QPushButton(t("meta_problems_clear_selection")); clear.clicked.connect(self._problems_table.clearSelection)
-        controls.addWidget(refresh); controls.addWidget(select_all); controls.addWidget(clear); controls.addWidget(fix); controls.addStretch()
-        layout.addLayout(controls)
+        select_all = ElidedPushButton(t("meta_problems_select_all")); select_all.clicked.connect(self._problems_table.selectAll)
+        clear = ElidedPushButton(t("meta_problems_clear_selection")); clear.clicked.connect(self._problems_table.clearSelection)
+        for button in (refresh, select_all, clear, fix):
+            controls.add_button(button)
+        layout.addWidget(controls)
         self._problems_snapshot = None
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

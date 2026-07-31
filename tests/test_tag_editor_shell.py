@@ -596,6 +596,92 @@ def test_responsive_panes_restore_after_returning_from_narrow_width(panel, tmp_p
     panel.hide()
 
 
+def _inspector_page_content(panel, index):
+    """The widget an inspector pane actually lays its content out in."""
+    from PySide6.QtWidgets import QScrollArea, QStackedWidget
+
+    page = panel._inspector_pages.widget(index)
+    if isinstance(page, QStackedWidget):
+        page = page.currentWidget()
+    if isinstance(page, QScrollArea):
+        return page.viewport().width(), page.widget()
+    return page.width(), page
+
+
+@pytest.mark.parametrize("language", ["en", "he"])
+def test_every_inspector_pane_fits_the_narrowest_open_inspector(language, tmp_path, monkeypatch):
+    """No pane may demand more width than the inspector can ever give it.
+
+    The pages scroll vertically only, so a page whose content will not fit
+    horizontally is not scrolled to -- it is cut off, silently. Edit and Check
+    used to be built from fixed-width labels and rows of full-text buttons,
+    which put four of their pages 100-600px past what the pane can offer.
+    Both languages, because the label that overflows differs between them.
+    """
+    from PySide6.QtWidgets import QApplication
+    from ui.i18n import current_language, set_language
+
+    previous = current_language()
+    panel = None
+    try:
+        set_language(language)
+        _app, panel = _make_panel(tmp_path, monkeypatch)
+        _load(panel, tmp_path, count=3)
+        panel.resize(1440, 900)
+        panel.show()
+        QApplication.processEvents()
+
+        sizes = panel._body_splitter.sizes()
+        total = sum(sizes)
+        # The inspector at its open minimum -- as narrow as a user can drag it
+        # without collapsing it to the rail.
+        floor = panel._INSPECTOR_OPEN_MIN
+        panel._apply_body_sizes([sizes[0], total - sizes[0] - floor, floor], save=False)
+        QApplication.processEvents()
+
+        too_wide = []
+        for index in range(panel._inspector_pages.count()):
+            panel._select_inspector_tool(index)
+            QApplication.processEvents()
+            viewport, content = _inspector_page_content(panel, index)
+            if content.width() > viewport:
+                too_wide.append((index, panel._inspector_tool_titles[index],
+                                 content.width() - viewport))
+        assert not too_wide, f"panes clipped at a {floor}px inspector: {too_wide}"
+    finally:
+        set_language(previous)
+        if panel is not None:
+            panel.hide()
+            panel.deleteLater()
+
+
+def test_a_long_file_name_does_not_widen_the_check_pages(panel, tmp_path):
+    """The pending/external rows are built from the file names they list, so
+    their width used to grow with whatever happened to be in the folder."""
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    tracks = _load(panel, tmp_path, count=1)
+    tracks[0].path = tmp_path / ("A" * 30 + " very long example file name.mp3")
+    panel.show()
+    try:
+        QApplication.processEvents()
+        record = SimpleNamespace(item_id=panel._workspace.item_id(tracks[0]),
+                                 original_value="old", proposed_value="new")
+        panel._render_pending_items([record])
+        panel._render_external_items(tracks)
+        QApplication.processEvents()
+
+        budget = panel._INSPECTOR_OPEN_MIN - panel._INSPECTOR_RAIL_WIDTH
+        for index in (13, 14):
+            _viewport, content = _inspector_page_content(panel, index)
+            demanded = max(content.minimumSizeHint().width(), content.minimumWidth())
+            assert demanded <= budget, (panel._inspector_tool_titles[index], demanded)
+    finally:
+        panel.hide()
+
+
 def test_collapsing_a_pane_gives_its_width_to_the_table(panel, tmp_path):
     _load(panel, tmp_path, count=3)
     panel.resize(1100, 760)
