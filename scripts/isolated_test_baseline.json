@@ -29,7 +29,6 @@
       "tests/test_phase4_folder_navigation_operations.py",
       "tests/test_tag_action_corrective_phase9.py",
       "tests/test_tag_action_ui_phase9.py",
-      "tests/test_tag_editor_shell.py",
       "tests/test_tag_editor_surface_contract.py",
       "tests/test_tag_editor_workspace_state.py"
     ]

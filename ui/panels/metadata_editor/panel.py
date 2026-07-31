@@ -1887,9 +1887,12 @@ class MetadataEditorPanel(
         self._table.viewportResized.connect(self._fill_leftover_space)
         # Suppress Qt's built-in row selection fill so our drawRow capsule
         # is the sole selection visual (no qfluentwidgets per-cell borders).
-        # setStyle() does NOT transfer ownership — store in instance var so
-        # Python GC doesn't destroy the object and leave Qt with a dangling ptr.
-        self._explorer_table_style = ExplorerTableStyle(self._table.style())
+        # QProxyStyle takes ownership of a supplied base style.  The table's
+        # current style belongs to QApplication, so passing it here made Qt
+        # free the application-owned style during teardown (a native access
+        # violation after otherwise-passing UI tests).  Let QProxyStyle create
+        # and own its default base style instead.
+        self._explorer_table_style = ExplorerTableStyle()
         self._table.setStyle(self._explorer_table_style)
         self._table.setModel(self._proxy)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -2067,7 +2070,14 @@ class MetadataEditorPanel(
         # width.  Qt otherwise compresses both side panes to their old minima
         # and keeps those accidental widths after the first resize.  Reapply
         # the reference allocation once actual geometry is available.
-        QTimer.singleShot(0, self._restore_initial_body_layout)
+        # Keep this deferred callback owned by the panel.  ``QTimer.singleShot``
+        # stores a Python callable outside the QObject ownership tree, so it
+        # can fire while Qt is tearing the panel down.  An owned timer is
+        # stopped and disconnected with the panel instead.
+        self._initial_body_layout_timer = QTimer(self)
+        self._initial_body_layout_timer.setSingleShot(True)
+        self._initial_body_layout_timer.timeout.connect(self._restore_initial_body_layout)
+        self._initial_body_layout_timer.start(0)
 
         # Set initial table zoom level
         self._set_zoom(self._zoom_level)

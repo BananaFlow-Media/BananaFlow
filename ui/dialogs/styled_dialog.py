@@ -347,7 +347,10 @@ def prepare_dialog(
     dialog.setLayoutDirection(
         Qt.LayoutDirection.RightToLeft if _is_app_rtl() else Qt.LayoutDirection.LeftToRight
     )
-    QTimer.singleShot(0, lambda: center_on_parent(dialog))
+    # Bind the deferred callback to the dialog's QObject lifetime.  Without a
+    # context, a dialog deleted before the next event turn leaves this lambda
+    # alive and it dereferences an invalid PySide wrapper during teardown.
+    QTimer.singleShot(0, dialog, lambda: center_on_parent(dialog))
 
 
 class StyledDialog(QDialog):
@@ -366,7 +369,7 @@ class StyledDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802 - Qt override
         _apply_dialog_theme(self)
         super().showEvent(event)
-        QTimer.singleShot(0, lambda: center_on_parent(self))
+        QTimer.singleShot(0, self, lambda: center_on_parent(self))
 
 
 def make_root_layout(dialog: QDialog, *, margins=(20, 18, 20, 16), spacing: int = 14) -> QVBoxLayout:

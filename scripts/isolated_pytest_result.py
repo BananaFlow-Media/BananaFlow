@@ -15,7 +15,6 @@ from xml.etree import ElementTree as ET
 
 
 _total = 0
-_called: set[str] = set()
 _finished: set[str] = set()
 _failed_calls: set[str] = set()
 _errors: set[str] = set()
@@ -37,24 +36,6 @@ def pytest_runtest_logreport(report) -> None:
             _errors.add(report.nodeid)
     elif report.skipped and report.when == "call":
         _skipped.add(report.nodeid)
-
-    if report.when == "call":
-        _called.add(report.nodeid)
-        # A small, explicitly opt-in exception for a reviewed Qt teardown
-        # crash: after every test *call* and every preceding teardown passed,
-        # preserve the result before the final fixture finalizer can abort the
-        # interpreter.  This cannot hide a failed test body or an earlier
-        # fixture error, and the isolated runner enables it for one baseline
-        # file only.
-        if (
-            os.environ.get("BANANAFLOW_ISOLATED_EARLY_AFTER_CALL") == "1"
-            and _total
-            and len(_called) == _total
-            and not _failed_calls
-            and not _errors
-            and not _skipped
-        ):
-            _write_result()
 
     if report.when != "teardown":
         return
