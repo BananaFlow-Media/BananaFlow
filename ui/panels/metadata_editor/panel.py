@@ -2630,6 +2630,7 @@ class MetadataEditorPanel(
         self._dupes_status.setObjectName("tagEditorDupesStatus")
         self._dupes_status.setProperty("dupeState", "running")
         self._dupes_status.setVisible(False)
+        self._dupes_status_text: tuple[str, str] = ("", "running")
         layout.addWidget(self._dupes_status)
 
         self._dupes_results_btn = ElidedPushButton(t("meta_dupes_show_results"))
@@ -2733,6 +2734,13 @@ class MetadataEditorPanel(
         flight, a verdict, and a failure must not look alike.
         """
         if not hasattr(self, "_dupes_status"):
+            return
+        # Touching a widget on this panel costs a relayout of the whole thing,
+        # so a running scan must not pay for a pane nobody is looking at. The
+        # text is re-applied when the pane is opened.
+        self._dupes_status_text = (text, state)
+        if self._active_inspector_tool != self._inspector_tool_titles.index(
+                t("meta_duplicates_tools_title")):
             return
         self._dupes_status.setText(text)
         self._dupes_status.setVisible(bool(text))
@@ -3104,6 +3112,10 @@ class MetadataEditorPanel(
         if (hasattr(self, "_inspector_subtab_layout")
                 and self._inspector_pane_modes[index] != self._inspector_subtabs_mode):
             self._rebuild_inspector_subtabs()
+        # Opening the pane is when the deferred scan status becomes worth paying
+        # a relayout for.
+        if hasattr(self, "_dupes_status_text"):
+            self._set_duplicate_status(*self._dupes_status_text)
         self._refresh_tool_button_states()
 
     def _toggle_inspector_tool(self, index: int) -> None:

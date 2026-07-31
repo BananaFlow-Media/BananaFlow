@@ -73,6 +73,17 @@ _AUDIO_EXTS = frozenset({
 # report how a group was matched.
 _STRATEGY = "md5"
 
+# Each progress signal costs the Tag Editor a full relayout -- tens of
+# milliseconds -- so emitting one per file made the UI, not the hashing, the
+# cost of a scan. Nobody can read faster than this anyway.
+_PROGRESS_INTERVAL = 0.2
+
+# The Tag Editor's table paints its rows through Python delegates, so while it
+# is on screen the GIL is heavily contended. Reading in 8 KB chunks asked for
+# the GIL thousands of times per file and the hashing thread was starved to a
+# crawl; 1 MB asks a hundred times less often for the same work.
+_READ_CHUNK = 1024 * 1024
+
 
 class DuplicateDetectorWorker(QThread):
     """
@@ -94,9 +105,18 @@ class DuplicateDetectorWorker(QThread):
         self._request_id = request_id
         self._generation = generation
         self._warnings: list[tuple[str, str, str]] = []
+        self._last_progress = 0.0
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def _emit_progress(self, done: int, total: int, t0: float, *, final: bool = False) -> None:
+        """Report progress at a rate a person can read, not once per file."""
+        now = time.perf_counter()
+        if not final and now - self._last_progress < _PROGRESS_INTERVAL:
+            return
+        self._last_progress = now
+        self.progress.emit(done, total, self._eta(done, total, t0))
 
     def run(self) -> None:
         t0 = time.perf_counter()
@@ -164,8 +184,7 @@ class DuplicateDetectorWorker(QThread):
             except OSError:
                 self._warnings.append((str(f), "prefilter", "duplicate_read_failed"))
                 unreadable.append(f)
-            if i % 200 == 0 or i == total - 1:
-                self.progress.emit(i + 1, total, self._eta(i + 1, total, t0))
+            self._emit_progress(i + 1, total, t0, final=(i == total - 1))
 
         return [path for group in by_length.values() if len(group) > 1
                 for path in group] + unreadable
@@ -192,7 +211,7 @@ class DuplicateDetectorWorker(QThread):
                     hash_map[result.digest].append((f, result))
             except OSError:
                 self._warnings.append((str(f), "hash", "duplicate_read_failed"))
-            self.progress.emit(i + 1, total, self._eta(i + 1, total, t0))
+            self._emit_progress(i + 1, total, t0, final=(i == total - 1))
 
         return {k: v for k, v in hash_map.items() if len(v) > 1}
 
@@ -215,7 +234,7 @@ class DuplicateDetectorWorker(QThread):
             while True:
                 if self._cancel.is_set():
                     return None
-                to_read = min(8192, remaining) if remaining is not None else 8192
+                to_read = min(_READ_CHUNK, remaining) if remaining is not None else _READ_CHUNK
                 chunk   = fp.read(to_read)
                 if not chunk:
                     break

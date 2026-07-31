@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -125,6 +126,42 @@ def test_an_unreadable_header_is_carried_into_the_hash_pass(tmp_path, monkeypatc
     candidates = worker._same_length_candidates(files, len(files), 0.0)
     assert candidates == files
     assert worker._warnings == [(str(tmp_path / "a.mp3"), "prefilter", "duplicate_read_failed")]
+
+
+def test_progress_is_throttled_rather_than_emitted_per_file(tmp_path):
+    """Each signal costs the panel a relayout, so they must not track files.
+
+    Unthrottled, a 66-candidate scan spent ~95s repainting and ~3s hashing.
+    """
+    from ui.workers.duplicate_detector_worker import _PROGRESS_INTERVAL
+
+    worker = DuplicateDetectorWorker(tmp_path, False)
+    emitted = []
+    worker.progress.connect(lambda *a: emitted.append(a))
+
+    t0 = time.perf_counter()
+    for i in range(500):
+        worker._emit_progress(i + 1, 500, t0, final=(i == 499))
+
+    # A burst that takes no real time may only announce itself once, plus the
+    # closing one that must always land so the bar reaches its end.
+    assert len(emitted) <= 2, f"{len(emitted)} signals for an instant loop"
+    assert emitted[-1][0] == 500
+    assert _PROGRESS_INTERVAL >= 0.1
+
+
+def test_a_trailing_id3v1_tag_is_excluded_even_in_one_chunk(tmp_path):
+    """The read chunk is now larger than most payloads; the end bound must hold."""
+    audio = b"frames" * 100
+    tagged = tmp_path / "tagged.mp3"
+    clean = tmp_path / "clean.mp3"
+    _write_mp3(tagged, audio + b"TAG" + b"x" * 125)
+    _write_mp3(clean, audio)
+
+    worker = DuplicateDetectorWorker(tmp_path, False)
+    assert tagged.stat().st_size != clean.stat().st_size
+    assert worker._audio_hash(tagged).digest == worker._audio_hash(clean).digest
+    assert worker._payload_length(tagged) == worker._payload_length(clean)
 
 
 def test_scanning_is_not_capped_at_ten_thousand_files(tmp_path):

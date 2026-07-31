@@ -985,11 +985,19 @@ def test_each_group_states_which_strategy_matched_it(panel, tmp_path, monkeypatc
     assert possible.confidence_key == "duplicates_confidence_possible"
 
 
+def _open_dupes_tools_pane(panel):
+    from ui.i18n import t
+
+    panel._select_inspector_tool(
+        panel._inspector_tool_titles.index(t("meta_duplicates_tools_title")))
+
+
 def test_the_scan_reports_itself_where_it_was_started(panel, tmp_path):
     """The Tools pane holds no findings, so it must still show the scan run."""
     from ui.i18n import t
 
     _load(panel, tmp_path)
+    _open_dupes_tools_pane(panel)
     assert panel._dupes_status.isHidden()
 
     panel._on_find_duplicates()
@@ -1004,6 +1012,24 @@ def test_the_scan_reports_itself_where_it_was_started(panel, tmp_path):
 
     panel.on_duplicate_scan_error("boom")
     assert "boom" in panel._dupes_status.text()
+
+
+def test_progress_does_not_repaint_a_pane_nobody_is_looking_at(panel, tmp_path):
+    """Touching this panel costs a full relayout, so hidden panes wait.
+
+    A scan used to spend far longer repainting than hashing; the status a
+    closed pane would have shown is applied when it is opened instead.
+    """
+    from ui.i18n import t
+
+    _load(panel, tmp_path)
+    panel._select_inspector_tool(0)                      # Edit > Fields
+    panel.on_duplicate_scan_progress(3, 10, "~4s")
+    assert panel._dupes_status.text() == ""              # not paid for
+
+    _open_dupes_tools_pane(panel)
+    assert "3" in panel._dupes_status.text()             # ... but not lost
+    assert not panel._dupes_status.isHidden()
 
 
 def test_loading_another_folder_drops_the_previous_findings(panel, tmp_path):
