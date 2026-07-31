@@ -501,6 +501,12 @@ def run_file(
     """Run one file, retrying only the reviewed intermittent native condition."""
     attempts: list[Attempt] = []
     max_attempts = baseline.max_attempts_for(rel_path)
+    file_env = dict(env_extra or {})
+    # TestTagEditorShell has repeated, cross-platform evidence of a Qt native
+    # abort after all 76 test calls pass but before the last fixture teardown
+    # report.  Do not extend this narrow exception to other files.
+    if rel_path == "tests/test_tag_editor_shell.py":
+        file_env["BANANAFLOW_ISOLATED_EARLY_AFTER_CALL"] = "1"
 
     for index in range(1, max_attempts + 1):
         attempt = run_once(
@@ -509,7 +515,7 @@ def run_file(
             evidence_dir=evidence_dir,
             timeout=timeout,
             attempt=index,
-            env_extra=env_extra,
+            env_extra=file_env,
         )
         attempts.append(attempt)
         outcome, reason = classify_attempt(attempt, rel_path, baseline)
