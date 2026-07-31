@@ -34,12 +34,7 @@ def panel(tmp_path, monkeypatch):
     try:
         yield widget
     finally:
-        from PySide6.QtCore import QCoreApplication, QEvent
-
-        widget.close()
         widget.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        QCoreApplication.processEvents()
 
 
 def _load(panel, tmp_path, *, count=2, changed=0):
