@@ -391,6 +391,11 @@ def test_subtabs_show_only_the_active_mode(panel):
     assert shown == edit_buttons
 
 
+def test_every_inspector_subtab_has_a_qt_parent(panel):
+    """Inactive chips must not survive as top-level widgets after panel teardown."""
+    assert all(button.parentWidget() is not None for button in panel._inspector_tool_buttons)
+
+
 def test_collapsed_rail_draws_every_mode_as_the_same_card(panel):
     """The reference's `.btn.icononly`: a card per mode, and no selected state.
 

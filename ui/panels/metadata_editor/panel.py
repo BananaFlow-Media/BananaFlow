@@ -2277,7 +2277,12 @@ class MetadataEditorPanel(
             self._inspector_tool_kinds.append(icon)
             self._inspector_pages.addWidget(page)
 
-            chip = QPushButton(title)
+            # Some chips are inactive when the inspector is first built and
+            # therefore are not inserted into the subtab layout yet.  They
+            # must still have a QObject parent; otherwise they become
+            # top-level widgets, survive panel deletion, and accumulate across
+            # test sessions until PySide crashes natively.
+            chip = QPushButton(title, self._inspector_content)
             chip.setObjectName("tagEditorSubtab")
             chip.setCheckable(True)
             chip.setFixedHeight(25)
