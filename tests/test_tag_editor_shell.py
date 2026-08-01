@@ -34,13 +34,14 @@ def panel(tmp_path, monkeypatch):
     try:
         yield widget
     finally:
-        # Each test builds a full panel.  Deliver just the deferred deletion
-        # before the next fixture starts so PySide does not accumulate dozens
-        # of complete widget trees in one QApplication.  Do not process the
-        # general event queue here: unrelated zero-delay callbacks belong to
-        # their own owners and must not run during teardown.
+        # MetadataEditorPanel has a close lifecycle (notably its thumbnail
+        # worker shutdown).  Exercise that lifecycle before delivering its
+        # deferred deletion, but do not process the general event queue here:
+        # unrelated zero-delay callbacks belong to their own owners and must
+        # not run during teardown.
         from PySide6.QtCore import QCoreApplication, QEvent
 
+        widget.close()
         widget.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
