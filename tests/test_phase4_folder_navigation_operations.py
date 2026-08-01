@@ -133,7 +133,7 @@ def test_panel_rename_rebases_filter_breadcrumb_tree_and_workspace(monkeypatch, 
     panel, controller, _root, album, track = _panel_at_album(tmp_path)
     identity = panel._workspace.item_id(track)
     try:
-        monkeypatch.setattr("ui.panels.metadata_editor.panel.get_text", lambda *args, **kwargs: ("renamed", True))
+        monkeypatch.setattr("ui.panels.metadata_editor.prompts.get_text", lambda *args, **kwargs: ("renamed", True))
         panel._on_tree_rename(album, is_file=False)
 
         renamed = album.parent / "renamed"
@@ -172,7 +172,7 @@ def test_panel_move_and_delete_keep_navigation_filter_and_apply_state(monkeypatc
         assert panel._workspace.apply_candidates() == []
         assert [entry.operation_type for entry in controller._own_operations.entries()] == ["move"]
 
-        monkeypatch.setattr("ui.panels.metadata_editor.panel.confirm", lambda *args, **kwargs: True)
+        monkeypatch.setattr("ui.panels.metadata_editor.prompts.confirm", lambda *args, **kwargs: True)
         monkeypatch.setattr(
             "core.metadata_processor.send_to_recycle_bin", lambda path: shutil.rmtree(path))
         panel._on_tree_delete(destination, is_file=False)
@@ -195,7 +195,7 @@ def test_panel_never_mutates_the_filesystem_without_a_controller_owner(monkeypat
     panel, controller, _root, album, track = _panel_at_album(tmp_path)
     try:
         panel.set_file_operation_owner(None)
-        monkeypatch.setattr("ui.panels.metadata_editor.panel.get_text",
+        monkeypatch.setattr("ui.panels.metadata_editor.prompts.get_text",
                             lambda *args, **kwargs: ("renamed", True))
         panel._on_tree_rename(album, is_file=False)
         assert album.exists() and not (album.parent / "renamed").exists()

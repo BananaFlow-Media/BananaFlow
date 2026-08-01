@@ -3,22 +3,86 @@ ui/panels/metadata_editor/shared.py  –  Tag Editor shared constants & styling
 ==============================================================================
 Theme-aware QSS builders, the magic-operation catalogue, default column
 widths, inspector page indices, and the single Win11 check-mark painter
-used by both the header 'Select All' toggle and the per-row checkboxes.
+used by both the header 'Select All' toggle and the standalone row checkboxes.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from dataclasses import dataclass
+
+from PySide6.QtCore import QByteArray, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_CUR, COL_TITLE_NEW,
     COL_ARTIST_CUR, COL_ARTIST_NEW, COL_ALBUM_CUR, COL_ALBUM_NEW,
     COL_TRACK_CUR, COL_TRACK_NEW,
     COL_FILENAME_NEW, COL_GENRE_CUR, COL_GENRE_NEW,
-    COL_COMMENT_CUR, COL_COMMENT_NEW,
+    COL_COMMENT_CUR, COL_COMMENT_NEW, COL_STATUS, COL_GUTTER, COL_END_GUTTER,
 )
 from ui.theme_manager import get_colors
+
+
+@dataclass(frozen=True)
+class TagEditorColors:
+    """The Tag Editor's design tokens, with a dark-theme counterpart.
+
+    The light values originated in the HTML prototype that guided the redesign
+    (now archived under ``docs/design/tag-editor/_reference/``); they are kept
+    because they work, not because that file dictates them.  The accent remains
+    the user's live application accent, whose fresh-install default is green.
+    """
+
+    bg: str
+    surface: str
+    surface2: str
+    surface3: str
+    border: str
+    text_primary: str
+    text_secondary: str
+    text_tertiary: str
+    accent: str
+    accent_dark: str
+    accent_soft: str
+    warn: str
+    warn_soft: str
+    danger: str
+    danger_soft: str
+    info: str
+    info_soft: str
+
+
+def tag_editor_colors() -> TagEditorColors:
+    """Return the Tag Editor light palette or its dark-theme equivalent."""
+    c = get_colors()
+    is_dark = c.bg.lower() == "#0d0d12"
+    accent_color = QColor(c.accent)
+    accent_dark = (
+        "#0B7A5F" if c.accent.upper() == "#10A37F"
+        else accent_color.darker(125).name() if accent_color.isValid()
+        else c.accent
+    )
+    if is_dark:
+        return TagEditorColors(
+            bg=c.bg, surface=c.surface, surface2=c.surface2, surface3="#191923",
+            border=c.border, text_primary=c.text_primary,
+            text_secondary=c.text_secondary, text_tertiary=c.text_tertiary,
+            accent=c.accent, accent_dark=accent_dark,
+            accent_soft=f"rgba({accent_color.red()}, {accent_color.green()}, {accent_color.blue()}, 0.14)",
+            warn="#F2A640", warn_soft="rgba(242, 166, 64, 0.14)",
+            danger="#E06B54", danger_soft="rgba(224, 107, 84, 0.14)",
+            info="#6F9FD1", info_soft="rgba(111, 159, 209, 0.14)",
+        )
+    return TagEditorColors(
+        bg="#EAEEEC", surface="#FFFFFF", surface2="#F5F7F6", surface3="#F1F4F2",
+        border="#E1E7E3", text_primary="#16201C", text_secondary="#66706A",
+        text_tertiary="#9AA49D", accent=c.accent, accent_dark=accent_dark,
+        accent_soft=f"rgba({accent_color.red()}, {accent_color.green()}, {accent_color.blue()}, 0.10)",
+        warn="#C77700", warn_soft="rgba(199, 119, 0, 0.10)",
+        danger="#B54832", danger_soft="rgba(181, 72, 50, 0.10)",
+        info="#3A6EA5", info_soft="rgba(58, 110, 165, 0.10)",
+    )
 
 
 def dim_hex(hex_color: str, factor: float = 0.85) -> str:
@@ -58,6 +122,10 @@ MAGIC_OP_DEFS: list[tuple[str, str, str]] = [
     ("clear_album_artist",       "meta_op_clear_album_artist_label",       "meta_op_clear_album_artist_desc"),
     ("clean_filename",           "meta_op_clean_filename_label",           "meta_op_clean_filename_desc"),
     ("strip_filename_numbering", "meta_op_strip_filename_numbering_label", "meta_op_strip_filename_numbering_desc"),
+    ("rename_from_title",        "meta_op_rename_from_title_label",        "meta_op_rename_from_title_desc"),
+    ("replace_text",             "meta_op_replace_text_label",             "meta_op_replace_text_desc"),
+    ("change_case",              "meta_op_change_case_label",              "meta_op_change_case_desc"),
+    ("number_tracks",            "meta_op_number_tracks_label",            "meta_op_number_tracks_desc"),
 ]
 
 # Which ops the auto-arrange button runs by default
@@ -66,7 +134,7 @@ DEFAULT_AUTO_OPS: frozenset[str] = frozenset({
 })
 
 DEFAULT_COL_WIDTHS: dict[int, int] = {
-    COL_CHECK:        28,  # ExplorerFileListView._SIDE_EMPTY_GUTTER
+    COL_CHECK:        24,  # Fixed checkbox column: 4 px padding on each side
     COL_FILENAME:     260,
     COL_TITLE_CUR:    130,
     COL_TITLE_NEW:    130,
@@ -81,32 +149,162 @@ DEFAULT_COL_WIDTHS: dict[int, int] = {
     COL_GENRE_NEW:    100,
     COL_COMMENT_CUR:  150,
     COL_COMMENT_NEW:  150,
+    COL_STATUS:       120,
+    COL_GUTTER:       17,  # 60% of the old 28 px empty gutter
+    COL_END_GUTTER:    9,  # About half of the leading empty gutter
 }
+
+
+# The collapsed inspector rail's glyphs, taken verbatim from the reference
+# prototype's icon table.  FluentIcon has no counterpart that reads the same at
+# 18 px: EDIT boxes the pencil and CERTIFICATE draws a badge rather than the
+# circled tick.  "tools" is deliberately absent -- that one stays on
+# FluentIcon.DEVELOPER_TOOLS.
+_RAIL_ICON_SVG = {
+    "edit": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    "check": '<path d="M9 11l3 3L22 4"/><path d="M21 12a9 9 0 1 1-5.3-8.2"/>',
+}
+
+_RAIL_ICON_TEMPLATE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"'
+    ' stroke="{color}" stroke-width="1.9" stroke-linecap="round"'
+    ' stroke-linejoin="round">{paths}</svg>'
+)
+
+
+def rail_icon(name: str, color: str, size: int = 18) -> QIcon:
+    """Render a reference rail glyph, tinted for the current theme.
+
+    Kept at 4x rather than scaled back down, the way the Tag Editor's other
+    hand-drawn icons are: Qt then has the resolution to stay sharp at any DPI.
+    """
+    render_size = size * 4
+    svg = _RAIL_ICON_TEMPLATE.format(color=color, paths=_RAIL_ICON_SVG[name])
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(render_size, render_size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    renderer.render(painter, QRectF(0, 0, render_size, render_size))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def rail_btn_style() -> str:
+    """The collapsed rail's icon button -- the prototype's ``.btn.icononly``.
+
+    Every mode carries the same card, open or not: the reference draws no
+    selected state here, and a rail that is only visible while the inspector is
+    collapsed has no open pane to point at.
+    """
+    c = tag_editor_colors()
+    return (
+        f"QPushButton {{ background: {c.surface}; border: 1px solid {c.border};"
+        f"  border-radius: 9px; padding: 0; }}"
+        f"QPushButton:hover {{ background: {c.surface3}; }}"
+        f"QPushButton:pressed {{ background: {c.surface2}; }}"
+    )
 
 
 def btn_style() -> str:
     """Standard op-button style (theme-aware, called fresh each time)."""
-    c = get_colors()
+    c = tag_editor_colors()
     return (
         f"QPushButton {{ background: {c.surface}; color: {c.text_primary};"
         f"  border: 1px solid {c.border};"
-        f"  border-radius: 8px; padding: 7px 10px; text-align: left; font-size: 12px; }}"
-        f"QPushButton:hover {{ background: {c.surface2}; border-color: {c.accent}; }}"
+        f"  border-radius: 9px; padding: 6px 10px; text-align: center; font-size: 12px;"
+        f"  min-height: 18px; font-weight: 600; }}"
+        f"QPushButton:hover {{ background: {c.surface3}; border-color: {c.border}; }}"
         f"QPushButton:pressed {{ background: {c.border}; }}"
         f"QPushButton:disabled {{ background: {c.bg}; color: {c.text_tertiary}; border-color: {c.border}; }}"
     )
 
 
 def primary_btn_style() -> str:
-    c = get_colors()
-    accent_dim = dim_hex(c.accent)
+    c = tag_editor_colors()
     return (
-        f"QPushButton {{ background: {c.accent}; color: #000; font-weight: bold;"
-        f"  border-radius: 8px; padding: 7px 10px; font-size: 12px; }}"
-        f"QPushButton:hover {{ background: {accent_dim}; }}"
+        f"QPushButton {{ background: {c.accent}; color: #ffffff; font-weight: 800;"
+        f"  border: 1px solid {c.accent}; border-radius: 9px; padding: 7px 11px; font-size: 12px; }}"
+        f"QPushButton:hover {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
         f"QPushButton:disabled {{ background: {c.bg}; color: {c.text_tertiary};"
         f"  border: 1px solid {c.border}; }}"
     )
+
+
+def tag_dialog_qss() -> str:
+    """Component-level dialog styling copied from the reference prototype."""
+    c = tag_editor_colors()
+    return (
+        f"QDialog[tagEditorDialog=\"true\"] {{ background: {c.surface}; color: {c.text_primary};"
+        f" border: 1px solid {c.border}; border-radius: 16px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QWidget {{ color: {c.text_primary}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogHeaderFrame {{ background: {c.surface};"
+        f" border: none; border-bottom: 1px solid {c.border}; padding-bottom: 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogHeaderIcon {{ background: {c.accent_soft};"
+        f" color: {c.accent}; border: none; border-radius: 10px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogTitle {{ color: {c.text_primary};"
+        f" font-size: 16px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogSubtitle {{ color: {c.text_secondary};"
+        f" font-size: 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogSection {{ background: {c.surface};"
+        f" border: 1px solid {c.border}; border-radius: 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogSectionTitle {{ color: {c.text_primary};"
+        f" font-size: 12px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogSettingRow:hover {{ background: {c.surface3};"
+        f" border-color: {c.border}; border-radius: 8px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QFrame#dialogFooter {{ background: {c.surface};"
+        f" border: none; border-top: 1px solid {c.border}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLineEdit,"
+        f"QDialog[tagEditorDialog=\"true\"] QComboBox,"
+        f"QDialog[tagEditorDialog=\"true\"] QTextEdit,"
+        f"QDialog[tagEditorDialog=\"true\"] QPlainTextEdit,"
+        f"QDialog[tagEditorDialog=\"true\"] QSpinBox {{ background: {c.surface}; color: {c.text_primary};"
+        f" border: 1px solid {c.border}; border-radius: 8px; padding: 6px 9px; min-height: 20px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLineEdit:focus,"
+        f"QDialog[tagEditorDialog=\"true\"] QComboBox:focus,"
+        f"QDialog[tagEditorDialog=\"true\"] QTextEdit:focus {{ border-color: {c.accent}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton {{ background: {c.surface};"
+        f" color: {c.text_primary}; border: 1px solid {c.border}; border-radius: 9px;"
+        f" padding: 0 11px; min-height: 34px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton:hover {{ background: {c.surface3}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton[dialogRole=\"primary\"],"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton[accentRole=\"primary\"] {{"
+        f" background: {c.accent}; color: #ffffff; border-color: {c.accent}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QPushButton[dialogRole=\"danger\"] {{"
+        f" background: {c.danger}; color: #ffffff; border-color: {c.danger}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QTableView,"
+        f"QDialog[tagEditorDialog=\"true\"] QTableWidget {{ background: {c.surface};"
+        f" alternate-background-color: {c.surface2}; color: {c.text_primary};"
+        f" border: 1px solid {c.border}; border-radius: 11px; gridline-color: {c.surface3}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QHeaderView::section {{ background: {c.surface3};"
+        f" color: {c.text_secondary}; border: none; border-bottom: 1px solid {c.border};"
+        f" padding: 7px; font-size: 10.5px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QTabBar::tab {{ background: transparent;"
+        f" color: {c.text_secondary}; border: none; border-bottom: 2px solid transparent;"
+        f" min-height: 34px; padding: 0 13px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QTabBar::tab:selected {{ color: {c.accent_dark};"
+        f" border-bottom-color: {c.accent}; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogFormLabel {{ color: {c.text_secondary};"
+        f" font-size: 11.5px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogFormValue {{ color: {c.text_primary};"
+        f" font-size: 11.5px; font-weight: 800; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogResultSuccess {{ background: {c.accent_soft};"
+        f" color: {c.accent_dark}; border: none; border-radius: 11px; padding: 12px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogResultWarning {{ background: {c.warn_soft};"
+        f" color: {c.warn}; border: none; border-radius: 11px; padding: 12px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#tagDialogResultError {{ background: {c.danger_soft};"
+        f" color: {c.danger}; border: none; border-radius: 11px; padding: 12px; font-weight: 700; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QLabel#dialogHint {{ background: {c.surface3};"
+        f" color: {c.text_secondary}; border: none; border-radius: 9px; padding: 9px 11px; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QScrollArea {{ background: {c.surface}; border: none; }}"
+        f"QDialog[tagEditorDialog=\"true\"] QScrollArea > QWidget > QWidget {{ background: {c.surface}; }}"
+    )
+
+
+def mark_tag_editor_dialog(dialog) -> None:
+    """Opt a raw or StyledDialog instance into the Tag Editor modal skin."""
+    dialog.setProperty("tagEditorDialog", True)
+    dialog.setStyleSheet(dialog.styleSheet() + tag_dialog_qss())
 
 
 def op_row_qss() -> str:
@@ -115,15 +313,36 @@ def op_row_qss() -> str:
     Clean, minimal rows separated by a thin divider — no card outline or
     rounded corners — with a subtle hover highlight.
     """
-    c = get_colors()
+    c = tag_editor_colors()
     return (
         f"QFrame#metaOpRow {{ background: {c.surface}; border: 1px solid {c.border};"
         f"  border-radius: 9px; }}"
         f"QFrame#metaOpRow:hover {{ background: {c.surface2}; border-color: {c.accent}; }}"
+        # The row is keyboard-reachable, so focus has to be visible.  A
+        # two-pixel accent border rather than a colour swap, so it still reads
+        # as focused in high contrast and for colour-blind users.
+        f"QFrame#metaOpRow:focus {{ background: {c.surface2};"
+        f"  border: 2px solid {c.accent}; }}"
         f"QLabel#metaOpRowLabel {{ background: transparent; border: none;"
         f"  color: {c.text_primary}; font-size: 12px; }}"
         f"QFrame#metaOpRow[actionEnabled=\"false\"] {{ background: {c.bg}; border-color: {c.border}; }}"
         f"QFrame#metaOpRow[actionEnabled=\"false\"] QLabel#metaOpRowLabel {{ color: {c.text_tertiary}; }}"
+    )
+
+
+def compact_clear_button_qss() -> str:
+    """Style destructive field-clear actions as compact red-outline pills."""
+    c = tag_editor_colors()
+    return (
+        f"QPushButton[cleanupCompact=\"true\"] {{ background: {c.surface}; color: {c.danger};"
+        f" border: 1px solid {c.danger}; border-radius: 8px; min-height: 27px;"
+        f" padding: 0 10px; font-size: 10.5px; font-weight: 800; }}"
+        f"QPushButton[cleanupCompact=\"true\"]:hover {{ background: {c.surface}; color: {c.danger};"
+        f" border-color: {c.danger}; }}"
+        f"QPushButton[cleanupCompact=\"true\"]:pressed {{ background: {c.surface}; color: {c.danger};"
+        f" border-color: {c.danger}; }}"
+        f"QPushButton[cleanupCompact=\"true\"]:disabled {{ background: {c.surface};"
+        f" color: {c.text_tertiary}; border-color: {c.border}; }}"
     )
 
 
@@ -139,8 +358,8 @@ CB_SIZE = 16   # Win11 rounded check-mark box, px
 def paint_check_mark(painter: QPainter, cx: int, cy: int, checked: bool) -> None:
     """Draw the Win11-style rounded check mark centered at (cx, cy).
 
-    Single source of truth for the row checkboxes (FilenameDelegate) and the
-    header 'Select All' toggle (MetadataHeaderView) so they stay pixel-identical.
+    Single source of truth for the row checkboxes and the header 'Select All'
+    toggle so they stay pixel-identical.
     """
     colors = get_colors()
     r = CB_SIZE // 2

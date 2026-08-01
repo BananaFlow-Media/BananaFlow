@@ -131,39 +131,51 @@ def test_main_panels_restyle_when_accent_changes(tmp_path, monkeypatch):
 
 
 def test_metadata_editor_helpers_use_live_accent(tmp_path, monkeypatch):
+    """The primary button tracks the user's accent, live, with no restart.
+
+    Only the primary style is asserted. The redesign made secondary buttons a
+    neutral surface with a plain border, so btn_style() carries no accent at
+    all; whether it should is an open design question tracked separately, not
+    something to assert either way here.
+    """
     _app, _cfg, tm = _make_app_config_theme(tmp_path, monkeypatch)
 
-    from ui.panels.metadata_editor_panel import _btn_style, _primary_btn_style
+    from ui.panels.metadata_editor_panel import _primary_btn_style
 
-    assert OCEAN in _btn_style()
     assert OCEAN in _primary_btn_style()
-    assert AMBER not in _btn_style()
     assert AMBER not in _primary_btn_style()
 
     tm.set_accent(VIOLET)
-    assert VIOLET in _btn_style()
     assert VIOLET in _primary_btn_style()
-    assert OCEAN not in _btn_style()
     assert OCEAN not in _primary_btn_style()
 
 
 def test_metadata_editor_empty_state_uses_shared_minimal_accent_icon():
+    """No bespoke, hardcoded-brand styling in the Tag Editor panel.
+
+    This guarded the *intent* -- shared icon component, no frozen hex values,
+    styles from the shared helpers -- with a list of literal source strings.
+    Four of those strings described one specific implementation: a gradient
+    Auto-Order frame tinted from nine derived accent shades. The redesign
+    replaced that frame with a plain container holding two ordinary buttons,
+    which left the assertions pinning code that no longer had a reason to
+    exist. The intent below is what actually matters and still holds.
+    """
     source = (REPO_ROOT / "ui/panels/metadata_editor/panel.py").read_text(encoding="utf-8")
 
     assert 'EmptyStateIcon("tag"' in source
     assert 'EmptyStateIcon("sync"' in source
-    assert "_empty_browse_btn" not in source
+    # Frozen brand purples: the reason this test exists.
     assert "#5147f5" not in source
     assert "#2f2758" not in source
     assert "#d9ccff" not in source
     assert 'for attr in ("_revert_btn", "_restore_btn", "_io_btn")' in source
     assert 'apply_role = "primary" if apply_enabled else "neutral"' in source
     assert "self._browse_btn.setStyleSheet" in source
-    assert "accent_glow_2" in source
-    assert "x1:0, y1:0, x2:1, y2:1" in source
-    assert "accent_glow_hover_3" in source
-    assert "border: 1px solid {accent_border}" in source
     assert "auto_text = accent" in source
+    # The empty state's call to action is allowed, but it takes the shared
+    # accent-derived style rather than inventing its own.
+    assert "self._empty_browse_btn.setStyleSheet(primary_btn_style())" in source
 
 
 def test_fluent_accent_updates_immediately(tmp_path, monkeypatch):

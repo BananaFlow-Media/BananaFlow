@@ -14,7 +14,10 @@ from core.backup_manager import BackupManager, BackupManagerError
 from core.metadata_processor import load_tag_backup
 from core.operation_manifest import ManifestError, read_manifest
 from ui.dialogs.styled_dialog import confirm, show_info, show_warning
+from ui.dialogs.styled_dialog import add_header, make_footer
 from ui.i18n import t
+from ui.panels.metadata_editor.shared import mark_tag_editor_dialog
+from qfluentwidgets import FluentIcon
 
 
 class BackupManagerDialog(QDialog):
@@ -22,15 +25,20 @@ class BackupManagerDialog(QDialog):
 
     def __init__(self, root: Path, *, restore_callback, undo_callback, parent=None) -> None:
         super().__init__(parent)
+        mark_tag_editor_dialog(self)
         self._manager = BackupManager(root)
         self._restore_callback = restore_callback
         self._undo_callback = undo_callback
         self.setWindowTitle(t("meta_backup_manager"))
         self.setMinimumSize(900, 440)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 13, 16, 10)
+        layout.setSpacing(10)
+        add_header(layout, t("meta_backup_manager"), t("meta_backup_manager_note"),
+                   icon=FluentIcon.FOLDER.icon())
         self._note = QLabel(t("meta_backup_manager_note"), self)
         self._note.setWordWrap(True)
-        layout.addWidget(self._note)
+        self._note.setVisible(False)
         self._table = QTableWidget(0, 10, self)
         self._table.setHorizontalHeaderLabels([
             t("meta_backup_created"), t("meta_backup_operation"), t("meta_backup_files"),

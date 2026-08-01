@@ -336,6 +336,113 @@ def _replace_text(context: TagActionContext, parameters: Mapping[str, object]) -
     return _field_delta(context, {field_name: changed})
 
 
+# Legacy ID3v1/ID3v2 frames written by older Windows software store bytes in a
+# local code page but declare Latin-1, so a correct reader decodes them into
+# mojibake.  Re-encoding as Latin-1 and decoding with the real code page undoes
+# exactly that.  Hebrew is cp1255; the others are here because the same tool
+# chain produced the same fault in other locales.
+MOJIBAKE_CODEPAGES: tuple[str, ...] = ("cp1255", "cp1251", "cp1256", "cp1253", "utf-8")
+
+
+def repair_mojibake(value: str, codepage: str) -> str | None:
+    """Undo one Latin-1 mis-decode, or return None when there is nothing to fix.
+
+    Returns None rather than the input whenever the round trip is impossible or
+    produces nothing better, so a caller can distinguish "already correct" from
+    "repaired".  This is intentionally conservative: silently rewriting a tag
+    that was fine is worse than leaving a broken one alone.
+    """
+    if not value:
+        return None
+    try:
+        raw = value.encode("latin-1")
+    except UnicodeEncodeError:
+        # Characters outside Latin-1 mean the text was never mis-decoded this
+        # way -- it is genuine Unicode and must be left alone.
+        return None
+    try:
+        repaired = raw.decode(codepage)
+    except (UnicodeDecodeError, LookupError):
+        return None
+    if repaired == value or not repaired.strip():
+        return None
+    # A repair that still leaves replacement characters has not recovered the
+    # text; treat it as a failure rather than trading one kind of damage for
+    # another.
+    if "�" in repaired:
+        return None
+    return repaired
+
+
+def _repair_encoding(context: TagActionContext, parameters: Mapping[str, object]) -> ActionDelta:
+    """Recover text stored under a legacy code page but read as Latin-1."""
+    codepage = str(parameters["codepage"])
+    fields = TEXT_FIELDS if parameters["all_fields"] else (str(parameters["field"]),)
+    proposed: dict[str, object] = {}
+    for name in fields:
+        value = context.values.get(name)
+        if isinstance(value, str):
+            repaired = repair_mojibake(value, codepage)
+            if repaired is not None:
+                proposed[name] = repaired
+    if not proposed:
+        return ActionDelta(context.item_id, diagnostic="nothing_to_repair",
+                           status=ActionResultStatus.NO_OP)
+    return _field_delta(context, proposed)
+
+
+def _replace_regex(context: TagActionContext, parameters: Mapping[str, object]) -> ActionDelta:
+    """Regular-expression replace over one field.
+
+    A half-typed pattern is normal while the preview refreshes on every
+    keystroke, so a malformed pattern -- or a replacement referring to a group
+    that does not exist -- is reported as a warning on that item instead of
+    raising and taking the dialog down.
+
+    Not handled: a pathological pattern such as ``(a+)+b`` can still backtrack
+    for a long time, and the preview runs on the UI thread.  Bounding that
+    needs a regex engine with a timeout, which this does not have.
+    """
+    field_name = str(parameters["field"])
+    pattern, replacement = str(parameters["pattern"]), str(parameters["replace"])
+    value = context.values.get(field_name)
+    if not isinstance(value, str) or not pattern:
+        return ActionDelta(context.item_id, status=ActionResultStatus.NO_OP)
+    flags = 0 if parameters["case_sensitive"] else re.IGNORECASE
+    try:
+        changed = re.sub(pattern, replacement, value, flags=flags)
+    except re.error:
+        return ActionDelta(context.item_id, diagnostic="invalid_pattern",
+                           status=ActionResultStatus.WARNING)
+    return _field_delta(context, {field_name: changed})
+
+
+def _split_field(context: TagActionContext, parameters: Mapping[str, object]) -> ActionDelta:
+    """Split one field on a separator and put each half in its own field.
+
+    Only the first occurrence splits, so ``Artist - Song - Live`` keeps the
+    tail with the second half instead of silently losing it.  An absent
+    separator is a no-op, never a destructive "write the whole thing to both".
+    """
+    source, target = str(parameters["field"]), str(parameters["target_field"])
+    separator = str(parameters["separator"])
+    value = context.values.get(source)
+    if not isinstance(value, str) or not separator or separator not in value:
+        return ActionDelta(context.item_id, status=ActionResultStatus.NO_OP)
+    head, _, tail = value.partition(separator)
+    head, tail = head.strip(), tail.strip()
+    if not head or not tail:
+        return ActionDelta(context.item_id, diagnostic="empty_half",
+                           status=ActionResultStatus.WARNING)
+    # target_first swaps which half stays put: "Artist - Title" in the title
+    # field wants the artist moved out, "Title - Artist" wants the opposite.
+    if parameters["target_first"]:
+        head, tail = tail, head
+    if source == target:
+        return _field_delta(context, {source: head})
+    return _field_delta(context, {source: head, target: tail})
+
+
 def _change_case(context: TagActionContext, parameters: Mapping[str, object]) -> ActionDelta:
     field_name, mode = str(parameters["field"]), str(parameters["mode"])
     value = context.values.get(field_name)
@@ -408,6 +515,22 @@ def builtin_registry() -> TagActionRegistry:
                 set(TEXT_FIELDS), set(TEXT_FIELDS), _replace_text,
                 parameters=(field_param, ActionParameter("find", "string", required=True),
                             ActionParameter("replace", "string", ""), bool_param("case_sensitive", False))),
+        _action("tag.repair_encoding.v1", "meta_action_repair_encoding",
+                "meta_action_repair_encoding_desc", "cleanup",
+                set(TEXT_FIELDS), set(TEXT_FIELDS), _repair_encoding,
+                parameters=(field_param, bool_param("all_fields", True),
+                            ActionParameter("codepage", "choice", "cp1255",
+                                            choices=MOJIBAKE_CODEPAGES))),
+        _action("tag.replace_regex.v1", "meta_action_replace_regex", "meta_action_replace_regex_desc", "cleanup",
+                set(TEXT_FIELDS), set(TEXT_FIELDS), _replace_regex,
+                parameters=(field_param, ActionParameter("pattern", "string", required=True),
+                            ActionParameter("replace", "string", ""), bool_param("case_sensitive", False))),
+        _action("tag.split_field.v1", "meta_action_split_field", "meta_action_split_field_desc", "cleanup",
+                set(TEXT_FIELDS), set(TEXT_FIELDS), _split_field,
+                parameters=(field_param,
+                            ActionParameter("separator", "string", " - ", required=True),
+                            ActionParameter("target_field", "choice", "artist", choices=TEXT_FIELDS),
+                            bool_param("target_first", False))),
         _action("tag.change_case.v1", "meta_action_case", "meta_action_case_desc", "cleanup",
                 set(TEXT_FIELDS), set(TEXT_FIELDS), _change_case,
                 parameters=(field_param, ActionParameter("mode", "choice", "title",
@@ -446,4 +569,5 @@ LEGACY_ACTION_IDS = {
     "clear_album_artist": "tag.clear_album_artist.v1",
     "clean_filename": "file.clean.v1",
     "strip_filename_numbering": "file.strip_numbering.v1",
+    "rename_from_title": "file.from_title.v1",
 }

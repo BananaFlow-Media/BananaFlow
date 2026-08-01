@@ -67,6 +67,18 @@ class EmptyStateIcon(QWidget):
             self._paint_upload(painter)
         elif self._kind == "sync":
             self._paint_sync(painter)
+        elif self._kind == "warning":
+            self._paint_warning(painter)
+
+    def _paint_warning(self, painter: QPainter) -> None:
+        """Triangle with a bang — a failure, not another kind of emptiness."""
+        w, h = self.width(), self.height()
+        top = QPointF(w / 2, h * 0.28)
+        left = QPointF(w * 0.24, h * 0.72)
+        right = QPointF(w * 0.76, h * 0.72)
+        painter.drawPolygon([top, right, left])
+        painter.drawLine(QPointF(w / 2, h * 0.44), QPointF(w / 2, h * 0.57))
+        painter.drawPoint(QPointF(w / 2, h * 0.645))
 
     def _paint_bars(self, painter: QPainter, accent: QColor) -> None:
         painter.setPen(Qt.PenStyle.NoPen)

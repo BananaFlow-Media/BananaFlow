@@ -621,6 +621,7 @@ class AppWindow(FluentWindow):
 
         # Panel → Controller
         p.scan_requested.connect(lambda folder, rec: c.scan(folder, rec))
+        p.scan_cancel_requested.connect(c.cancel_scan)
         p.unsaved_choice_requested.connect(c.resolve_unsaved_changes)
         p.review_opened.connect(c.acknowledge_draft_review)
         p.auto_requested.connect(c.apply_auto_rules)

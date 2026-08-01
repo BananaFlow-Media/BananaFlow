@@ -171,6 +171,18 @@ def _apply_dialog_theme(dialog: QDialog) -> None:
     qss = _theme_qss_for_dialog(dialog)
     if not qss:
         return
+    is_tag_editor = bool(dialog.property("tagEditorDialog"))
+    parent = dialog.parentWidget()
+    while parent is not None and not is_tag_editor:
+        is_tag_editor = parent.objectName() == "metadataEditorPage"
+        parent = parent.parentWidget()
+    if is_tag_editor:
+        dialog.setProperty("tagEditorDialog", True)
+        try:
+            from ui.panels.metadata_editor.shared import tag_dialog_qss
+            qss += tag_dialog_qss()
+        except ImportError:
+            pass
     dialog.setStyleSheet(qss)
     _apply_dialog_palette(dialog, qss)
 
@@ -335,7 +347,10 @@ def prepare_dialog(
     dialog.setLayoutDirection(
         Qt.LayoutDirection.RightToLeft if _is_app_rtl() else Qt.LayoutDirection.LeftToRight
     )
-    QTimer.singleShot(0, lambda: center_on_parent(dialog))
+    # Bind the deferred callback to the dialog's QObject lifetime.  Without a
+    # context, a dialog deleted before the next event turn leaves this lambda
+    # alive and it dereferences an invalid PySide wrapper during teardown.
+    QTimer.singleShot(0, dialog, lambda: center_on_parent(dialog))
 
 
 class StyledDialog(QDialog):
@@ -354,7 +369,7 @@ class StyledDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802 - Qt override
         _apply_dialog_theme(self)
         super().showEvent(event)
-        QTimer.singleShot(0, lambda: center_on_parent(self))
+        QTimer.singleShot(0, self, lambda: center_on_parent(self))
 
 
 def make_root_layout(dialog: QDialog, *, margins=(20, 18, 20, 16), spacing: int = 14) -> QVBoxLayout:

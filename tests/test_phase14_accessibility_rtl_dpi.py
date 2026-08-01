@@ -75,7 +75,7 @@ def test_every_icon_only_button_has_an_accessible_name(panel):
 def test_named_tag_editor_controls_expose_accessible_names(panel):
     for attribute in (
         "_apply_btn", "_revert_btn", "_review_btn", "_undo_btn", "_redo_btn",
-        "_dupes_btn", "_manual_refresh_btn", "_monitoring_status",
+        "_dupes_btn", "_manual_refresh_btn",
         "_excluded_chip", "_stale_chip", "_search_edit", "_zoom_minus_btn",
         "_zoom_plus_btn", "_zoom_val_lbl", "_tree", "_table", "_scan_progress",
         "_insp_external_review_btn", "_tree_toggle_btn", "_auto_cfg_btn",

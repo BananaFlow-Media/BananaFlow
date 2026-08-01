@@ -1,10 +1,27 @@
 """
 ui/workers/duplicate_detector_worker.py  –  Background duplicate audio file detector
 ======================================================================================
-Scans a folder for duplicate audio files using two strategies:
+Scans a folder for duplicate audio files in two passes, at any library size:
 
-  > 10 000 files → group by file size only         (fast, near-instant)
-  ≤ 10 000 files → group by AUDIO-ONLY MD5 hash    (accurate, tag-change-safe)
+  pass 1 → group by AUDIO PAYLOAD LENGTH   (header parsing only, no audio read)
+  pass 2 → group by AUDIO-ONLY MD5 hash    (only files that shared a length)
+
+Why the length pass is exact, not a heuristic
+---------------------------------------------
+Identical audio bytes have an identical byte length, so every group the hash
+pass would form has all its members in one length bucket already.  Pass 1 can
+therefore never split a real duplicate group -- it only removes files that no
+hash could have matched anyway.  The result is byte-for-byte the same as
+hashing everything, for a fraction of the reads.
+
+Note that the bucket key is the length of the *payload*, not of the file.
+Grouping on file size would defeat the whole design below: two copies of one
+song that differ only in their embedded cover art have different file sizes
+and would never be compared.
+
+A shared length between two different songs (same frame count on a CBR encode)
+costs one wasted hash and can never produce a false group, because pass 2 still
+has to agree.
 
 Audio-only hashing
 ------------------
@@ -52,6 +69,21 @@ _AUDIO_EXTS = frozenset({
     ".wav", ".aac", ".opus", ".wma", ".mp4",
 })
 
+# One strategy now, kept as a label because the result and its dialog still
+# report how a group was matched.
+_STRATEGY = "md5"
+
+# Each progress signal costs the Tag Editor a full relayout -- tens of
+# milliseconds -- so emitting one per file made the UI, not the hashing, the
+# cost of a scan. Nobody can read faster than this anyway.
+_PROGRESS_INTERVAL = 0.2
+
+# The Tag Editor's table paints its rows through Python delegates, so while it
+# is on screen the GIL is heavily contended. Reading in 8 KB chunks asked for
+# the GIL thousands of times per file and the hashing thread was starved to a
+# crawl; 1 MB asks a hundred times less often for the same work.
+_READ_CHUNK = 1024 * 1024
+
 
 class DuplicateDetectorWorker(QThread):
     """
@@ -73,9 +105,18 @@ class DuplicateDetectorWorker(QThread):
         self._request_id = request_id
         self._generation = generation
         self._warnings: list[tuple[str, str, str]] = []
+        self._last_progress = 0.0
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def _emit_progress(self, done: int, total: int, t0: float, *, final: bool = False) -> None:
+        """Report progress at a rate a person can read, not once per file."""
+        now = time.perf_counter()
+        if not final and now - self._last_progress < _PROGRESS_INTERVAL:
+            return
+        self._last_progress = now
+        self.progress.emit(done, total, self._eta(done, total, t0))
 
     def run(self) -> None:
         t0 = time.perf_counter()
@@ -88,58 +129,74 @@ class DuplicateDetectorWorker(QThread):
 
             total = len(all_files)
             if total == 0:
-                self.finished.emit(DuplicateScanResult(generation=self._generation, request_id=self._request_id), time.perf_counter() - t0, "md5")
+                self.finished.emit(DuplicateScanResult(generation=self._generation, request_id=self._request_id), time.perf_counter() - t0, _STRATEGY)
                 return
 
-            if total > 10_000:
-                groups   = self._find_by_size(all_files, total, t0)
-                strategy = "size"
-            else:
-                groups   = self._find_by_md5(all_files, total, t0)
-                strategy = "md5"
+            candidates = self._same_length_candidates(all_files, total, t0)
+            groups = self._find_by_md5(candidates, len(candidates), time.perf_counter())
 
             if self._cancel.is_set():
                 self.finished.emit(DuplicateScanResult(generation=self._generation, request_id=self._request_id, cancelled=True, warnings=tuple(self._warnings)),
-                                   time.perf_counter() - t0, strategy)
+                                   time.perf_counter() - t0, _STRATEGY)
                 return
-            self.finished.emit(self._structured(groups, strategy), time.perf_counter() - t0, strategy)
+            self.finished.emit(self._structured(groups), time.perf_counter() - t0, _STRATEGY)
 
         except Exception as exc:
             self.error.emit(str(exc))
 
-    def _structured(self, groups: dict, strategy: str) -> DuplicateScanResult:
+    def _structured(self, groups: dict) -> DuplicateScanResult:
+        """Every group now comes from a hash, so every group is high confidence."""
         structured = []
-        for key, paths in groups.items():
-            paths = tuple(sorted((Path(path) for path, _hash in paths), key=lambda path: str(path).casefold())) if strategy == "md5" else tuple(sorted((Path(path) for path in paths), key=lambda path: str(path).casefold()))
-            if strategy == "size":
-                evidence, confidence, size = DuplicateEvidence.SIZE_ONLY, DuplicateConfidence.POSSIBLE, int(key)
-            else:
-                members = groups[key]
-                evidence = (DuplicateEvidence.AUDIO_PAYLOAD if all(value.evidence is DuplicateEvidence.AUDIO_PAYLOAD for _path, value in members)
-                            else DuplicateEvidence.WHOLE_FILE)
-                confidence, size = DuplicateConfidence.HIGH, None
-            group_id = hashlib.sha256((f"{strategy}|{key}|" + "|".join(map(str, paths))).encode("utf-8")).hexdigest()[:24]
-            structured.append(DuplicateGroup(group_id, tuple(map(str, paths)), evidence, confidence, strategy, size))
+        for key, members in groups.items():
+            paths = tuple(sorted((Path(path) for path, _hash in members),
+                                 key=lambda path: str(path).casefold()))
+            # A group is only an audio-payload match if every member's container
+            # actually parsed; one fallback to whole-file hashing downgrades the
+            # claim for the whole group.
+            evidence = (DuplicateEvidence.AUDIO_PAYLOAD
+                        if all(value.evidence is DuplicateEvidence.AUDIO_PAYLOAD for _path, value in members)
+                        else DuplicateEvidence.WHOLE_FILE)
+            group_id = hashlib.sha256((f"{_STRATEGY}|{key}|" + "|".join(map(str, paths))).encode("utf-8")).hexdigest()[:24]
+            structured.append(DuplicateGroup(group_id, tuple(map(str, paths)), evidence,
+                                             DuplicateConfidence.HIGH, _STRATEGY, None))
         return DuplicateScanResult(tuple(structured), generation=self._generation, request_id=self._request_id,
                                    partial=bool(self._warnings), warnings=tuple(self._warnings))
 
     # ── Grouping strategies ────────────────────────────────────────────────────
 
-    def _find_by_size(self, files: list[Path], total: int, t0: float) -> dict:
+    def _same_length_candidates(self, files: list[Path], total: int, t0: float) -> list[Path]:
+        """Pass 1: keep only files whose audio payload length is not unique.
+
+        Reads container headers, never audio.  A file whose header cannot be
+        read is kept rather than dropped: letting it fall out here would lose
+        a real duplicate silently, which is the one way this pass could ever
+        cost accuracy.
+        """
         from collections import defaultdict
-        size_map: dict[int, list[Path]] = defaultdict(list)
+        by_length: dict[int, list[Path]] = defaultdict(list)
+        unreadable: list[Path] = []
 
         for i, f in enumerate(files):
             if self._cancel.is_set():
-                return {}
+                return []
             try:
-                size_map[f.stat().st_size].append(f)
+                by_length[self._payload_length(f)].append(f)
             except OSError:
-                self._warnings.append((str(f), "stat", "duplicate_stat_failed"))
-            if i % 200 == 0 or i == total - 1:
-                self.progress.emit(i + 1, total, self._eta(i + 1, total, t0))
+                self._warnings.append((str(f), "prefilter", "duplicate_read_failed"))
+                unreadable.append(f)
+            self._emit_progress(i + 1, total, t0, final=(i == total - 1))
 
-        return {k: v for k, v in size_map.items() if len(v) > 1}
+        return [path for group in by_length.values() if len(group) > 1
+                for path in group] + unreadable
+
+    def _payload_length(self, path: Path) -> int:
+        """Byte length of the audio stream, from headers alone."""
+        with open(path, "rb") as fp:
+            start, end, _evidence = self._audio_bounds(fp, path.suffix.lower())
+            if end is None:
+                fp.seek(0, 2)
+                end = fp.tell()
+        return end - start
 
     def _find_by_md5(self, files: list[Path], total: int, t0: float) -> dict:
         from collections import defaultdict
@@ -154,7 +211,7 @@ class DuplicateDetectorWorker(QThread):
                     hash_map[result.digest].append((f, result))
             except OSError:
                 self._warnings.append((str(f), "hash", "duplicate_read_failed"))
-            self.progress.emit(i + 1, total, self._eta(i + 1, total, t0))
+            self._emit_progress(i + 1, total, t0, final=(i == total - 1))
 
         return {k: v for k, v in hash_map.items() if len(v) > 1}
 
@@ -166,32 +223,10 @@ class DuplicateDetectorWorker(QThread):
         cover art so that files differing only in their album art are detected
         as duplicates.
         """
-        suffix = path.suffix.lower()
-        h      = hashlib.md5()
+        h = hashlib.md5()
 
         with open(path, "rb") as fp:
-            evidence = DuplicateEvidence.WHOLE_FILE
-            if suffix == ".mp3":
-                start = self._mp3_audio_start(fp)
-                end   = self._mp3_audio_end(fp)
-                evidence = DuplicateEvidence.AUDIO_PAYLOAD
-            elif suffix == ".flac":
-                start = self._flac_audio_start(fp)
-                end   = None
-                # A malformed FLAC cannot prove where metadata ends.  Hashing
-                # the complete bytes is safe, but must not be described as an
-                # audio-payload comparison.
-                if start is None:
-                    start = 0
-                else:
-                    evidence = DuplicateEvidence.AUDIO_PAYLOAD
-            elif suffix in (".m4a", ".mp4"):
-                bounds = self._m4a_mdat_bounds(fp)
-                start, end = bounds if bounds else (0, None)
-                evidence = DuplicateEvidence.AUDIO_PAYLOAD if bounds else DuplicateEvidence.WHOLE_FILE
-            else:
-                # Fallback: hash entire file
-                start, end = 0, None
+            start, end, evidence = self._audio_bounds(fp, path.suffix.lower())
 
             fp.seek(start)
             remaining = (end - start) if end is not None else None
@@ -199,7 +234,7 @@ class DuplicateDetectorWorker(QThread):
             while True:
                 if self._cancel.is_set():
                     return None
-                to_read = min(8192, remaining) if remaining is not None else 8192
+                to_read = min(_READ_CHUNK, remaining) if remaining is not None else _READ_CHUNK
                 chunk   = fp.read(to_read)
                 if not chunk:
                     break
@@ -211,6 +246,34 @@ class DuplicateDetectorWorker(QThread):
 
         from core.metadata_validation import DuplicateHash
         return DuplicateHash(h.hexdigest(), evidence)
+
+    @staticmethod
+    def _audio_bounds(fp, suffix: str) -> tuple[int, int | None, DuplicateEvidence]:
+        """Where the audio stream starts and ends, and how sure we are.
+
+        Both passes go through here, so the length a file is bucketed on and
+        the bytes it is hashed over can never describe different ranges.
+        ``end`` of None means "to end of file".
+        """
+        cls = DuplicateDetectorWorker
+        if suffix == ".mp3":
+            return (cls._mp3_audio_start(fp), cls._mp3_audio_end(fp),
+                    DuplicateEvidence.AUDIO_PAYLOAD)
+        if suffix == ".flac":
+            start = cls._flac_audio_start(fp)
+            # A malformed FLAC cannot prove where metadata ends.  Hashing the
+            # complete bytes is safe, but must not be described as an
+            # audio-payload comparison.
+            if start is None:
+                return 0, None, DuplicateEvidence.WHOLE_FILE
+            return start, None, DuplicateEvidence.AUDIO_PAYLOAD
+        if suffix in (".m4a", ".mp4"):
+            bounds = cls._m4a_mdat_bounds(fp)
+            if bounds is None:
+                return 0, None, DuplicateEvidence.WHOLE_FILE
+            return bounds[0], bounds[1], DuplicateEvidence.AUDIO_PAYLOAD
+        # Fallback: the whole file, for containers with no parser here.
+        return 0, None, DuplicateEvidence.WHOLE_FILE
 
     # ── Format-specific offset parsers ─────────────────────────────────────────
 

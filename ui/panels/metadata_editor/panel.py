@@ -15,6 +15,8 @@ in explorer_view.py; dialogs in dialogs.py; shared styling in shared.py.
 
 from __future__ import annotations
 
+from . import prompts
+
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -41,6 +43,7 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
+    QKeySequence,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -54,7 +57,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -70,6 +75,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 from qfluentwidgets import FluentIcon
 
@@ -96,7 +102,6 @@ from core.metadata_models import (
 )
 from ui import a11y
 from ui.components.empty_state_icon import EmptyStateIcon
-from ui.dialogs.styled_dialog import confirm, get_text, show_info, show_warning
 from ui.i18n import t
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_NEW,
@@ -104,16 +109,23 @@ from ui.models.metadata_table_model import (
     COL_TRACK_NEW,
     COL_FILENAME_NEW, COL_GENRE_CUR, COL_GENRE_NEW,
     COL_COMMENT_CUR, COL_COMMENT_NEW,
-    COLUMN_COUNT, MetadataTableModel, _HEADER_KEYS,
+    COL_STATUS, COL_GUTTER, COL_END_GUTTER, COLUMN_COUNT, MetadataTableModel, _HEADER_KEYS,
 )
 from ui.models.metadata_filter_proxy_model import MetadataFilterProxyModel
 from ui.controllers.tag_editor_workspace_state import TagEditorWorkspaceState
 from ui.controllers.tag_editor_navigation_state import TagEditorNavigationState
 from ui.services.file_operation_service import FileOperationError, FileOperationService
 from ui.theme_manager import get_colors
+from ui.dialogs.styled_dialog import add_header
 from ui.workers.artwork_thumbnail_worker import ArtworkThumbnailCache, ArtworkThumbnailWorker
 
-from .dialogs import AutoArrangeSettingsDialog, CleanSettingsDialog, MoreColumnsDialog
+from .dialogs import (
+    ApplyConfirmationDialog,
+    ApplyResultDialog,
+    AutoArrangeSettingsDialog,
+    CleanSettingsDialog,
+    MoreColumnsDialog,
+)
 from .action_dialog import TagActionDialog
 from .action_diagnostics import format_action_diagnostic
 from .online_metadata_dialog import OnlineMetadataDialog
@@ -123,6 +135,7 @@ from .explorer_view import (
     ExplorerTableStyle,
     FilenameDelegate,
     MetadataHeaderView,
+    SelectionCheckDelegate,
 )
 from .shared import (
     DEFAULT_AUTO_OPS,
@@ -134,11 +147,34 @@ from .shared import (
     bold_font,
     btn_style,
     dim_hex,
+    mark_tag_editor_dialog,
     op_row_qss,
     primary_btn_style,
+    rail_btn_style,
+    rail_icon,
+    tag_editor_colors,
 )
 from .tree import ExplorerTreeWidget
-from .widgets import OpRow
+# ArtworkDropPreview is re-exported: it used to be defined here, and external
+# importers (including tests) still reach for it on this module.
+from .widgets import (
+    ArtworkDropPreview,
+    ElidedLabel,
+    ElidedPushButton,
+    ElidedToolButton,
+    OpRow,
+    ResponsiveButtonFlow,
+    VerticalLabel,
+)
+
+# Panel behaviour split across mixins purely to keep each file readable. They
+# are not independent components: every method still runs on the panel and
+# reaches the panel's attributes directly, exactly as before the split.
+from .file_actions import FileActionsMixin
+from .inspector_build import InspectorBuildMixin
+from .pane_layout import PaneLayoutMixin
+from .table_layout import TableLayoutMixin
+from .tree_ops import TreeOpsMixin
 
 logger = logging.getLogger(__name__)
 
@@ -165,30 +201,14 @@ _FILE_OPERATION_ERROR_KEYS = {
 }
 
 
-class ArtworkDropPreview(QLabel):
-    """Dedicated, narrow image drop target; never intercepts table drops."""
-    def __init__(self, callback, parent=None) -> None:
-        super().__init__(parent)
-        self._callback = callback
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if len(urls) == 1 and urls[0].isLocalFile() and Path(urls[0].toLocalFile()).suffix.lower() in {".jpg", ".jpeg", ".png"}:
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if len(urls) == 1 and urls[0].isLocalFile():
-            self._callback(Path(urls[0].toLocalFile()))
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-
-class MetadataEditorPanel(QWidget):
+class MetadataEditorPanel(
+    PaneLayoutMixin,
+    InspectorBuildMixin,
+    FileActionsMixin,
+    TableLayoutMixin,
+    TreeOpsMixin,
+    QWidget,
+):
     """
     Full Tag Editor tab widget.
 
@@ -272,16 +292,17 @@ class MetadataEditorPanel(QWidget):
     online_accept_requested = Signal(object)
     delete_files_requested      = Signal(list)           # list[Path] (Delete key)
     manual_refresh_requested    = Signal()
+    scan_cancel_requested       = Signal()
     conflict_resolution_requested = Signal(object, str, object)
 
-    _TREE_RAIL_WIDTH = 38
-    _INSPECTOR_RAIL_WIDTH = 40
-    _TREE_OPEN_MIN = 210
+    _TREE_RAIL_WIDTH = 42
+    _INSPECTOR_RAIL_WIDTH = 58
+    _TREE_OPEN_MIN = 160
     _TABLE_OPEN_MIN = 340
-    _INSPECTOR_OPEN_MIN = 240
+    _INSPECTOR_OPEN_MIN = 270
     _COLLAPSE_DRAG_MARGIN = 46
 
-    _DEFAULT_SPLITTER_SIZES = [240, 720, 280]
+    _DEFAULT_SPLITTER_SIZES = [220, 688, 370]
 
     def __init__(self, config: Optional[AppConfig] = None, parent=None) -> None:
         super().__init__(parent)
@@ -339,12 +360,24 @@ class MetadataEditorPanel(QWidget):
         self._right_collapsed = False
         self._last_tree_width = self._DEFAULT_SPLITTER_SIZES[0]
         self._last_inspector_width = self._DEFAULT_SPLITTER_SIZES[2]
+        self._responsive_mode = "wide"
+        self._responsive_forced_tree_collapse = False
         self._active_inspector_tool = 0
+        self._inspector_subtabs_mode: Optional[str] = None
+        self._inspector_rail_buttons: dict[str, QPushButton] = {}
+        # Tint the rail glyphs were last rasterised at; see _refresh_tool_button_states.
+        self._rail_icon_tint: Optional[str] = None
+        self._inspector_mode_buttons: dict[str, QPushButton] = {}
+        self._inspector_pane_modes: list[str] = []
         self._apply_refresh_counter = 0
         self._is_scanning = False
         self._is_applying = False
         self._is_restoring = False
-        self._op_rows: list[OpRow] = []
+        self._op_rows: list[QWidget] = []
+        # Rows on the Actions page. They open the action engine rather than
+        # running against the table selection, so they follow the engine's
+        # availability, not the selection's.
+        self._action_catalog_rows: list[QWidget] = []
         self._checked_scope_buttons: list[QPushButton] = []
         self._selection_scope_buttons: list[QPushButton] = []
         self._insp_field_dirty: set[str] = set()
@@ -352,6 +385,11 @@ class MetadataEditorPanel(QWidget):
         self._insp_draft_values: dict[str, str] = {}
         self._insp_populating = False
         self._replaygain_analysis_running = False
+        # Result of the last duplicate scan, so the Duplicates page can report
+        # it and reopen the manager without rescanning.
+        self._last_duplicate_scan: tuple | None = None
+        # Tag values copied from one file, pending a paste onto others.
+        self._tag_clipboard: dict[str, object] = {}
 
         self._build()
         self._workspace.changed.connect(self._on_workspace_state_changed)
@@ -403,7 +441,7 @@ class MetadataEditorPanel(QWidget):
         if result is None:
             return None
         if result.failed:
-            show_warning(self, t("meta_error_title"),
+            prompts.show_warning(self, t("meta_error_title"),
                          "\n".join(self._file_operation_message(outcome)
                                    for outcome in result.failed))
         return result
@@ -439,6 +477,7 @@ class MetadataEditorPanel(QWidget):
 
     def _build(self) -> None:
         root_layout = QVBoxLayout(self)
+        root_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
@@ -452,6 +491,14 @@ class MetadataEditorPanel(QWidget):
 
         root_layout.addWidget(self._build_body(), stretch=1)
 
+        self._footer_sep = QFrame()
+        self._footer_sep.setFrameShape(QFrame.Shape.HLine)
+        self._footer_sep.setFixedHeight(1)
+        self._footer_sep.setStyleSheet(f"background: {get_colors().border}; border: none;")
+        root_layout.addWidget(self._footer_sep)
+        root_layout.addWidget(self._build_footer())
+        self._refresh_footer()
+
         from ui.theme_manager import ThemeManager as _TM
         _tm = _TM.instance()
         if _tm is not None:
@@ -460,20 +507,14 @@ class MetadataEditorPanel(QWidget):
 
     def _apply_theme(self) -> None:
         """Re-apply theme-dependent styles for the toolbar, tree, table, buttons."""
-        c = get_colors()
+        c = tag_editor_colors()
         accent = c.accent
         accent_dim = dim_hex(accent)
         self.setStyleSheet(
-            "QWidget#metadataEditorPage { border: none; border-radius: 0px; }"
-            "QWidget#metadataEditorPage QFrame,"
-            "QWidget#metadataEditorPage QGroupBox,"
-            "QWidget#metadataEditorPage QLineEdit,"
-            "QWidget#metadataEditorPage QTableView,"
-            "QWidget#metadataEditorPage QTreeWidget,"
-            "QWidget#metadataEditorPage QScrollArea { border-radius: 0px; }"
-            "QWidget#metadataEditorPage QPushButton { border-radius: 8px; }"
-            "QWidget#metadataEditorPage QTreeWidget::item { border-radius: 0px; }"
-            "QWidget#metadataEditorPage QCheckBox::indicator { border-radius: 0px; }"
+            f"QWidget#metadataEditorPage {{ background: {c.bg}; color: {c.text_primary};"
+            " border: none; border-radius: 0px; font-family: 'Segoe UI'; font-size: 13px; }"
+            f"QWidget#metadataEditorPage QToolTip {{ background: {c.surface}; color: {c.text_primary};"
+            f" border: 1px solid {c.border}; border-radius: 8px; padding: 5px 8px; }}"
         )
 
         # Toolbar
@@ -486,32 +527,19 @@ class MetadataEditorPanel(QWidget):
         if hasattr(self, "_summary_lbl"):
             self._summary_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 11px;")
 
+        # The Auto-Order control used to be one gradient-filled frame tinted
+        # with nine derived accent shades.  It is now a plain container holding
+        # two ordinary buttons, so only the soft tint and the primary text
+        # colour are still needed; the other shades were computed on every
+        # theme change and used by nothing.
         accent_color = QColor(accent)
         if accent_color.isValid():
             r, g, b, _ = accent_color.getRgb()
-            accent_hover = accent_color.darker(110).name()
             accent_soft = f"rgba({r}, {g}, {b}, 0.16)"
-            accent_magic_2 = f"rgba({r}, {g}, {b}, 0.28)"
-            accent_glow_1 = f"rgba({r}, {g}, {b}, 0.12)"
-            accent_glow_2 = f"rgba({r}, {g}, {b}, 0.18)"
-            accent_glow_3 = f"rgba({r}, {g}, {b}, 0.42)"
-            accent_glow_hover_1 = f"rgba({r}, {g}, {b}, 0.16)"
-            accent_glow_hover_2 = f"rgba({r}, {g}, {b}, 0.28)"
-            accent_glow_hover_3 = f"rgba({r}, {g}, {b}, 0.58)"
-            accent_border = f"rgba({r}, {g}, {b}, 0.58)"
             primary_text = "#ffffff" if accent_color.lightness() < 170 else "#111827"
         else:
             r, g, b = 0, 0, 0
-            accent_hover = accent_dim
             accent_soft = c.surface2
-            accent_magic_2 = c.surface2
-            accent_glow_1 = c.surface
-            accent_glow_2 = c.surface2
-            accent_glow_3 = c.border
-            accent_glow_hover_1 = c.surface2
-            accent_glow_hover_2 = c.border
-            accent_glow_hover_3 = c.border
-            accent_border = c.border
             primary_text = "#ffffff"
 
         toolbar_neutral = self._toolbar_button_style("neutral")
@@ -525,40 +553,33 @@ class MetadataEditorPanel(QWidget):
         auto_text = accent if accent_color.isValid() else c.text_primary
         if hasattr(self, "_auto_container"):
             self._auto_container.setStyleSheet(
-                "QFrame#autoOrderSplitButton {"
-                f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-                f" stop:0 {accent_glow_1}, stop:0.46 {accent_glow_2}, stop:1 {accent_glow_3});"
-                f" border: 1px solid {accent_border}; border-radius: 7px;"
-                "}"
-                "QFrame#autoOrderSplitButton:hover {"
-                f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-                f" stop:0 {accent_glow_hover_1}, stop:0.46 {accent_glow_hover_2}, stop:1 {accent_glow_hover_3});"
-                "}"
-                "QFrame#autoOrderSplitButton:disabled {"
-                f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-                f" stop:0 rgba({r}, {g}, {b}, 0.05), stop:0.46 rgba({r}, {g}, {b}, 0.08), stop:1 rgba({r}, {g}, {b}, 0.14));"
-                f" border: 1px solid rgba({r}, {g}, {b}, 0.24); border-radius: 7px;"
-                "}"
+                "QFrame#autoOrderSplitButton { background: transparent; border: none; }"
             )
-        if hasattr(self, "_auto_separator"):
-            self._auto_separator.setStyleSheet(f"background: {accent_border}; border: none;")
         if hasattr(self, "_auto_btn") and hasattr(self, "_auto_cfg_btn"):
             self._auto_btn.setIcon(self._make_magic_wand_icon(color=auto_text))
             self._auto_cfg_btn.setIcon(FluentIcon.SETTING.icon(color=auto_text))
             self._auto_btn.setStyleSheet(
-                f"QToolButton {{ background: transparent; border: none; color: {auto_text};"
-                " font-size: 12px; font-weight: 700; padding: 3px 6px 4px 6px; }"
-                f"QToolButton:hover {{ background: {accent_soft}; }}"
-                f"QToolButton:pressed {{ background: {accent_magic_2}; }}"
-                f"QToolButton:disabled {{ color: {auto_text}; }}"
+                f"QToolButton {{ background: {c.accent}; color: #ffffff; border: 1px solid {c.accent};"
+                " border-radius: 9px; padding: 0 10px; font-size: 11.5px; font-weight: 800; }"
+                f"QToolButton:hover {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
+                f"QToolButton:disabled {{ background: {c.surface3}; color: {c.text_tertiary}; border-color: {c.border}; }}"
             )
             self._auto_cfg_btn.setStyleSheet(
-                f"QToolButton {{ background: transparent; border: none; color: {auto_text}; padding: 0; }}"
-                f"QToolButton:hover {{ background: {accent_soft}; }}"
-                f"QToolButton:pressed {{ background: {accent_magic_2}; }}"
+                f"QToolButton {{ background: {c.surface}; color: {c.text_primary}; border: 1px solid {c.border};"
+                " border-radius: 9px; padding: 0 10px; font-size: 11px; font-weight: 700; }"
+                f"QToolButton:hover {{ background: {c.surface3}; }}"
+                f"QToolButton:disabled {{ color: {c.text_tertiary}; }}"
             )
+        # The two that lead somewhere carry the accent; the two that only
+        # navigate stay quiet.
+        for name, style in (("_dupes_btn", primary_btn_style()),
+                            ("_dupes_reopen_btn", primary_btn_style()),
+                            ("_dupes_results_btn", btn_style()),
+                            ("_dupes_rescan_btn", btn_style())):
+            if hasattr(self, name):
+                getattr(self, name).setStyleSheet(style)
         if hasattr(self, "_dupes_btn"):
-            self._dupes_btn.setStyleSheet(btn_style())
+            self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color="#ffffff"))
 
         # Splitter handle
         if hasattr(self, "_body_splitter"):
@@ -568,35 +589,45 @@ class MetadataEditorPanel(QWidget):
                 f"QSplitter::handle:pressed {{ background: {accent_dim}; }}"
             )
         if hasattr(self, "_tree_rail"):
-            rail_qss = f"QFrame {{ background: {c.surface}; border-right: 1px solid {c.border}; border-radius: 0px; }}"
+            rail_qss = f"QFrame {{ background: {c.surface2}; border-right: 1px solid {c.border}; border-radius: 0px; }}"
             self._tree_rail.setStyleSheet(rail_qss)
         if hasattr(self, "_tree_frame"):
             self._tree_frame.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface2}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_tree_body"):
             self._tree_body.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface2}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_table_frame"):
             self._table_frame.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface2}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_table_empty_page"):
             empty_qss = f"QWidget {{ background: {c.bg}; color: {c.text_primary}; }}"
             self._table_empty_page.setStyleSheet(empty_qss)
             self._table_loading_page.setStyleSheet(empty_qss)
+            if hasattr(self, "_table_error_page"):
+                self._table_error_page.setStyleSheet(empty_qss)
         if hasattr(self, "_empty_state_card"):
             card_qss = (
-                "QFrame { background: transparent; border: none; border-radius: 0px; }"
+                f"QFrame#metadataStateCard {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 13px; }"
                 "QLabel { background: transparent; border: none; }"
             )
+            title_qss = f"color: {c.text_primary}; font-size: 20px; font-weight: 800;"
+            body_qss = f"color: {c.text_secondary}; font-size: 13px;"
             self._empty_state_card.setStyleSheet(card_qss)
             self._loading_state_card.setStyleSheet(card_qss)
-            self._empty_title_lbl.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; font-weight: bold;")
-            self._loading_title_lbl.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; font-weight: bold;")
-            self._empty_body_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
-            self._loading_detail_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+            self._empty_title_lbl.setStyleSheet(title_qss)
+            self._loading_title_lbl.setStyleSheet(title_qss)
+            self._empty_body_lbl.setStyleSheet(body_qss)
+            self._loading_detail_lbl.setStyleSheet(body_qss)
+            if hasattr(self, "_error_state_card"):
+                self._error_state_card.setStyleSheet(card_qss)
+                self._error_title_lbl.setStyleSheet(title_qss)
+                self._error_body_lbl.setStyleSheet(body_qss)
+        self._apply_shell_theme(c)
         if hasattr(self, "_center_progress"):
             self._center_progress.setStyleSheet(
                 f"QProgressBar {{ background: {c.surface2}; border: none; border-radius: 4px; }}"
@@ -608,30 +639,30 @@ class MetadataEditorPanel(QWidget):
             )
         if hasattr(self, "_inspector_shell"):
             self._inspector_shell.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border-left: 1px solid {c.border}; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface}; border-left: 1px solid {c.border}; border-radius: 0px; }}"
             )
         if hasattr(self, "_inspector_content"):
             self._inspector_content.setStyleSheet(
-                f"QFrame {{ background: {c.bg}; border: none; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface}; border: none; border-radius: 0px; }}"
             )
         if hasattr(self, "_inspector_header"):
             self._inspector_header.setStyleSheet(
-                f"QFrame {{ background: {c.surface}; border-bottom: 1px solid {c.border}; border-radius: 0px; }}"
+                f"QFrame {{ background: {c.surface3}; border-bottom: 1px solid {c.border}; border-radius: 0px; }}"
             )
         self._refresh_tool_button_states()
 
         # Tree widget
         if hasattr(self, "_tree"):
             self._tree.setStyleSheet(
-                f"QTreeWidget {{ border: none; border-radius: 0; background: {c.bg}; color: {c.text_primary}; }}"
-                f"QTreeWidget::viewport {{ background: {c.bg}; }}"
-                f"QTreeWidget::item {{ padding: 4px 3px; border-radius: 0px; }}"
+                f"QTreeWidget {{ border: none; border-radius: 0; background: {c.surface2}; color: {c.text_primary}; }}"
+                f"QTreeWidget::viewport {{ background: {c.surface2}; }}"
+                f"QTreeWidget::item {{ min-height: 28px; padding: 0 7px; border-radius: 7px; }}"
                 f"QTreeWidget::item:selected {{ background: {accent}33; color: {c.text_primary}; }}"
-                f"QTreeWidget::item:hover {{ background: {c.surface2}; }}"
+                f"QTreeWidget::item:hover {{ background: {c.surface3}; }}"
             )
             tree_pal = self._tree.viewport().palette()
-            tree_pal.setColor(QPalette.Base, QColor(c.bg))
-            tree_pal.setColor(QPalette.Window, QColor(c.bg))
+            tree_pal.setColor(QPalette.Base, QColor(c.surface2))
+            tree_pal.setColor(QPalette.Window, QColor(c.surface2))
             self._tree.viewport().setPalette(tree_pal)
             self._tree.viewport().setAutoFillBackground(True)
 
@@ -668,11 +699,11 @@ class MetadataEditorPanel(QWidget):
 
         # Also explicitly paint the table viewport so the empty area follows theme
         if hasattr(self, "_table"):
-            tc = get_colors()
-            self._table.viewport().setStyleSheet(f"background: {tc.bg};")
+            tc = tag_editor_colors()
+            self._table.viewport().setStyleSheet(f"background: {tc.surface};")
             pal = self._table.viewport().palette()
-            pal.setColor(QPalette.Base, QColor(tc.bg))
-            pal.setColor(QPalette.Window, QColor(tc.bg))
+            pal.setColor(QPalette.Base, QColor(tc.surface))
+            pal.setColor(QPalette.Window, QColor(tc.surface))
             self._table.viewport().setPalette(pal)
             self._table.viewport().setAutoFillBackground(True)
             self._table.viewport().update()
@@ -683,24 +714,205 @@ class MetadataEditorPanel(QWidget):
         for btn in getattr(self, "_checked_scope_buttons", []):
             btn.setStyleSheet(primary_qss)
         for btn in getattr(self, "_selection_scope_buttons", []):
-            btn.setStyleSheet(primary_qss if btn.property("accentRole") == "primary" else btn_style())
+            if btn.property("accentRole") == "primary":
+                style = primary_qss
+            elif btn.property("dangerRole"):
+                c = tag_editor_colors()
+                style = (
+                    btn_style()
+                    + f"QPushButton {{ color: {c.danger}; border-color: {c.danger}; }}"
+                    + f"QPushButton:hover {{ background: {c.danger_soft}; border-color: {c.danger}; }}"
+                )
+            else:
+                style = btn_style()
+            btn.setStyleSheet(style)
         if hasattr(self, "_table_info_lbl"):
             self._refresh_checked_scope_state()
             self._refresh_selection_scope_state()
 
+    def _apply_shell_theme(self, c) -> None:
+        """Apply the HTML prototype's component-level tokens."""
+        if hasattr(self, "_path_chip"):
+            self._path_chip.setStyleSheet(
+                f"QLabel {{ background: {c.surface3}; color: {c.text_secondary};"
+                " border: none; border-radius: 9px; padding: 0 10px; font-size: 12px; }")
+        if hasattr(self, "_search_edit"):
+            self._search_edit.setStyleSheet(
+                f"QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 10px; padding: 0 9px; }}"
+                f"QLineEdit:focus {{ border: 1px solid {c.accent}; }}")
+        if hasattr(self, "_more_btn"):
+            self._more_btn.setStyleSheet(self._toolbar_button_style("neutral"))
+        if hasattr(self, "_tree_header"):
+            self._tree_header.setStyleSheet(
+                f"QFrame#tagEditorTreeHeader {{ background: {c.surface2};"
+                f" border-bottom: 1px solid {c.border}; border-radius: 0; }}"
+                f"QToolButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 8px; padding: 0; }"
+                f"QToolButton:hover {{ background: {c.surface3}; }}")
+        if hasattr(self, "_tree_hint"):
+            self._tree_hint.setStyleSheet(
+                f"QLabel#tagEditorTreeHint {{ background: {c.surface3}; color: {c.text_secondary};"
+                " border: none; border-radius: 9px; margin: 8px 5px; font-size: 10.5px; }")
+
+        if hasattr(self, "_footer_bar"):
+            self._footer_bar.setStyleSheet(
+                f"QFrame#tagEditorFooter {{ background: {c.surface}; border: none;"
+                " border-radius: 0px; }")
+            self._footer_sep.setStyleSheet(f"background: {c.border}; border: none;")
+            self._footer_count.setStyleSheet(
+                f"QLabel {{ background: {c.accent_soft}; color: {c.accent}; border-radius: 9px;"
+                " font-weight: 900; font-size: 13px; }")
+            self._footer_title.setStyleSheet(
+                f"color: {c.text_primary}; font-size: 12px; font-weight: 800;")
+            self._footer_desc.setStyleSheet(f"color: {c.text_secondary}; font-size: 10.5px;")
+
+        if hasattr(self, "_table_card"):
+            self._table_card.setStyleSheet(
+                f"QFrame#tagEditorTableCard {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 13px; }")
+        if hasattr(self, "_table_status_bar"):
+            self._table_status_bar.setStyleSheet(
+                f"QFrame#tagEditorTableStatus {{ background: {c.surface3};"
+                f" border-top: 1px solid {c.border}; border-radius: 0px; }}"
+                f"QLabel {{ color: {c.text_secondary}; font-size: 10.5px; font-weight: 600; }}")
+        if hasattr(self, "_nav_host"):
+            nav_qss = (
+                f"QToolButton, QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; }}"
+                f"QToolButton:hover, QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QToolButton#tagEditorExcludedChip {{ padding: 0 8px; border-radius: 7px;"
+                " font-size: 10.5px; font-weight: 800; }"
+                f"QToolButton#tagEditorStaleChip {{ padding: 0 8px; border-radius: 7px;"
+                f" background: {c.warn_soft}; color: {c.warn}; border-color: {c.warn};"
+                " font-size: 10.5px; font-weight: 800; }")
+            self._nav_host.setStyleSheet(nav_qss)
+        if hasattr(self, "_zoom_frame"):
+            self._zoom_frame.setStyleSheet(
+                f"QFrame#tagEditorZoom {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 8px; }"
+                f"QPushButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 6px; padding: 0; }"
+                f"QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QLineEdit {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " padding: 0; font-size: 10.5px; font-weight: 800; }")
+
+        if hasattr(self, "_inspector_header"):
+            self._inspector_header.setStyleSheet(
+                f"QFrame#tagEditorInspectorHeader {{ background: {c.surface3};"
+                f" border-bottom: 1px solid {c.border}; border-radius: 0; }}"
+                f"QToolButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 8px; padding: 0; }"
+                f"QToolButton:hover {{ background: {c.surface}; }}")
+        if getattr(self, "_inspector_mode_buttons", None):
+            mode_qss = (
+                f"QPushButton {{ background: transparent; color: {c.text_secondary}; border: none;"
+                " border-radius: 7px; padding: 0 8px; font-weight: 800; font-size: 11.5px; }"
+                f"QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QPushButton:checked {{ background: {c.accent}; color: #ffffff; }}")
+            for btn in self._inspector_mode_buttons.values():
+                btn.setStyleSheet(mode_qss)
+        if hasattr(self, "_inspector_pages"):
+            self._inspector_pages.setStyleSheet(
+                f"QStackedWidget, QScrollArea {{ background: {c.surface}; border: none; }}"
+                f"QScrollArea > QWidget > QWidget {{ background: {c.surface}; }}"
+                f"QGroupBox {{ background: transparent; color: {c.text_primary}; border: none;"
+                " margin: 0; padding: 0; }"
+                f"QGroupBox::title {{ color: transparent; height: 0; }}"
+                f"QLabel {{ background: transparent; color: {c.text_primary}; }}"
+                f"QLabel#tagEditorInspectorNote {{ background: {c.surface3}; color: {c.text_secondary};"
+                " border-radius: 9px; padding: 8px 10px; font-size: 10.5px; }"
+                f"QLabel#tagEditorDialogNote {{ background: {c.surface3}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; padding: 7px 9px; font-size: 10.5px; }}"
+                f"QLabel#tagEditorSectionTitle {{ color: {c.text_primary}; font-size: 11.5px; font-weight: 800; }}"
+                f"QLabel#tagEditorCoverCurrent {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 10px; padding: 8px; font-size: 10.5px; }}"
+                f"QLabel#tagEditorCoverProposed {{ background: {c.accent_soft}; color: {c.accent_dark};"
+                f" border: 1px dashed {c.accent}; border-radius: 10px; padding: 8px; font-size: 10.5px; }}"
+                f"QTextEdit#tagEditorLyrics {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 10px; padding: 9px; font-size: 11px; }}"
+                f"QWidget#tagEditorFieldRow QLineEdit {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0 9px; font-size: 12px; }}"
+                f"QWidget#tagEditorFieldRow QLabel#tagEditorReadOnlyValue {{ background: {c.surface};"
+                f" color: {c.text_primary}; border: 1px solid {c.border}; border-radius: 8px; padding: 5px 9px; }}"
+                f"QWidget#tagEditorFieldRow QLineEdit:focus {{ border-color: {c.accent}; }}"
+                f"QWidget#tagEditorFieldRow QToolButton {{ background: {c.surface}; color: {c.text_tertiary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; font-size: 9.5px; font-weight: 800; }}"
+                f"QToolButton#tagEditorAdvancedFields {{ background: {c.surface3}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; padding: 0 10px;"
+                " font-size: 10.5px; font-weight: 800; text-align: right; }"
+                f"QToolButton#tagEditorAdvancedFields:hover {{ background: {c.accent_soft}; border-color: {c.accent}; }}"
+                f"QToolButton#tagEditorAdvancedFields:checked {{ background: {c.accent_soft}; color: {c.accent_dark};"
+                f" border-color: {c.accent}; }}"
+                f"QFrame#tagEditorPropertyTable {{ background: {c.surface}; border: 1px solid {c.border};"
+                " border-radius: 10px; }"
+                f"QFrame#tagEditorPropertyRow {{ background: transparent; border-bottom: 1px solid {c.surface3}; }}"
+                f"QLabel#tagEditorPropertyName {{ color: {c.text_secondary}; font-size: 10.5px; font-weight: 800; }}"
+                f"QLabel#tagEditorPropertyValue {{ color: {c.text_primary}; font-size: 10.5px; }}"
+                f"QFrame#tagEditorPendingItem, QFrame#tagEditorProblemItem {{ background: {c.surface};"
+                f" border: 1px solid {c.border}; border-radius: 9px; }}"
+                f"QLabel#tagEditorPendingFile {{ color: {c.text_tertiary}; font-size: 9.5px; }}"
+                f"QLabel#tagEditorPendingChange, QLabel#tagEditorProblemCopy {{ color: {c.text_primary}; font-size: 10.5px; }}"
+                f"QLabel#tagEditorSeverityError {{ background: {c.danger_soft}; color: {c.danger};"
+                " border-radius: 6px; padding: 4px 6px; font-size: 9px; font-weight: 900; }"
+                f"QLabel#tagEditorDupesMeta {{ color: {c.accent_dark}; font-size: 9.5px; font-weight: 800; }}"
+                f"QLabel#tagEditorDupesStatus {{ border-radius: 9px; padding: 8px 10px;"
+                " font-size: 10.5px; font-weight: 700; }"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"running\"] {{ background: {c.surface3};"
+                f" color: {c.text_secondary}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"idle\"] {{ background: {c.surface3};"
+                f" color: {c.text_secondary}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"clean\"] {{ background: {c.accent_soft};"
+                f" color: {c.accent_dark}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"found\"] {{ background: {c.warn_soft};"
+                f" color: {c.warn}; }}"
+                f"QLabel#tagEditorDupesStatus[dupeState=\"error\"] {{ background: {c.danger_soft};"
+                f" color: {c.danger}; }}"
+                f"QPushButton {{ background: {c.surface}; color: {c.text_primary}; border: 1px solid {c.border};"
+                " border-radius: 9px; min-height: 30px; padding: 0 9px; font-size: 10.5px; font-weight: 700; }"
+                f"QPushButton:hover {{ background: {c.surface3}; }}"
+                f"QPushButton[accentRole=\"primary\"] {{ background: {c.accent}; color: #ffffff; border-color: {c.accent}; }}"
+                f"QPushButton[dangerRole=\"true\"] {{ color: {c.danger}; border-color: {c.danger}; }}"
+                f"QToolButton {{ background: {c.surface}; color: {c.text_secondary}; border: 1px solid {c.border};"
+                " border-radius: 8px; }")
+        if getattr(self, "_inspector_tool_buttons", None):
+            chip_qss = (
+                f"QPushButton {{ background: {c.surface}; color: {c.text_secondary};"
+                f" border: 1px solid {c.border}; border-radius: 7px; padding: 0 9px;"
+                " font-size: 10.5px; font-weight: 800; }"
+                f"QPushButton:hover {{ border-color: {c.accent}; }}"
+                f"QPushButton:checked {{ background: {c.accent_soft}; border-color: {c.accent};"
+                f" color: {c.accent_dark}; }}")
+            for btn in self._inspector_tool_buttons:
+                btn.setStyleSheet(chip_qss)
+        if getattr(self, "_insp_clear_buttons", None):
+            clear_qss = (
+                f"QToolButton {{ background: {c.surface}; color: {c.text_tertiary};"
+                f" border: 1px solid {c.border}; border-radius: 8px; padding: 0; font-size: 9.5px; font-weight: 800; }}"
+                f"QToolButton:hover {{ border-color: {c.accent}; color: {c.accent_dark}; }}"
+                f"QToolButton:disabled {{ color: {c.text_tertiary}; background: {c.bg}; }}")
+            for btn in self._insp_clear_buttons.values():
+                btn.setStyleSheet(clear_qss)
+        if hasattr(self, "_insp_advanced_btn"):
+            icon = FluentIcon.REMOVE if self._insp_advanced_btn.isChecked() else FluentIcon.ADD
+            self._insp_advanced_btn.setIcon(icon.icon(color=c.accent))
+
     def _toolbar_button_style(self, role: str) -> str:
-        c = get_colors()
-        accent_dim = dim_hex(c.accent)
+        c = tag_editor_colors()
         accent_color = QColor(c.accent)
         primary_text = "#ffffff" if not accent_color.isValid() or accent_color.lightness() < 170 else "#111827"
 
         if role == "primary":
+            primary_bg = (
+                f"rgba({accent_color.red()}, {accent_color.green()}, {accent_color.blue()}, 1.0)"
+                if accent_color.isValid() else c.accent
+            )
             return (
-                f"QToolButton {{ background: {c.accent}; color: {primary_text};"
-                f"  border: 1px solid {c.accent}; border-radius: 8px;"
-                f"  padding: 5px 8px; font-weight: 800; }}"
-                f"QToolButton:hover {{ background: {accent_dim}; border-color: {accent_dim}; }}"
-                f"QToolButton:pressed {{ background: {accent_dim}; border-color: {accent_dim}; }}"
+                f"QToolButton {{ background: {primary_bg}; color: {primary_text};"
+                f"  border: 1px solid {c.accent}; border-radius: 9px;"
+                f"  padding: 0 12px; font-weight: 800; }}"
+                f"QToolButton:hover {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
+                f"QToolButton:pressed {{ background: {c.accent_dark}; border-color: {c.accent_dark}; }}"
                 f"QToolButton:disabled {{ background: {c.bg}; color: {c.text_tertiary};"
                 f"  border: 1px solid {c.border}; }}"
             )
@@ -715,8 +927,8 @@ class MetadataEditorPanel(QWidget):
                 hover_bg = c.border
             return (
                 f"QToolButton {{ background: {bg}; color: {c.accent};"
-                f"  border: 1px solid transparent; border-radius: 8px;"
-                f"  padding: 5px 8px; font-weight: 700; }}"
+                f"  border: 1px solid transparent; border-radius: 9px;"
+                f"  padding: 0 12px; font-weight: 700; }}"
                 f"QToolButton:hover {{ background: {hover_bg}; border-color: {c.accent}; }}"
                 f"QToolButton:pressed {{ background: {hover_bg}; }}"
                 f"QToolButton:disabled {{ background: {c.bg}; color: {c.text_tertiary};"
@@ -725,15 +937,15 @@ class MetadataEditorPanel(QWidget):
 
         return (
             f"QToolButton {{ background: {c.surface}; color: {c.text_primary};"
-            f"  border: 1px solid {c.border}; border-radius: 8px;"
-            f"  padding: 5px 8px; font-weight: 600; }}"
-            f"QToolButton:hover {{ background: {c.surface2}; border-color: {c.accent}; }}"
+            f"  border: 1px solid {c.border}; border-radius: 9px;"
+            f"  padding: 0 12px; font-weight: 700; }}"
+            f"QToolButton:hover {{ background: {c.surface3}; border-color: {c.border}; }}"
             f"QToolButton:disabled {{ background: {c.surface}; color: {c.text_tertiary};"
             f"  border-color: {c.border}; }}"
         )
 
     def _toolbar_icon_color(self, role: str, *, enabled: bool = True) -> str:
-        c = get_colors()
+        c = tag_editor_colors()
         if not enabled:
             return c.text_tertiary
         if role == "primary":
@@ -745,9 +957,53 @@ class MetadataEditorPanel(QWidget):
 
     def _refresh_toolbar_action_styles(self) -> None:
         if hasattr(self, "_browse_btn"):
-            browse_role = "secondary" if self._root_folder else "primary"
+            browse_role = "primary"
             self._browse_btn.setStyleSheet(self._toolbar_button_style(browse_role))
             self._browse_btn.setIcon(FluentIcon.FOLDER.icon(color=self._toolbar_icon_color(browse_role)))
+
+        if hasattr(self, "_manual_refresh_btn"):
+            refresh_role = "neutral"
+            refresh_enabled = self._manual_refresh_btn.isEnabled()
+            self._manual_refresh_btn.setIcon(FluentIcon.SYNC.icon(
+                color=self._toolbar_icon_color(refresh_role, enabled=refresh_enabled)
+            ))
+        if hasattr(self, "_refresh_control"):
+            c = tag_editor_colors()
+            self._refresh_control.setStyleSheet(
+                f"QFrame#tagEditorRefreshControl {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; }}"
+                "QToolButton { background: transparent; color: inherit; border: none;"
+                " border-radius: 7px; padding: 0; }"
+                f"QToolButton:hover {{ background: {c.surface3}; }}"
+                f"QToolButton:pressed {{ background: {c.surface2}; }}"
+                f"QToolButton:disabled {{ color: {c.text_tertiary}; background: transparent; }}"
+                f"QToolButton#tagEditorRefreshMenuButton:hover {{ background: {c.surface3}; }}"
+            )
+        if hasattr(self, "_refresh_menu_btn"):
+            self._refresh_menu_btn.setIcon(FluentIcon.MORE.icon(
+                color=self._toolbar_icon_color("neutral", enabled=self._refresh_menu_btn.isEnabled())
+            ))
+        if hasattr(self, "_refresh_menu"):
+            c = tag_editor_colors()
+            self._refresh_menu.setStyleSheet(
+                f"QMenu#tagEditorRefreshMenu {{ background: {c.surface}; color: {c.text_primary};"
+                f" border: 1px solid {c.border}; border-radius: 9px; padding: 3px; }}"
+            )
+        if hasattr(self, "_rescan_menu_btn"):
+            c = tag_editor_colors()
+            rescan_enabled = self._rescan_menu_btn.isEnabled()
+            self._rescan_menu_btn.setIcon(self._make_folder_refresh_icon(
+                self._toolbar_icon_color("neutral", enabled=rescan_enabled),
+                size=28,
+            ))
+            self._rescan_menu_btn.setStyleSheet(
+                f"QToolButton#tagEditorRescanAction {{ background: transparent; color: {c.text_primary};"
+                " border: none; border-radius: 7px; padding: 0 6px;"
+                " font-size: 12px; font-weight: 700; text-align: right; }"
+                f"QToolButton#tagEditorRescanAction:hover {{ background: {c.surface3}; }}"
+                f"QToolButton#tagEditorRescanAction:pressed {{ background: {c.surface2}; }}"
+                f"QToolButton#tagEditorRescanAction:disabled {{ color: {c.text_tertiary}; }}"
+            )
 
         if hasattr(self, "_apply_btn"):
             apply_enabled = self._apply_btn.isEnabled()
@@ -796,6 +1052,33 @@ class MetadataEditorPanel(QWidget):
         painter.end()
         return QIcon(pixmap)
 
+    def _make_folder_refresh_icon(self, color: str, size: int = 28) -> QIcon:
+        """Render the combined glyph at high resolution so it stays sharp at any DPI."""
+        scale = 4
+        render_size = size * scale
+        pixmap = QPixmap(render_size, render_size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        folder_size = size
+        refresh_size = round(size * 0.50)
+        folder = FluentIcon.FOLDER.icon(color=color).pixmap(
+            QSize(folder_size * scale, folder_size * scale)
+        )
+        refresh = FluentIcon.SYNC.icon(color=color).pixmap(
+            QSize(refresh_size * scale, refresh_size * scale)
+        )
+        painter.drawPixmap(0, 0, folder)
+        painter.drawPixmap(
+            ((size - refresh_size) // 2) * scale,
+            round(size * 0.35) * scale,
+            refresh,
+        )
+        painter.end()
+        pixmap.setDevicePixelRatio(scale)
+        return QIcon(pixmap)
+
     def _make_magic_wand_icon(self, color: str = "#000000", size: int = 22) -> QIcon:
         from PySide6.QtCore import QPointF
 
@@ -827,13 +1110,10 @@ class MetadataEditorPanel(QWidget):
         btn = QToolButton()
         btn.setText(self._toolbar_text(text_key))
         btn.setIcon(icon.icon())
-        btn.setIconSize(QSize(20, 20))
-        btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        # A minimum rather than a fixed size: the label is translated and must
-        # be free to grow for a long Hebrew string or a 200% scale factor —
-        # Qt's own High-DPI scaling already maps this logical size to the
-        # physical screen, so it is not multiplied by DPI here.
-        btn.setMinimumSize(92, 46)
+        btn.setIconSize(QSize(18, 18))
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setFixedHeight(32)
+        btn.setMinimumWidth(32)
         btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setEnabled(enabled)
@@ -846,115 +1126,161 @@ class MetadataEditorPanel(QWidget):
     def _make_auto_toolbar_action(self) -> QWidget:
         container = QFrame()
         container.setObjectName("autoOrderSplitButton")
-        container.setFixedSize(136, 46)
+        container.setFixedHeight(74)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._auto_container = container
 
-        layout = QHBoxLayout(container)
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(6)
 
-        self._auto_cfg_btn = QToolButton()
+        self._auto_cfg_btn = ElidedToolButton()
+        self._auto_cfg_btn.setText(t("meta_auto_configure_actions"))
         self._auto_cfg_btn.setIcon(FluentIcon.SETTING.icon(color=get_colors().text_primary))
-        self._auto_cfg_btn.setIconSize(QSize(20, 20))
+        self._auto_cfg_btn.setIconSize(QSize(16, 16))
+        self._auto_cfg_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         a11y.describe(self._auto_cfg_btn, t("meta_auto_cfg_tooltip"),
                       tooltip=t("meta_auto_cfg_tooltip"))
-        self._auto_cfg_btn.setFixedSize(36, 46)
+        self._auto_cfg_btn.setFixedHeight(34)
+        self._auto_cfg_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._auto_cfg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_cfg_btn.setEnabled(False)
         self._auto_cfg_btn.clicked.connect(self._on_auto_arrange_settings)
 
-        self._auto_separator = QFrame()
-        self._auto_separator.setFixedSize(2, 30)
-
-        self._auto_btn = QToolButton()
+        self._auto_btn = ElidedToolButton()
         self._auto_btn.setText(self._toolbar_text("meta_auto_btn"))
         self._auto_btn.setIcon(self._make_magic_wand_icon(color=get_colors().text_primary))
-        self._auto_btn.setIconSize(QSize(21, 21))
-        self._auto_btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self._auto_btn.setIconSize(QSize(17, 17))
+        self._auto_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_btn.setEnabled(False)
         self._auto_btn.clicked.connect(self._on_auto_arrange)
-        self._auto_btn.setFixedSize(99, 46)
+        self._auto_btn.setFixedHeight(34)
+        self._auto_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        layout.addWidget(self._auto_cfg_btn)
-        layout.addWidget(self._auto_separator, alignment=Qt.AlignVCenter)
         layout.addWidget(self._auto_btn)
+        layout.addWidget(self._auto_cfg_btn)
 
         return container
 
     def _build_toolbar(self) -> QFrame:
+        """Slim toolbar: what you act on, not what you do to it.
+
+        Everything that operates on *pending changes* (undo/redo, review,
+        revert, apply) moved to the footer, next to the count it acts on.
+        Everything that operates on *stored data* (import/export, backups,
+        restore) moved behind "More". What is left is the folder itself.
+        """
         bar = QFrame()
-        bar.setFixedHeight(64)
-        bar.setLayoutDirection(Qt.LeftToRight)
+        bar.setObjectName("tagEditorToolbar")
+        bar.setFixedHeight(54)
         self._toolbar_bar = bar
 
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(12, 9, 12, 9)
         layout.setSpacing(8)
-
-        self._io_btn = self._make_toolbar_action(
-            "meta_io_toolbar", FluentIcon.DOCUMENT, self._on_metadata_io
-        )
-        self._io_btn.setToolTip(t("meta_io_subtitle"))
-        self._io_btn.setAccessibleName(t("meta_io_title"))
-        layout.addWidget(self._io_btn)
-
-        self._restore_btn = self._make_toolbar_action(
-            "meta_restore_btn", FluentIcon.HISTORY, self._on_restore_from_backup
-        )
-        self._restore_btn.setToolTip(t("meta_restore_tooltip"))
-        layout.addWidget(self._restore_btn)
-
-        self._backup_manager_btn = self._make_toolbar_action(
-            "meta_backup_manager", FluentIcon.FOLDER, self._on_backup_manager
-        )
-        layout.addWidget(self._backup_manager_btn)
-
-        self._undo_btn = self._make_toolbar_action(
-            "meta_undo_changes", FluentIcon.RETURN, self.undo_requested.emit, enabled=False
-        )
-        self._undo_btn.setShortcut("Ctrl+Z")
-        layout.addWidget(self._undo_btn)
-        self._redo_btn = self._make_toolbar_action(
-            "meta_redo_changes", FluentIcon.SYNC, self.redo_requested.emit, enabled=False
-        )
-        self._redo_btn.setShortcut("Ctrl+Y")
-        layout.addWidget(self._redo_btn)
-
-        self._review_btn = self._make_toolbar_action(
-            "meta_review_changes", FluentIcon.VIEW, self._on_review_changes, enabled=False
-        )
-        self._review_btn.setShortcut("Ctrl+Shift+R")
-        layout.addWidget(self._review_btn)
-
-        self._revert_btn = self._make_toolbar_action(
-            "meta_revert_changes", FluentIcon.LEFT_ARROW, self._on_revert, enabled=False
-        )
-        layout.addWidget(self._revert_btn)
-
-        self._apply_btn = self._make_toolbar_action(
-            "meta_apply_changes", FluentIcon.SAVE, self._on_apply, enabled=False
-        )
-        layout.addWidget(self._apply_btn)
-
-        layout.addStretch()
-
-        self._monitoring_status = QLabel(t("meta_monitoring_disabled"))
-        self._monitoring_status.setAccessibleName(t("meta_monitoring_status"))
-        self._monitoring_status.setToolTip(t("meta_monitoring_status_tooltip"))
-        layout.addWidget(self._monitoring_status)
-        self._manual_refresh_btn = self._make_toolbar_action(
-            "meta_manual_refresh", FluentIcon.SYNC,
-            self.manual_refresh_requested.emit, enabled=False)
-        self._manual_refresh_btn.setAccessibleName(t("meta_manual_refresh"))
-        layout.addWidget(self._manual_refresh_btn)
-
-        layout.addWidget(self._make_auto_toolbar_action())
 
         self._browse_btn = self._make_toolbar_action(
             "meta_browse_folder", FluentIcon.FOLDER, self._on_browse
         )
+        self._browse_btn.setFixedHeight(36)
         layout.addWidget(self._browse_btn)
+
+        # A path is not prose: it stays LTR and elides from the left so the
+        # folder name — the part that identifies it — survives truncation.
+        self._path_chip = QLabel(t("meta_shell_no_folder"))
+        self._path_chip.setObjectName("tagEditorPathChip")
+        self._path_chip.setLayoutDirection(Qt.LeftToRight)
+        self._path_chip.setTextFormat(Qt.PlainText)
+        self._path_chip.setFixedHeight(32)
+        self._path_chip.setMaximumWidth(240)
+        self._path_chip.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        a11y.describe(self._path_chip, t("meta_shell_active_folder"))
+        layout.addWidget(self._path_chip)
+
+        # Keep the related refreshes together as a compact icon group.  The
+        # primary icon reconciles safely; the compact overflow affordance opens
+        # the less-common complete re-read without suggesting a second refresh.
+        self._refresh_control = QFrame()
+        self._refresh_control.setObjectName("tagEditorRefreshControl")
+        self._refresh_control.setFixedHeight(34)
+        self._refresh_control.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        refresh_layout = QHBoxLayout(self._refresh_control)
+        refresh_layout.setContentsMargins(1, 1, 1, 1)
+        refresh_layout.setSpacing(0)
+
+        self._manual_refresh_btn = self._make_toolbar_action(
+            "meta_manual_refresh", FluentIcon.SYNC,
+            self.manual_refresh_requested.emit, enabled=False)
+        self._manual_refresh_btn.setText("")
+        self._manual_refresh_btn.setFixedHeight(32)
+        self._manual_refresh_btn.setFixedWidth(34)
+        self._manual_refresh_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        a11y.describe(self._manual_refresh_btn, t("meta_manual_refresh"),
+                      tooltip=t("meta_manual_refresh"))
+        refresh_layout.addWidget(self._manual_refresh_btn)
+
+        self._refresh_menu_btn = QToolButton()
+        self._refresh_menu_btn.setObjectName("tagEditorRefreshMenuButton")
+        self._refresh_menu_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._refresh_menu_btn.setIconSize(QSize(16, 16))
+        self._refresh_menu_btn.setFixedSize(26, 32)
+        self._refresh_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        a11y.describe(self._refresh_menu_btn, t("meta_shell_refresh_menu"),
+                      tooltip=t("meta_shell_rescan_tooltip"))
+        refresh_menu = QMenu(self._refresh_control)
+        refresh_menu.setObjectName("tagEditorRefreshMenu")
+        refresh_menu.setAccessibleName(t("meta_shell_refresh_menu"))
+        self._rescan_menu_btn = QToolButton(refresh_menu)
+        self._rescan_menu_btn.setObjectName("tagEditorRescanAction")
+        self._rescan_menu_btn.setText(t("meta_shell_rescan"))
+        self._rescan_menu_btn.setIconSize(QSize(28, 28))
+        self._rescan_menu_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._rescan_menu_btn.setFixedHeight(32)
+        self._rescan_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        a11y.describe(self._rescan_menu_btn, t("meta_shell_rescan"),
+                      tooltip=t("meta_shell_rescan_tooltip"))
+        rescan_width = max(
+            98,
+            min(132, self._rescan_menu_btn.fontMetrics().horizontalAdvance(
+                t("meta_shell_rescan")
+            ) + 46),
+        )
+        self._rescan_menu_btn.setFixedWidth(rescan_width)
+        self._rescan_action = QWidgetAction(refresh_menu)
+        self._rescan_action.setText(t("meta_shell_rescan"))
+        self._rescan_action.setDefaultWidget(self._rescan_menu_btn)
+        self._rescan_action.setToolTip(t("meta_shell_rescan_tooltip"))
+        self._rescan_action.triggered.connect(self._on_scan)
+        self._rescan_menu_btn.clicked.connect(self._rescan_action.trigger)
+        self._rescan_menu_btn.clicked.connect(refresh_menu.close)
+        refresh_menu.addAction(self._rescan_action)
+        refresh_menu.setFixedWidth(rescan_width + 6)
+        self._refresh_menu = refresh_menu
+        self._refresh_menu_btn.clicked.connect(self._show_refresh_menu)
+        refresh_layout.addWidget(self._refresh_menu_btn)
+        layout.addWidget(self._refresh_control)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.addAction(FluentIcon.SEARCH.icon(), QLineEdit.LeadingPosition)
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setPlaceholderText(t("meta_search_tracks"))
+        # Filtering changes what is listed, never what Apply writes, so the
+        # description says so rather than leaving it to be inferred.
+        a11y.describe(self._search_edit, t("meta_search_tracks"),
+                      description=t("meta_a11y_search_scope_note"))
+        self._search_edit.setFixedSize(230, 34)
+        # Qt builds the inline clear button itself and leaves it unnamed, so a
+        # screen reader reaches an anonymous button at the end of the field.
+        for clear_button in self._search_edit.findChildren(QToolButton):
+            a11y.describe(clear_button, t("meta_a11y_clear_search"),
+                          tooltip=t("meta_a11y_clear_search"))
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        layout.addWidget(self._search_edit)
+
+        layout.addStretch()
+
+        layout.addWidget(self._build_more_button())
 
         self._scan_progress = QProgressBar()
         self._scan_progress.setFixedWidth(150)
@@ -970,22 +1296,258 @@ class MetadataEditorPanel(QWidget):
 
         self._summary_lbl = QLabel("")
         self._summary_lbl.setVisible(False)
+        layout.addWidget(self._summary_lbl)
 
         return bar
 
+    def _build_footer(self) -> QFrame:
+        """Pending work and the actions that resolve it, in one place.
+
+        Apply's scope is every included, unblocked pending change — never the
+        selection and never what the filter happens to show. Putting the count
+        and the button side by side is the point: the number next to Apply is
+        the number Apply writes.
+        """
+        footer = QFrame()
+        footer.setObjectName("tagEditorFooter")
+        footer.setFixedHeight(56)
+        self._footer_bar = footer
+        a11y.describe(footer, t("meta_footer_a11y"))
+
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(9)
+
+        self._footer_count = QLabel("0")
+        self._footer_count.setObjectName("tagEditorFooterCount")
+        self._footer_count.setAlignment(Qt.AlignCenter)
+        self._footer_count.setFixedSize(30, 30)
+        layout.addWidget(self._footer_count)
+
+        self._footer_title = QLabel(t("meta_footer_ready"))
+        self._footer_title.setObjectName("tagEditorFooterTitle")
+        layout.addWidget(self._footer_title)
+
+        self._footer_desc = QLabel("")
+        self._footer_desc.setObjectName("tagEditorFooterDesc")
+        layout.addWidget(self._footer_desc)
+
+        layout.addStretch()
+
+        self._undo_btn = self._make_toolbar_action(
+            "meta_undo_changes", FluentIcon.RETURN, self.undo_requested.emit, enabled=False
+        )
+        self._undo_btn.setText("")
+        self._undo_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._undo_btn.setFixedSize(32, 32)
+        self._undo_btn.setShortcut("Ctrl+Z")
+        layout.addWidget(self._undo_btn)
+
+        self._redo_btn = self._make_toolbar_action(
+            "meta_redo_changes", FluentIcon.SYNC, self.redo_requested.emit, enabled=False
+        )
+        self._redo_btn.setText("")
+        self._redo_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._redo_btn.setFixedSize(32, 32)
+        self._redo_btn.setShortcut("Ctrl+Y")
+        layout.addWidget(self._redo_btn)
+
+        self._review_btn = self._make_toolbar_action(
+            "meta_review_changes", FluentIcon.VIEW, self._on_review_changes, enabled=False
+        )
+        self._review_btn.setShortcut("Ctrl+Shift+R")
+        # The shortcut is not discoverable from an icon-and-label button.
+        self._review_btn.setToolTip(
+            f'{t("meta_review_changes").strip()} (Ctrl+Shift+R)')
+        layout.addWidget(self._review_btn)
+
+        self._revert_btn = self._make_toolbar_action(
+            "meta_revert_changes", FluentIcon.LEFT_ARROW, self._on_revert, enabled=False
+        )
+        layout.addWidget(self._revert_btn)
+
+        self._apply_btn = self._make_toolbar_action(
+            "meta_apply_changes", FluentIcon.SAVE, self._on_apply, enabled=False
+        )
+        self._apply_btn.setMinimumWidth(92)
+        self._apply_btn.setFixedHeight(36)
+        layout.addWidget(self._apply_btn)
+
+        return footer
+
+    def _refresh_footer(self) -> None:
+        """Mirror the apply scope into the footer's own summary."""
+        if not hasattr(self, "_footer_title"):
+            return
+        candidates = self._workspace.apply_candidates()
+        changed = self._workspace.changed_tracks()
+        blocked = self._workspace.apply_blockers()
+        excluded = self._workspace.excluded_tracks()
+        change_count = sum(
+            len(item.proposed.changed_fields(item.original)) + bool(item.proposed_filename)
+            for item in changed
+        )
+        file_count = len(changed)
+
+        has_work = bool(changed)
+        for widget in (self._footer_count, self._undo_btn, self._redo_btn,
+                       self._review_btn, self._revert_btn, self._apply_btn):
+            widget.setVisible(has_work)
+
+        if not has_work:
+            self._footer_bar.setFixedHeight(30)
+            total = len(self._model.get_all_tracks())
+            self._footer_title.setText(t("meta_footer_ready"))
+            self._footer_desc.setText(
+                t("meta_footer_loaded", total=total) if total else "")
+            return
+
+        self._footer_bar.setFixedHeight(56)
+        self._footer_count.setText(isolate_number(str(len(candidates))))
+        self._footer_count.setAccessibleName(
+            t("meta_footer_count_a11y", n=len(candidates)))
+        self._footer_title.setText(
+            t("meta_footer_pending_one_file", changes=change_count)
+            if file_count == 1
+            else t("meta_footer_pending", changes=change_count, files=file_count)
+        )
+        notes = [t("meta_footer_backup_note")]
+        if blocked:
+            notes.append(t("meta_footer_blocked_note", n=len(blocked)))
+        if excluded:
+            notes.append(t("meta_footer_excluded_note", n=len(excluded)))
+        self._footer_desc.setText(" · ".join(notes))
+        self._apply_btn.setText(t("meta_apply_count", n=change_count))
+
+    def _columns_button(self) -> QToolButton:
+        """Direct access to the column picker.
+
+        It was previously only reachable by right-clicking the header, which
+        is not a discoverable place to look for "show me a different field".
+        The header menu stays exactly as it was — this is an additional door.
+        """
+        self._columns_btn = QToolButton()
+        self._columns_btn.setIcon(FluentIcon.LAYOUT.icon())
+        self._columns_btn.setIconSize(QSize(14, 14))
+        self._columns_btn.setFixedSize(26, 26)
+        a11y.describe(self._columns_btn, t("mt_more_columns"),
+                      description=t("mt_search_columns"),
+                      tooltip=t("mt_more_columns"))
+        self._columns_btn.clicked.connect(self._on_more_columns)
+        return self._columns_btn
+
+    def _build_table_status_bar(self) -> QFrame:
+        """Counts that describe the listing, pinned under the table."""
+        bar = QFrame()
+        bar.setObjectName("tagEditorTableStatus")
+        bar.setFixedHeight(26)
+        self._table_status_bar = bar
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 3, 12, 3)
+        layout.setSpacing(10)
+
+        self._table_info_lbl = QLabel("")
+        layout.addWidget(self._table_info_lbl)
+
+        self._apply_scope_lbl = QLabel("")
+        self._apply_scope_lbl.setAccessibleName(t("meta_apply_scope_label"))
+        layout.addWidget(self._apply_scope_lbl)
+
+        layout.addStretch()
+
+        self._exclude_apply_btn = QToolButton()
+        self._exclude_apply_btn.clicked.connect(self._toggle_selected_apply_exclusion)
+        self._exclude_apply_btn.setVisible(False)
+        layout.addWidget(self._exclude_apply_btn)
+
+        self._scope_hint_lbl = QLabel(t("meta_scope_hint"))
+        self._scope_hint_lbl.setObjectName("tagEditorScopeHint")
+        layout.addWidget(self._scope_hint_lbl)
+        return bar
+
+    @staticmethod
+    def _migrate_saved_column_order(saved_order) -> list[int] | None:
+        """Widen a column order saved before the status column existed.
+
+        The restore path only accepts an order of exactly COLUMN_COUNT entries.
+        Adding a column would therefore make every previously saved order fail
+        that check and silently reset the user's arrangement on first launch of
+        the new version. Appending the columns they have never seen keeps the
+        order they chose and leaves the new one at the end.
+        """
+        if not saved_order:
+            return None
+        order = list(saved_order)
+        if len(order) == COLUMN_COUNT:
+            return order
+        if len(order) > COLUMN_COUNT:
+            return None
+        missing = [col for col in range(COLUMN_COUNT) if col not in order]
+        if len(order) + len(missing) != COLUMN_COUNT:
+            # Duplicate or out-of-range entries: not a layout we can trust.
+            return None
+        return order + missing
+
+    def _build_more_button(self) -> QToolButton:
+        """The data-management actions, kept as real buttons inside a menu.
+
+        They are hosted as QWidgetActions rather than replaced by plain
+        QActions so they remain the same QToolButtons the theme pass styles
+        and the enable/disable logic drives — moving them must not fork them
+        into a second, subtly different set of controls.
+        """
+        self._more_btn = QToolButton()
+        self._more_btn.setText(self._toolbar_text("meta_shell_more"))
+        self._more_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._more_btn.setPopupMode(QToolButton.InstantPopup)
+        self._more_btn.setFixedHeight(32)
+        self._more_btn.setMinimumWidth(64)
+        a11y.describe(self._more_btn, t("meta_shell_more"),
+                      description=t("meta_shell_more_tooltip"),
+                      tooltip=t("meta_shell_more_tooltip"))
+
+        menu = QMenu(self._more_btn)
+        self._more_menu = menu
+
+        self._io_btn = self._make_toolbar_action(
+            "meta_io_toolbar", FluentIcon.DOCUMENT, self._on_metadata_io
+        )
+        self._io_btn.setToolTip(t("meta_io_subtitle"))
+        self._io_btn.setAccessibleName(t("meta_io_title"))
+
+        self._backup_manager_btn = self._make_toolbar_action(
+            "meta_backup_manager", FluentIcon.FOLDER, self._on_backup_manager
+        )
+
+        self._restore_btn = self._make_toolbar_action(
+            "meta_restore_btn", FluentIcon.HISTORY, self._on_restore_from_backup
+        )
+        self._restore_btn.setToolTip(t("meta_restore_tooltip"))
+
+        for button in (self._io_btn, self._backup_manager_btn, self._restore_btn):
+            button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            button.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+            # A button inside a menu does not dismiss it on its own.
+            button.clicked.connect(menu.close)
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(button)
+            menu.addAction(action)
+
+        self._more_btn.setMenu(menu)
+        return self._more_btn
+
     def _build_state_card(self, page: QWidget) -> tuple[QFrame, QVBoxLayout]:
         outer = QVBoxLayout(page)
-        outer.setContentsMargins(28, 28, 28, 28)
-        outer.setAlignment(Qt.AlignCenter)
+        outer.setContentsMargins(11, 0, 11, 10)
 
         card = QFrame()
         card.setObjectName("metadataStateCard")
-        card.setMaximumWidth(430)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(30, 30, 30, 30)
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(12)
-        outer.addWidget(card, alignment=Qt.AlignCenter)
+        outer.addWidget(card)
         return card, layout
 
     def _build_table_empty_page(self) -> QWidget:
@@ -1007,7 +1569,52 @@ class MetadataEditorPanel(QWidget):
         self._empty_body_lbl = body
         layout.addWidget(body)
 
+        self._empty_browse_btn = QPushButton(t("meta_browse_folder"))
+        self._empty_browse_btn.setStyleSheet(primary_btn_style())
+        self._empty_browse_btn.clicked.connect(self._on_browse)
+        layout.addWidget(self._empty_browse_btn, alignment=Qt.AlignCenter)
+
         return page
+
+    def _build_table_error_page(self) -> QWidget:
+        """A scan failure has to be visible where the files would have been.
+
+        It previously only reached a summary label that is never shown, so a
+        folder that failed to scan looked identical to an empty one.
+        """
+        page = QWidget()
+        card, layout = self._build_state_card(page)
+        self._error_state_card = card
+
+        layout.addWidget(EmptyStateIcon("warning", card), alignment=Qt.AlignCenter)
+
+        self._error_title_lbl = QLabel(t("meta_scan_error_title"))
+        self._error_title_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._error_title_lbl)
+
+        self._error_body_lbl = QLabel("")
+        self._error_body_lbl.setAlignment(Qt.AlignCenter)
+        self._error_body_lbl.setWordWrap(True)
+        self._error_body_lbl.setMaximumWidth(330)
+        self._error_body_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._error_body_lbl)
+        layout.addSpacing(8)
+
+        self._error_retry_btn = QPushButton(t("meta_scan_error_retry"))
+        self._error_retry_btn.setStyleSheet(btn_style())
+        a11y.describe(self._error_retry_btn, t("meta_scan_error_retry"))
+        self._error_retry_btn.clicked.connect(self._on_scan)
+        layout.addWidget(self._error_retry_btn, alignment=Qt.AlignCenter)
+
+        return page
+
+    def _show_table_error(self, message: str) -> None:
+        if hasattr(self, "_error_body_lbl"):
+            self._error_body_lbl.setText(message)
+        if hasattr(self, "_error_retry_btn"):
+            self._error_retry_btn.setEnabled(self._root_folder is not None)
+        if hasattr(self, "_table_stack"):
+            self._table_stack.setCurrentWidget(self._table_error_page)
 
     def _build_table_loading_page(self) -> QWidget:
         page = QWidget()
@@ -1032,6 +1639,11 @@ class MetadataEditorPanel(QWidget):
         self._center_progress.setFixedSize(320, 8)
         layout.addWidget(self._center_progress, alignment=Qt.AlignCenter)
 
+        self._loading_cancel_btn = QPushButton(t("cancel"))
+        self._loading_cancel_btn.setStyleSheet(btn_style())
+        self._loading_cancel_btn.clicked.connect(self.scan_cancel_requested)
+        layout.addWidget(self._loading_cancel_btn, alignment=Qt.AlignCenter)
+
         return page
 
     def _show_table_content(self) -> None:
@@ -1039,6 +1651,14 @@ class MetadataEditorPanel(QWidget):
             self._table_stack.setCurrentWidget(self._table_content)
 
     def _show_table_empty(self) -> None:
+        loaded_folder = self._root_folder is not None
+        if hasattr(self, "_empty_title_lbl"):
+            self._empty_title_lbl.setText(t(
+                "meta_empty_folder_title" if loaded_folder else "meta_empty_title"))
+            self._empty_body_lbl.setText(t(
+                "meta_empty_folder_body" if loaded_folder else "meta_empty_body"))
+            self._empty_browse_btn.setText(t(
+                "meta_change_folder" if loaded_folder else "meta_browse_folder"))
         if hasattr(self, "_table_stack"):
             self._table_stack.setCurrentWidget(self._table_empty_page)
 
@@ -1083,23 +1703,47 @@ class MetadataEditorPanel(QWidget):
                       tooltip=t("meta_files_folders_header"))
         self._tree_toggle_btn.clicked.connect(self._toggle_tree_pane)
         tree_rail_layout.addWidget(self._tree_toggle_btn)
+        self._tree_rail_label = VerticalLabel(t("meta_files_folders_header"))
+        self._tree_rail_label.setAlignment(Qt.AlignCenter)
+        self._tree_rail_label.setStyleSheet(
+            f"color: {tag_editor_colors().text_tertiary}; font-size: 10px; font-weight: 800;")
+        tree_rail_layout.addWidget(self._tree_rail_label, stretch=1)
         tree_rail_layout.addStretch()
         tree_shell_layout.addWidget(self._tree_rail)
 
         self._tree_body = QFrame()
         self._tree_body.setMinimumWidth(self._TREE_OPEN_MIN)
         tree_layout = QVBoxLayout(self._tree_body)
-        tree_layout.setContentsMargins(4, 4, 0, 4)
-        tree_layout.setSpacing(4)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setSpacing(0)
 
-        tree_header = QLabel(t("meta_files_folders_header"))
-        tree_header.setStyleSheet("font-weight: bold; font-size: 12px; padding: 2px 0;")
-        tree_header_row = QHBoxLayout()
-        tree_header_row.setContentsMargins(0, 0, 4, 0)
+        self._tree_header = QFrame()
+        self._tree_header.setObjectName("tagEditorTreeHeader")
+        self._tree_header.setFixedHeight(38)
+        tree_header_row = QHBoxLayout(self._tree_header)
+        tree_header_row.setContentsMargins(9, 0, 9, 0)
         tree_header_row.setSpacing(4)
+        tree_header = QLabel(t("meta_files_folders_header"))
+        tree_header.setStyleSheet("font-weight: 800; font-size: 12px;")
         tree_header_row.addWidget(tree_header)
         tree_header_row.addStretch()
-        tree_layout.addLayout(tree_header_row)
+
+        self._tree_add_folder_btn = QToolButton()
+        self._tree_add_folder_btn.setIcon(FluentIcon.FOLDER_ADD.icon())
+        self._tree_add_folder_btn.setIconSize(QSize(16, 16))
+        self._tree_add_folder_btn.setFixedSize(28, 28)
+        a11y.describe(self._tree_add_folder_btn, t("meta_add_folder"), tooltip=t("meta_add_folder"))
+        self._tree_add_folder_btn.clicked.connect(self._on_tree_header_add_folder)
+        tree_header_row.addWidget(self._tree_add_folder_btn)
+
+        self._tree_header_collapse_btn = QToolButton()
+        self._tree_header_collapse_btn.setText("×")
+        self._tree_header_collapse_btn.setFixedSize(28, 28)
+        a11y.describe(self._tree_header_collapse_btn, t("meta_shell_collapse_tree"),
+                      tooltip=t("meta_shell_collapse_tree"))
+        self._tree_header_collapse_btn.clicked.connect(self._toggle_tree_pane)
+        tree_header_row.addWidget(self._tree_header_collapse_btn)
+        tree_layout.addWidget(self._tree_header)
 
         self._tree = ExplorerTreeWidget()
         self._tree.setAccessibleName(t("meta_a11y_file_tree"))
@@ -1114,7 +1758,13 @@ class MetadataEditorPanel(QWidget):
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree.keyboardContextMenuRequested.connect(self._on_tree_context_menu)
-        tree_layout.addWidget(self._tree)
+        tree_layout.addWidget(self._tree, stretch=1)
+
+        self._tree_hint = QLabel(t("meta_shell_tree_hint"))
+        self._tree_hint.setObjectName("tagEditorTreeHint")
+        self._tree_hint.setWordWrap(True)
+        self._tree_hint.setContentsMargins(8, 8, 8, 8)
+        tree_layout.addWidget(self._tree_hint)
         tree_shell_layout.addWidget(self._tree_body, stretch=1)
 
         splitter.addWidget(tree_frame)
@@ -1130,12 +1780,15 @@ class MetadataEditorPanel(QWidget):
         self._table_stack = QStackedWidget()
         self._table_content = QWidget()
         table_content_layout = QVBoxLayout(self._table_content)
-        table_content_layout.setContentsMargins(0, 0, 0, 0)
-        table_content_layout.setSpacing(4)
+        table_content_layout.setContentsMargins(11, 0, 11, 10)
+        table_content_layout.setSpacing(0)
 
-        nav_bar = QHBoxLayout()
-        nav_bar.setContentsMargins(12, 0, 12, 0)
-        nav_bar.setSpacing(4)
+        self._nav_host = QFrame()
+        self._nav_host.setObjectName("tagEditorNavigation")
+        self._nav_host.setFixedHeight(40)
+        nav_bar = QHBoxLayout(self._nav_host)
+        nav_bar.setContentsMargins(0, 6, 0, 6)
+        nav_bar.setSpacing(6)
         self._nav_back_btn = QToolButton()
         self._nav_back_btn.setToolTip(t("meta_nav_back"))
         self._nav_back_btn.setAccessibleName(t("meta_nav_back"))
@@ -1157,40 +1810,59 @@ class MetadataEditorPanel(QWidget):
         self._breadcrumbs_layout.setContentsMargins(0, 0, 0, 0)
         self._breadcrumbs_layout.setSpacing(2)
         nav_bar.addWidget(self._breadcrumbs_widget, stretch=1)
-        self._search_edit = QLineEdit()
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setPlaceholderText(t("meta_search_tracks"))
-        self._search_edit.setAccessibleName(t("meta_search_tracks"))
-        self._search_edit.setMaximumWidth(250)
-        # Qt builds the inline clear button itself and leaves it unnamed, so a
-        # screen reader reaches an anonymous button at the end of the field.
-        for clear_button in self._search_edit.findChildren(QToolButton):
-            a11y.describe(clear_button, t("meta_a11y_clear_search"),
-                          tooltip=t("meta_a11y_clear_search"))
-        self._search_edit.textChanged.connect(self._on_search_text_changed)
-        nav_bar.addWidget(self._search_edit)
-        table_content_layout.addLayout(nav_bar)
+        # Search now lives in the toolbar, beside the folder it searches.
         self._refresh_navigation_arrow_direction()
 
-        tbl_head = QHBoxLayout()
-        tbl_head.setContentsMargins(12, 0, 12, 0)
-        
+        # Filters, zoom and column choice share the breadcrumb row because they
+        # all answer "what am I looking at". What will be *written* is the
+        # footer's job, and keeping the two rows apart keeps that distinction
+        # visible rather than implied.
+        self._excluded_chip = QToolButton()
+        self._excluded_chip.setObjectName("tagEditorExcludedChip")
+        self._excluded_chip.setFixedHeight(24)
+        self._excluded_chip.setCheckable(True)
+        a11y.describe_filter_toggle(
+            self._excluded_chip, t("meta_excluded_filter_chip", n=0),
+            t("meta_a11y_excluded_filter_desc"))
+        self._excluded_chip.toggled.connect(self._on_excluded_chip_toggled)
+        nav_bar.addWidget(self._excluded_chip)
+
+        self._stale_chip = QToolButton()
+        self._stale_chip.setObjectName("tagEditorStaleChip")
+        self._stale_chip.setFixedHeight(24)
+        self._stale_chip.setCheckable(True)
+        self._stale_chip.setText(t("meta_external_filter", n=0))
+        a11y.describe_filter_toggle(
+            self._stale_chip, t("meta_external_filter", n=0),
+            t("meta_a11y_external_filter_desc"))
+        self._stale_chip.toggled.connect(self._on_stale_chip_toggled)
+        nav_bar.addWidget(self._stale_chip)
+
+        tbl_head = nav_bar
+
         # Zoom controls — the magnifying-glass +/- icons say "zoom" on their
         # own, so no separate leading icon is needed alongside them.
+        self._zoom_frame = QFrame()
+        self._zoom_frame.setObjectName("tagEditorZoom")
+        self._zoom_frame.setFixedHeight(28)
+        zoom_layout = QHBoxLayout(self._zoom_frame)
+        zoom_layout.setContentsMargins(2, 2, 2, 2)
+        zoom_layout.setSpacing(0)
+
         self._zoom_minus_btn = QPushButton()
         self._zoom_minus_btn.setIcon(FluentIcon.ZOOM_OUT.icon())
         self._zoom_minus_btn.setIconSize(QSize(12, 12))
         self._zoom_minus_btn.setFixedSize(24, 24)
         self._zoom_minus_btn.setAccessibleName(t("meta_a11y_zoom_out"))
         self._zoom_minus_btn.clicked.connect(self._on_zoom_minus)
-        tbl_head.addWidget(self._zoom_minus_btn)
+        zoom_layout.addWidget(self._zoom_minus_btn)
 
         self._zoom_val_lbl = QLineEdit("100%")
         self._zoom_val_lbl.setFixedSize(48, 24)
         self._zoom_val_lbl.setAlignment(Qt.AlignCenter)
         self._zoom_val_lbl.setAccessibleName(t("meta_a11y_zoom_value"))
         self._zoom_val_lbl.editingFinished.connect(self._on_zoom_custom)
-        tbl_head.addWidget(self._zoom_val_lbl)
+        zoom_layout.addWidget(self._zoom_val_lbl)
 
         self._zoom_plus_btn = QPushButton()
         self._zoom_plus_btn.setIcon(FluentIcon.ZOOM_IN.icon())
@@ -1198,35 +1870,12 @@ class MetadataEditorPanel(QWidget):
         self._zoom_plus_btn.setFixedSize(24, 24)
         self._zoom_plus_btn.setAccessibleName(t("meta_a11y_zoom_in"))
         self._zoom_plus_btn.clicked.connect(self._on_zoom_plus)
-        tbl_head.addWidget(self._zoom_plus_btn)
+        zoom_layout.addWidget(self._zoom_plus_btn)
+        tbl_head.addWidget(self._zoom_frame)
         
         tbl_head.addSpacing(10)
-        tbl_head.addStretch()
-
-        self._table_info_lbl = QLabel("")
-        tbl_head.addWidget(self._table_info_lbl)
-        self._apply_scope_lbl = QLabel("")
-        self._apply_scope_lbl.setAccessibleName(t("meta_apply_scope_label"))
-        tbl_head.addWidget(self._apply_scope_lbl)
-        self._exclude_apply_btn = QToolButton()
-        self._exclude_apply_btn.clicked.connect(self._toggle_selected_apply_exclusion)
-        tbl_head.addWidget(self._exclude_apply_btn)
-        self._excluded_chip = QToolButton()
-        self._excluded_chip.setCheckable(True)
-        a11y.describe_filter_toggle(
-            self._excluded_chip, t("meta_excluded_filter_chip", n=0),
-            t("meta_a11y_excluded_filter_desc"))
-        self._excluded_chip.toggled.connect(self._on_excluded_chip_toggled)
-        tbl_head.addWidget(self._excluded_chip)
-        self._stale_chip = QToolButton()
-        self._stale_chip.setCheckable(True)
-        self._stale_chip.setText(t("meta_external_filter", n=0))
-        a11y.describe_filter_toggle(
-            self._stale_chip, t("meta_external_filter", n=0),
-            t("meta_a11y_external_filter_desc"))
-        self._stale_chip.toggled.connect(self._on_stale_chip_toggled)
-        tbl_head.addWidget(self._stale_chip)
-        table_content_layout.addLayout(tbl_head)
+        tbl_head.addWidget(self._columns_button())
+        table_content_layout.addWidget(self._nav_host)
 
         self._table = ExplorerDetailsView()
         self._table.setAccessibleName(t("meta_a11y_details_table"))
@@ -1240,9 +1889,12 @@ class MetadataEditorPanel(QWidget):
         self._table.viewportResized.connect(self._fill_leftover_space)
         # Suppress Qt's built-in row selection fill so our drawRow capsule
         # is the sole selection visual (no qfluentwidgets per-cell borders).
-        # setStyle() does NOT transfer ownership — store in instance var so
-        # Python GC doesn't destroy the object and leave Qt with a dangling ptr.
-        self._explorer_table_style = ExplorerTableStyle(self._table.style())
+        # QProxyStyle takes ownership of a supplied base style.  The table's
+        # current style belongs to QApplication, so passing it here made Qt
+        # free the application-owned style during teardown (a native access
+        # violation after otherwise-passing UI tests).  Let QProxyStyle create
+        # and own its default base style instead.
+        self._explorer_table_style = ExplorerTableStyle()
         self._table.setStyle(self._explorer_table_style)
         self._table.setModel(self._proxy)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1267,10 +1919,14 @@ class MetadataEditorPanel(QWidget):
         self._table.setItemDelegate(
             ExplorerFileListDelegate(self._table)
         )
-        # Filename columns get their own delegate: LTR, ElideMiddle, icon, checkbox.
+        self._table.setItemDelegateForColumn(
+            COL_CHECK,
+            SelectionCheckDelegate(self._table),
+        )
+        # Filename and media icon stay together; selection is a separate column.
         self._table.setItemDelegateForColumn(
             COL_FILENAME,
-            FilenameDelegate(self._table, icon_provider=self._track_icon, show_checkbox=True),
+            FilenameDelegate(self._table, icon_provider=self._track_icon, show_checkbox=False),
         )
         self._table.setItemDelegateForColumn(
             COL_FILENAME_NEW,
@@ -1280,6 +1936,9 @@ class MetadataEditorPanel(QWidget):
         hdr = MetadataHeaderView(self._table)
         hdr.setAccessibleName(t("meta_a11y_table_header"))
         self._table.setHorizontalHeader(hdr)
+        # Qt's platform default minimum is 17 px; lower it only enough for the
+        # deliberately tiny opposite-edge clear strip (9 px).
+        hdr.setMinimumSectionSize(ExplorerDetailsView._END_EMPTY_GUTTER)
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
         hdr.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1293,7 +1952,7 @@ class MetadataEditorPanel(QWidget):
         if self._cfg:
             saved_visibility = self._cfg.tag_editor_column_visibility
         for col in range(COLUMN_COUNT):
-            if col == COL_CHECK or col == COL_FILENAME:
+            if col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK, COL_FILENAME, COL_STATUS):
                 self._table.setColumnHidden(col, False)
             elif saved_visibility is not None:
                 self._table.setColumnHidden(col, col in saved_visibility)
@@ -1303,10 +1962,13 @@ class MetadataEditorPanel(QWidget):
         # Allow drag reordering. Restore order from config or apply default.
         hdr.setSectionsMovable(True)
         hdr.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_GUTTER, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_END_GUTTER, QHeaderView.Fixed)
 
         saved_order = None
         if self._cfg:
-            saved_order = self._cfg.tag_editor_column_order
+            saved_order = self._migrate_saved_column_order(
+                self._cfg.tag_editor_column_order)
 
         hdr.blockSignals(True)
         try:
@@ -1316,9 +1978,15 @@ class MetadataEditorPanel(QWidget):
                     if current_visual != visual_idx:
                         hdr.moveSection(current_visual, visual_idx)
             else:
-                # Move new filename right next to original filename
+                # Keep the proposed name next to the current filename.
                 hdr.moveSection(hdr.visualIndex(COL_FILENAME_NEW), hdr.visualIndex(COL_FILENAME) + 1)
-                hdr.moveSection(hdr.visualIndex(COL_CHECK), COLUMN_COUNT - 1)
+
+            # Blank gutter and checkbox are distinct fixed leading columns.
+            # Filename and every other content column remain movable.
+            hdr.moveSection(hdr.visualIndex(COL_GUTTER), 0)
+            hdr.moveSection(hdr.visualIndex(COL_CHECK), 1)
+            hdr.moveSection(hdr.visualIndex(COL_STATUS), COLUMN_COUNT - 2)
+            hdr.moveSection(hdr.visualIndex(COL_END_GUTTER), COLUMN_COUNT - 1)
         finally:
             hdr.blockSignals(False)
 
@@ -1337,7 +2005,7 @@ class MetadataEditorPanel(QWidget):
             saved_sort_order_val = self._cfg.tag_editor_sort_order
             saved_sort_order = Qt.SortOrder(saved_sort_order_val)
 
-        if saved_sort_col == COL_CHECK:
+        if saved_sort_col in (COL_GUTTER, COL_END_GUTTER, COL_CHECK):
             saved_sort_col = -1
             if self._cfg:
                 self._cfg.tag_editor_sort_column = -1
@@ -1361,12 +2029,21 @@ class MetadataEditorPanel(QWidget):
         self._model.rowsRemoved.connect(lambda *_: self._refresh_checked_scope_state())
         self._model.modelReset.connect(self._refresh_checked_scope_state)
 
-        table_content_layout.addWidget(self._table)
+        self._table_card = QFrame()
+        self._table_card.setObjectName("tagEditorTableCard")
+        table_card_layout = QVBoxLayout(self._table_card)
+        table_card_layout.setContentsMargins(1, 1, 1, 1)
+        table_card_layout.setSpacing(0)
+        table_card_layout.addWidget(self._table, stretch=1)
+        table_card_layout.addWidget(self._build_table_status_bar())
+        table_content_layout.addWidget(self._table_card, stretch=1)
         self._table_stack.addWidget(self._table_content)
         self._table_empty_page = self._build_table_empty_page()
         self._table_loading_page = self._build_table_loading_page()
+        self._table_error_page = self._build_table_error_page()
         self._table_stack.addWidget(self._table_empty_page)
         self._table_stack.addWidget(self._table_loading_page)
+        self._table_stack.addWidget(self._table_error_page)
         table_layout.addWidget(self._table_stack)
         self._show_table_empty()
         splitter.addWidget(table_frame)
@@ -1389,7 +2066,20 @@ class MetadataEditorPanel(QWidget):
                 handle.setProperty("metadata_handle_index", handle_index)
                 handle.installEventFilter(self)
 
-        self._apply_body_sizes(self._restore_body_sizes(), save=False)
+        self._initial_body_sizes = self._restore_body_sizes()
+        self._apply_body_sizes(self._initial_body_sizes, save=False)
+        # QSplitter is constructed before the panel receives its real window
+        # width.  Qt otherwise compresses both side panes to their old minima
+        # and keeps those accidental widths after the first resize.  Reapply
+        # the reference allocation once actual geometry is available.
+        # Keep this deferred callback owned by the panel.  ``QTimer.singleShot``
+        # stores a Python callable outside the QObject ownership tree, so it
+        # can fire while Qt is tearing the panel down.  An owned timer is
+        # stopped and disconnected with the panel instead.
+        self._initial_body_layout_timer = QTimer(self)
+        self._initial_body_layout_timer.setSingleShot(True)
+        self._initial_body_layout_timer.timeout.connect(self._restore_initial_body_layout)
+        self._initial_body_layout_timer.start(0)
 
         # Set initial table zoom level
         self._set_zoom(self._zoom_level)
@@ -1399,6 +2089,12 @@ class MetadataEditorPanel(QWidget):
         self._ignore_header_resize = False
 
         return splitter
+
+    def _restore_initial_body_layout(self) -> None:
+        if not hasattr(self, "_body_splitter"):
+            return
+        self._apply_body_sizes(list(self._initial_body_sizes), save=False)
+        self._apply_responsive_layout(self.width())
 
     def _restore_body_sizes(self) -> list[int]:
         """Restore pane widths as one allocation, tolerating stale/malformed data.
@@ -1450,6 +2146,23 @@ class MetadataEditorPanel(QWidget):
         button.setIcon(fluent_icon.icon(color=get_colors().text_secondary))
         button.setIconSize(QSize(18, 18))
 
+    # "tools" keeps its FluentIcon; the other two use the reference glyphs,
+    # which FluentIcon has no close match for.
+    _RAIL_FLUENT_ICONS = {"tools": FluentIcon.DEVELOPER_TOOLS}
+
+    def _set_rail_button_icon(self, button: QPushButton, mode: str) -> None:
+        """Icon for one collapsed-rail mode button, tinted for the current theme.
+
+        All three take the prototype's ``.btn`` foreground, so the FluentIcon
+        one does not read a shade lighter than the two drawn from the reference.
+        """
+        color = tag_editor_colors().text_primary
+        fluent_icon = self._RAIL_FLUENT_ICONS.get(mode)
+        button.setText("")
+        button.setIcon(fluent_icon.icon(color=color) if fluent_icon is not None
+                       else rail_icon(mode, color))
+        button.setIconSize(QSize(18, 18))
+
     def _build_inspector_shell(self) -> QFrame:
         shell = QFrame()
         shell.setMinimumWidth(self._INSPECTOR_RAIL_WIDTH)
@@ -1466,160 +2179,273 @@ class MetadataEditorPanel(QWidget):
         content_layout.setSpacing(0)
 
         header = QFrame()
-        header.setFixedHeight(34)
+        header.setObjectName("tagEditorInspectorHeader")
         self._inspector_header = header
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 4, 6, 4)
-        header_layout.setSpacing(6)
-        self._inspector_title_lbl = QLabel(t("meta_edit_tags_group"))
-        self._inspector_title_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
-        header_layout.addWidget(self._inspector_title_lbl)
-        header_layout.addStretch()
-        content_layout.addWidget(header)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(11, 9, 11, 0)
+        header_layout.setSpacing(0)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(7)
+        self._inspector_title_lbl = QLabel(t("meta_inspector_no_selection_header"))
+        self._inspector_title_lbl.setStyleSheet("font-weight: 800; font-size: 12px;")
+        title_row.addWidget(self._inspector_title_lbl)
+        self._inspector_selection_lbl = QLabel("")
+        self._inspector_selection_lbl.setStyleSheet(
+            f"color: {tag_editor_colors().text_secondary}; font-size: 10.5px;")
+        title_row.addWidget(self._inspector_selection_lbl)
+        title_row.addStretch()
+        self._inspector_collapse_btn = QToolButton()
+        self._inspector_collapse_btn.setText("‹" if QApplication.layoutDirection() == Qt.RightToLeft else "›")
+        self._inspector_collapse_btn.setFixedSize(28, 28)
+        a11y.describe(self._inspector_collapse_btn, t("meta_shell_collapse_inspector"),
+                      tooltip=t("meta_shell_collapse_inspector"))
+        self._inspector_collapse_btn.clicked.connect(lambda: self._set_inspector_collapsed(True))
+        title_row.addWidget(self._inspector_collapse_btn)
+        header_layout.addLayout(title_row)
+        header_layout.addSpacing(8)
 
         self._inspector_pages = QStackedWidget()
         self._inspector = QStackedWidget()
-        self._inspector.setStyleSheet(
-            "QWidget { font-size: 12px; }"
-            "QGroupBox { font-weight: bold; font-size: 12px; margin-top: 10px; padding: 10px 8px 8px 8px; }"
-            "QLineEdit { font-size: 12px; min-height: 24px; padding: 3px 8px; border-radius: 0px; }"
-            "QPushButton { font-size: 12px; padding: 6px 10px; border-radius: 8px; }"
-            "QLabel { font-size: 12px; }"
-        )
+        # Field styling belongs to ``_inspector_pages`` and follows the
+        # reference design.  A local legacy stylesheet here used to override
+        # it, forcing square line edits and inherited label backgrounds.
         self._inspector.addWidget(self._build_inspector_empty())   # 0
         self._inspector.addWidget(self._build_inspector_folder())  # 1
         self._inspector.addWidget(self._build_inspector_tracks())  # 2
-        # Four purpose-built categories (manual edit / derive from filename /
-        # cleanup & clear tags / rename the physical file) — each op appears
-        # in exactly one place, so the rail maps 1:1 onto "what am I trying
-        # to do" instead of leftover groupings from earlier iterations.
-        inspector_tools = [
-            ("details", t("meta_edit_tags_group"), FluentIcon.EDIT, self._inspector),
-            (
-                "actions",
-                t("meta_action_engine_title"),
-                FluentIcon.TAG,
-                self._build_action_engine_page(),
-            ),
-            (
-                "from_filename",
-                t("meta_group_from_filename"),
-                FluentIcon.PASTE,
-                self._build_inspector_actions(
-                    ("title_strip", "title_full", "track_num", "split_at"),
-                ),
-            ),
-            (
-                "cleanup",
-                t("meta_group_cleanup"),
-                FluentIcon.ERASE_TOOL,
-                self._build_inspector_actions(
-                    None,
-                    sections=(
-                        ("meta_section_text_cleanup", ("normalize_spaces", "strip_junk", "album_artist")),
-                        ("meta_section_clear_fields", (
-                            "clear_title", "clear_artist", "clear_album", "clear_album_artist",
-                            "clear_track_num", "clear_year", "clear_genre", "clear_comments",
-                        )),
-                    ),
-                ),
-            ),
-            (
-                "files",
-                t("meta_rename_group"),
-                FluentIcon.DOCUMENT,
-                self._build_inspector_actions(
-                    ("clean_filename", "strip_filename_numbering"),
-                ),
-            ),
-            (
-                "duplicates",
-                t("meta_duplicates_tools_title"),
-                FluentIcon.FINGERPRINT,
-                self._build_duplicate_tools_page(),
-            ),
-            (
-                "online",
-                t("meta_online_title"),
-                FluentIcon.SEARCH,
-                self._build_online_metadata_page(),
-            ),
-            (
-                "problems",
-                t("meta_problems_title"),
-                FluentIcon.INFO,
-                self._build_problems_page(),
-            ),
+
+        # Three modes answering three different questions — what are these
+        # files, what do I want done to them, what is wrong with them — each
+        # with its own sub-tabs. The flat page list below is deliberately
+        # ordered so its first eight entries are the eight tools the old rail
+        # exposed, in the same order: _select_inspector_tool() is part of the
+        # panel's API and indices 0..7 have to keep meaning what they meant.
+        inspector_panes = [
+            # (mode, title, icon, page)
+            ("edit",  t("meta_edit_tags_group"),        FluentIcon.EDIT,        self._inspector),
+            ("tools", t("meta_action_engine_title"),    FluentIcon.TAG,         self._build_action_engine_page()),
+            ("tools", t("meta_group_from_filename"),    FluentIcon.PASTE,
+             self._build_inspector_actions(
+                 ("title_strip", "title_full", "track_num", "split_at"),
+                 note_key="meta_filename_ops_note")),
+            ("tools", t("meta_group_cleanup"),          FluentIcon.ERASE_TOOL,
+             self._build_inspector_actions(
+                 None,
+                 note_key="meta_cleanup_warn_note",
+                 settings_key="meta_clean_settings_open",
+                 settings_handler=self._on_clean_settings,
+                 sections=(
+                     ("meta_section_text_cleanup", (
+                         "normalize_spaces", "strip_junk", "album_artist",
+                         "replace_text", "change_case", "number_tracks",
+                     )),
+                     ("meta_section_clear_fields", (
+                         "clear_title", "clear_artist", "clear_album", "clear_album_artist",
+                         "clear_track_num", "clear_year", "clear_genre", "clear_comments",
+                     )),
+                 ),
+             )),
+            ("tools", t("meta_rename_group"),           FluentIcon.DOCUMENT,
+             self._build_inspector_actions(
+                 ("clean_filename", "strip_filename_numbering", "rename_from_title"),
+                 note_key="meta_rename_ops_note",
+                 settings_key="meta_clean_settings_open",
+                 settings_handler=self._on_clean_settings)),
+            # The scan is an action, so it sits with the other actions under
+            # Tools; what the scan found is a verdict to come back to, so it
+            # lives on its own Check pane (index 15) instead.
+            ("tools", t("meta_duplicates_tools_title"), FluentIcon.FINGERPRINT, self._build_duplicate_tools_page()),
+            ("tools", t("meta_online_title"),           FluentIcon.SEARCH,      self._build_online_metadata_page()),
+            ("check", t("meta_problems_title"),         FluentIcon.INFO,        self._build_problems_page()),
+            # Everything past here is new to the redesign.
+            ("edit",  t("meta_inspector_artwork_section"),         FluentIcon.PHOTO,   self._build_edit_artwork_page()),
+            ("edit",  t("meta_inspector_lyrics_section"),          FluentIcon.FONT,    self._build_edit_lyrics_page()),
+            ("edit",  t("meta_inspector_replaygain_section"),      FluentIcon.VOLUME,  self._build_edit_gain_page()),
+            ("edit",  t("meta_inspector_file_properties_section"), FluentIcon.INFO,    self._build_edit_properties_page()),
+            ("tools", t("meta_auto_btn").strip(),                  FluentIcon.BRUSH,   self._build_tools_auto_page()),
+            ("check", t("meta_pending_tab"),                       FluentIcon.VIEW,    self._build_check_pending_page()),
+            ("check", t("meta_external_tab"),                      FluentIcon.SYNC,    self._build_check_external_page()),
+            ("check", t("meta_dupes_results_title"),               FluentIcon.FINGERPRINT,
+             self._build_duplicate_results_page()),
         ]
+
+        self._inspector_pane_modes: list[str] = []
         self._inspector_tool_titles: list[str] = []
         self._inspector_tool_buttons: list[QPushButton] = []
         self._inspector_tool_kinds: list = []
-        for _tool_id, title, icon, page in inspector_tools:
+        for index, (mode, title, icon, page) in enumerate(inspector_panes):
+            self._inspector_pane_modes.append(mode)
             self._inspector_tool_titles.append(title)
             self._inspector_tool_kinds.append(icon)
             self._inspector_pages.addWidget(page)
+
+            # Some chips are inactive when the inspector is first built and
+            # therefore are not inserted into the subtab layout yet.  They
+            # must still have a QObject parent; otherwise they become
+            # top-level widgets, survive panel deletion, and accumulate across
+            # test sessions until PySide crashes natively.
+            chip = QPushButton(title, self._inspector_content)
+            chip.setObjectName("tagEditorSubtab")
+            chip.setCheckable(True)
+            chip.setFixedHeight(25)
+            # Translated labels can contain the same mnemonic marker (for
+            # example two English labels both produce Alt+Space).  The tabs
+            # are reachable through the normal focus order, so leave their
+            # shortcut empty rather than registering ambiguous global keys.
+            chip.setShortcut(QKeySequence())
+            a11y.describe(chip, title, tooltip=title)
+            chip.clicked.connect(lambda _=False, i=index: self._toggle_inspector_tool(i))
+            self._inspector_tool_buttons.append(chip)
+
+        header_layout.addWidget(self._build_inspector_mode_tabs())
+        header_layout.addWidget(self._build_inspector_subtabs())
+        content_layout.addWidget(header)
         content_layout.addWidget(self._inspector_pages, stretch=1)
 
         self._inspector_rail = QFrame()
         self._inspector_rail.setFixedWidth(self._INSPECTOR_RAIL_WIDTH)
         rail_layout = QVBoxLayout(self._inspector_rail)
-        rail_layout.setContentsMargins(5, 6, 5, 6)
+        # The prototype's `.collapsed-inspector`: padding 8px 0, gap 6, centred.
+        rail_layout.setContentsMargins(0, 8, 0, 8)
         rail_layout.setSpacing(6)
 
-        for index, title in enumerate(self._inspector_tool_titles):
+        # Collapsed, the rail offers the three modes rather than every pane:
+        # a 40px strip cannot carry twelve legible targets.
+        for mode in ("edit", "tools", "check"):
             btn = QPushButton()
-            btn.setFixedSize(30, 30)
-            self._set_tool_button_icon(btn, self._inspector_tool_kinds[index])
-            # Icon-only: without an explicit name a screen reader announces
-            # nothing at all for the whole inspector rail.
-            a11y.describe(btn, title, tooltip=title)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _=False, i=index: self._toggle_inspector_tool(i))
-            self._inspector_tool_buttons.append(btn)
-            rail_layout.addWidget(btn)
+            btn.setFixedSize(32, 32)
+            self._set_rail_button_icon(btn, mode)
+            label = self._inspector_mode_label(mode)
+            a11y.describe(btn, label, tooltip=label)
+            btn.clicked.connect(
+                lambda _=False, m=mode: self._open_inspector_mode(m))
+            self._inspector_rail_buttons[mode] = btn
+            rail_layout.addWidget(btn, alignment=Qt.AlignHCenter)
+            rail_label = QLabel(label)
+            rail_label.setAlignment(Qt.AlignCenter)
+            rail_label.setStyleSheet(
+                f"color: {tag_editor_colors().text_secondary}; font-size: 9px; font-weight: 800;")
+            rail_layout.addWidget(rail_label)
         rail_layout.addStretch()
 
         shell_layout.addWidget(self._inspector_content, stretch=1)
         shell_layout.addWidget(self._inspector_rail)
+        # Explicit rather than relying on a later page's build to do it: the
+        # Actions page is built first and its rows would otherwise be styled
+        # only as a side effect of the pages that happen to follow it.
+        self._refresh_op_rows_style()
         self._select_inspector_tool(0)
         return shell
 
-    def _build_action_engine_page(self) -> QWidget:
+    # Registry categories, in the order they are offered on the Actions page.
+    # "clear" is deliberately absent: those eight live as compact buttons on
+    # the Clean Up page and would only be noise repeated here.
+    _ACTION_CATEGORY_KEYS: tuple[tuple[str, str], ...] = (
+        ("template", "meta_action_category_template"),
+        ("cleanup", "meta_action_category_cleanup"),
+        ("edit", "meta_action_category_edit"),
+        ("organize", "meta_action_category_organize"),
+        ("filename_to_tags", "meta_group_from_filename"),
+        ("filename", "meta_action_category_filename"),
+    )
+
+    def _build_action_engine_page(self) -> QScrollArea:
+        """Tools > Actions.
+
+        The page was a paragraph and one button, which made the registry's
+        most capable actions -- the two template converters, find and replace,
+        case conversion, track numbering -- reachable only by opening a modal
+        and hunting through a flat 23-entry combo box.  Listing them here is
+        what makes them findable; each row opens the engine on that action.
+        """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 14, 12, 14)
         layout.setSpacing(10)
-        title = QLabel(t("meta_action_engine_page_title"))
-        title.setWordWrap(True)
-        title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(title)
+        layout.setAlignment(Qt.AlignTop)
+
         body = QLabel(t("meta_action_engine_page_body"))
         body.setWordWrap(True)
+        body.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(body)
-        self._action_engine_btn = QPushButton(t("meta_action_engine_open"))
+
+        self._action_engine_btn = ElidedPushButton(t("meta_action_engine_open"))
         self._action_engine_btn.setIcon(FluentIcon.TAG.icon())
         self._action_engine_btn.setAccessibleName(t("meta_action_engine_open"))
-        self._action_engine_btn.clicked.connect(self._on_action_engine)
+        self._action_engine_btn.setProperty("accentRole", "primary")
+        self._action_engine_btn.setStyleSheet(primary_btn_style())
+        # Not a bare connect: QPushButton.clicked would pass its checked flag
+        # straight into initial_action_id.
+        self._action_engine_btn.clicked.connect(lambda: self._on_action_engine())
         layout.addWidget(self._action_engine_btn)
-        layout.addStretch()
-        return page
 
-    def _create_action_engine_dialog(self) -> TagActionDialog:
+        from core.tag_actions import builtin_registry
+        by_category: dict[str, list] = {}
+        for action in builtin_registry().actions():
+            by_category.setdefault(action.category, []).append(action)
+
+        for category, header_key in self._ACTION_CATEGORY_KEYS:
+            actions = by_category.get(category, ())
+            if not actions:
+                continue
+            header = QLabel(t(header_key))
+            header.setStyleSheet(
+                f"color: {tag_editor_colors().text_secondary};"
+                " font-size: 11px; font-weight: 800; margin-top: 4px;")
+            layout.addWidget(header)
+            for action in actions:
+                label = t(action.name_key)
+                row = OpRow(label)
+                a11y.describe(row, label, description=t(action.description_key))
+                row.clicked.connect(
+                    lambda action_id=action.id: self._on_action_engine(action_id))
+                info = self._make_op_side_button("", t(action.description_key))
+                info.setIcon(FluentIcon.INFO.icon())
+                info.setIconSize(QSize(14, 14))
+                a11y.describe(info, t("meta_a11y_about_action", action=label),
+                              description=t(action.description_key))
+                info.clicked.connect(
+                    lambda _=False, l=label, d=t(action.description_key): self._show_info(l, d))
+                row.add_side_button(info)
+                layout.addWidget(row)
+                # A separate registry from _op_rows on purpose: those run on
+                # the table selection and are greyed without one, while these
+                # open the engine, which carries its own scope picker.
+                self._action_catalog_rows.append(row)
+
+        layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        return scroll
+
+    def _create_action_engine_dialog(self, initial_action_id: str = "") -> TagActionDialog:
         return TagActionDialog(
             self._workspace,
             active_folder=self._navigation.current,
             parent=self,
             accept_preview=self._accept_tag_action_preview,
             open_preset_transfer=self._on_metadata_io,
+            initial_action_id=initial_action_id,
         )
 
-    def _on_action_engine(self) -> None:
-        dialog = self._create_action_engine_dialog()
+    def _on_action_engine(self, initial_action_id: str = "") -> None:
+        """Open the action engine, optionally landing on one action.
+
+        The parameterised operations in the Tools pages route here: they are
+        real actions in the registry, but they need a value before they can
+        run, and the engine is where values are entered and previewed.
+        """
+        dialog = self._create_action_engine_dialog(initial_action_id)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._model.refresh_all()
             self._update_summary()
             self._refresh_checked_scope_state()
-            self._populate_track_inspector()
+            tracks = self._get_selected_tracks()
+            if tracks:
+                self._populate_track_inspector(tracks)
 
     def _ordered_io_item_ids(self) -> tuple[int, ...]:
         visible = list(self._proxy.visible_tracks())
@@ -1664,10 +2490,10 @@ class MetadataEditorPanel(QWidget):
     def _build_online_metadata_page(self) -> QWidget:
         page = QWidget(); layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 14, 12, 14); layout.setSpacing(10)
-        title = QLabel(t("meta_online_title")); title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        title = QLabel(t("meta_online_title")); title.setWordWrap(True); title.setStyleSheet("font-weight: bold; font-size: 13px;")
         body = QLabel(t("meta_online_explicit_search_hint")); body.setWordWrap(True)
         self._online_scope_label = QLabel(t("meta_online_scope", n=0)); self._online_scope_label.setWordWrap(True)
-        self._online_open_button = QPushButton(t("meta_online_open")); self._online_open_button.setAccessibleName(t("meta_online_open"))
+        self._online_open_button = ElidedPushButton(t("meta_online_open")); self._online_open_button.setAccessibleName(t("meta_online_open"))
         self._online_open_button.clicked.connect(self._on_online_metadata)
         for widget in (title, body, self._online_scope_label, self._online_open_button): layout.addWidget(widget)
         layout.addStretch(); return page
@@ -1675,7 +2501,7 @@ class MetadataEditorPanel(QWidget):
     def _on_online_metadata(self) -> None:
         tracks = self._workspace.selected_tracks()
         if not tracks:
-            show_warning(self, t("meta_online_title"), t("meta_online_select_files")); return
+            prompts.show_warning(self, t("meta_online_title"), t("meta_online_select_files")); return
         ids = tuple(sorted(self._workspace.item_id(item) for item in tracks))
         dialog = OnlineMetadataDialog(
             self._workspace, ids, parent=self,
@@ -1733,42 +2559,113 @@ class MetadataEditorPanel(QWidget):
         op_keys: Optional[tuple[str, ...]],
         *,
         sections: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None,
+        note_key: str = "",
+        settings_key: str = "",
+        settings_handler=None,
+        extra: Optional[QWidget] = None,
     ) -> QScrollArea:
         # No inline title here — the persistent inspector header
         # (self._inspector_title_lbl) already shows the active category name,
         # so repeating it inside the page just duplicated the same text twice.
         w = QWidget()
+        # Keep this actions page white all the way to its lower edge.  Without
+        # an explicit surface Qt can expose the app's gray scroll background
+        # underneath the compact field-clear buttons.
+        w.setStyleSheet(f"background: {tag_editor_colors().surface};")
         layout = QVBoxLayout(w)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
 
+        if note_key:
+            note = QLabel(t(note_key))
+            note.setWordWrap(True)
+            note.setObjectName("tagEditorInspectorNote")
+            layout.addWidget(note)
+
         layout.addWidget(self._build_magic_ops_widget(op_keys, sections=sections))
+        if settings_key and settings_handler is not None:
+            # A full-width entry rather than only the gear on one row: the
+            # settings govern the whole page, and a 28px icon on a single
+            # operation is not where anyone looks for them.
+            settings_btn = ElidedPushButton(t(settings_key))
+            settings_btn.setIcon(FluentIcon.SETTING.icon(color=get_colors().text_primary))
+            settings_btn.setIconSize(QSize(14, 14))
+            settings_btn.setStyleSheet(btn_style())
+            a11y.describe(settings_btn, t(settings_key))
+            settings_btn.clicked.connect(settings_handler)
+            layout.addWidget(settings_btn)
+        if extra is not None:
+            layout.addWidget(extra)
         layout.addStretch()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(w)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        surface = tag_editor_colors().surface
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {surface}; }}"
+            f"QScrollArea > QWidget > QWidget {{ background: {surface}; }}")
         return scroll
 
+    # Index of the Check pane that reports the scan, referenced from the Tools
+    # pane that starts it and from the scan callbacks.
+    _DUPES_RESULTS_PANE = 15
+
     def _build_duplicate_tools_page(self) -> QScrollArea:
+        """Tools > Duplicate Cleanup.
+
+        Starting a scan is the action; reading its verdict is not, so this
+        page carries only the trigger and a way over to the Check pane that
+        holds the findings.
+        """
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
 
-        self._dupes_btn = QPushButton(self._toolbar_text("meta_find_duplicates"))
-        self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color=get_colors().text_primary))
+        note = QLabel(t("meta_dupes_page_note"))
+        note.setWordWrap(True)
+        note.setObjectName("tagEditorInspectorNote")
+        layout.addWidget(note)
+
+        # The pane's one action, so it carries the accent the way every other
+        # tools pane gives its primary button.
+        self._dupes_btn = ElidedPushButton(self._toolbar_text("meta_find_duplicates"))
+        self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color="#ffffff"))
         self._dupes_btn.setIconSize(QSize(16, 16))
         self._dupes_btn.setEnabled(False)
+        self._dupes_btn.setStyleSheet(primary_btn_style())
         a11y.describe(self._dupes_btn, t("meta_find_duplicates"),
                       description=t("meta_dupes_tooltip"),
                       tooltip=t("meta_dupes_tooltip"))
         self._dupes_btn.clicked.connect(self._on_find_duplicates)
         layout.addWidget(self._dupes_btn)
+
+        # Splitting the findings onto the Check pane left this one with nothing
+        # that reacts to the click, so a scan of a large folder read as a dead
+        # button. The action has to report on itself where it was started.
+        self._dupes_status = QLabel("")
+        self._dupes_status.setWordWrap(True)
+        self._dupes_status.setObjectName("tagEditorDupesStatus")
+        self._dupes_status.setProperty("dupeState", "running")
+        self._dupes_status.setVisible(False)
+        self._dupes_status_text: tuple[str, str] = ("", "running")
+        layout.addWidget(self._dupes_status)
+
+        self._dupes_results_btn = ElidedPushButton(t("meta_dupes_show_results"))
+        self._dupes_results_btn.setIcon(FluentIcon.CHEVRON_RIGHT.icon(color=get_colors().text_primary))
+        self._dupes_results_btn.setIconSize(QSize(12, 12))
+        self._dupes_results_btn.setStyleSheet(btn_style())
+        self._dupes_results_btn.setVisible(False)
+        a11y.describe(self._dupes_results_btn, t("meta_dupes_show_results"),
+                      tooltip=t("meta_dupes_show_results"))
+        self._dupes_results_btn.clicked.connect(
+            lambda: self._select_inspector_tool(self._DUPES_RESULTS_PANE))
+        layout.addWidget(self._dupes_results_btn)
+
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -1777,6 +2674,184 @@ class MetadataEditorPanel(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         return scroll
+
+    def _build_duplicate_results_page(self) -> QScrollArea:
+        """Check > Duplicates.
+
+        Findings used to disappear with the manager dialog, so the only way
+        back to them was to rescan.  They are kept here instead, summarised,
+        with the manager one click away.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignTop)
+
+        note = QLabel(t("meta_dupes_results_note"))
+        note.setWordWrap(True)
+        note.setObjectName("tagEditorInspectorNote")
+        layout.addWidget(note)
+
+        self._dupes_summary = QLabel(t("meta_dupes_never_scanned"))
+        self._dupes_summary.setWordWrap(True)
+        self._dupes_summary.setObjectName("tagEditorSectionTitle")
+        layout.addWidget(self._dupes_summary)
+
+        self._dupes_groups = QWidget()
+        self._dupes_groups_layout = QVBoxLayout(self._dupes_groups)
+        self._dupes_groups_layout.setContentsMargins(0, 0, 0, 0)
+        self._dupes_groups_layout.setSpacing(6)
+        layout.addWidget(self._dupes_groups)
+
+        # Deleting is what this pane leads to, so the manager gets the accent
+        # and the way back to a fresh scan stays a quiet secondary.
+        self._dupes_reopen_btn = ElidedPushButton(t("meta_dupes_reopen"))
+        self._dupes_reopen_btn.setStyleSheet(primary_btn_style())
+        self._dupes_reopen_btn.setVisible(False)
+        a11y.describe(self._dupes_reopen_btn, t("meta_dupes_reopen"),
+                      tooltip=t("meta_dupes_reopen"))
+        self._dupes_reopen_btn.clicked.connect(self._reopen_duplicate_manager)
+        layout.addWidget(self._dupes_reopen_btn)
+
+        self._dupes_rescan_btn = ElidedPushButton(t("meta_dupes_rescan"))
+        self._dupes_rescan_btn.setStyleSheet(btn_style())
+        a11y.describe(self._dupes_rescan_btn, t("meta_dupes_rescan"),
+                      tooltip=t("meta_dupes_tooltip"))
+        self._dupes_rescan_btn.clicked.connect(self._on_rescan_duplicates)
+        layout.addWidget(self._dupes_rescan_btn)
+
+        layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(w)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        return scroll
+
+    @staticmethod
+    def _duplicate_group_list(groups) -> list:
+        """Normalise the two shapes the duplicate scan can return."""
+        return list(getattr(groups, "groups", groups) or ())
+
+    @staticmethod
+    def _duplicate_group_paths(group) -> list:
+        """The files in one group.
+
+        A DuplicateGroup calls them ``paths``; a group that arrived as a bare
+        sequence is already the list.  Reading a ``files`` attribute that no
+        shape has ever had raised straight out of the scan-complete slot, so
+        no manager dialog ever opened for a folder that did have duplicates.
+        """
+        paths = getattr(group, "paths", None)
+        if paths is not None:
+            return list(paths)
+        return list(group) if isinstance(group, (list, tuple, set)) else []
+
+    def _set_duplicate_status(self, text: str, state: str = "running") -> None:
+        """Report scan progress on the Tools pane that started it.
+
+        ``state`` drives the colour through the pane stylesheet: a scan in
+        flight, a verdict, and a failure must not look alike.
+        """
+        if not hasattr(self, "_dupes_status"):
+            return
+        # Touching a widget on this panel costs a relayout of the whole thing,
+        # so a running scan must not pay for a pane nobody is looking at. The
+        # text is re-applied when the pane is opened.
+        self._dupes_status_text = (text, state)
+        if self._active_inspector_tool != self._inspector_tool_titles.index(
+                t("meta_duplicates_tools_title")):
+            return
+        self._dupes_status.setText(text)
+        self._dupes_status.setVisible(bool(text))
+        if self._dupes_status.property("dupeState") != state:
+            self._dupes_status.setProperty("dupeState", state)
+            # Qt only re-evaluates property selectors on an explicit repolish.
+            self._dupes_status.style().unpolish(self._dupes_status)
+            self._dupes_status.style().polish(self._dupes_status)
+
+    def _on_rescan_duplicates(self) -> None:
+        """Run a fresh scan from the findings pane, showing it where it runs."""
+        if not self._root_folder:
+            return
+        self._select_inspector_tool(self._inspector_tool_titles.index(
+            t("meta_duplicates_tools_title")))
+        self._on_find_duplicates()
+
+    def _reset_duplicate_results(self) -> None:
+        """Forget the last scan, so the Check pane reads as never-scanned."""
+        self._last_duplicate_scan = None
+        if not hasattr(self, "_dupes_groups_layout"):
+            return
+        self._clear_dynamic_layout(self._dupes_groups_layout)
+        self._dupes_summary.setText(t("meta_dupes_never_scanned"))
+        self._dupes_reopen_btn.setVisible(False)
+        self._dupes_results_btn.setVisible(False)
+        self._set_duplicate_status("")
+
+    def _render_duplicate_groups(self, groups) -> None:
+        """Summarise the last duplicate scan without reopening the manager."""
+        if not hasattr(self, "_dupes_groups_layout"):
+            return
+        self._clear_dynamic_layout(self._dupes_groups_layout)
+        entries = self._duplicate_group_list(groups)
+        # A scan that found nothing is still a result worth returning to, so
+        # the Tools page keeps pointing at it either way.
+        self._dupes_results_btn.setVisible(True)
+        if not entries:
+            self._dupes_summary.setText(t("meta_dupes_none_found"))
+            self._dupes_reopen_btn.setVisible(False)
+            return
+        total = sum(len(self._duplicate_group_paths(group)) for group in entries)
+        self._dupes_summary.setText(
+            t("meta_dupes_summary", groups=len(entries), files=total))
+        for group in entries[:20]:
+            files = self._duplicate_group_paths(group)
+            row = QFrame()
+            row.setObjectName("tagEditorPendingItem")
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(9, 8, 9, 8)
+            row_layout.setSpacing(3)
+            name = ElidedLabel(t("meta_dupes_group_title",
+                                 name=Path(files[0]).name if files else "",
+                                 n=len(files)),
+                               mode=Qt.TextElideMode.ElideMiddle)
+            name.setObjectName("tagEditorPendingChange")
+            name.setLayoutDirection(Qt.LeftToRight)
+            name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            where = QLabel(str(Path(files[0]).parent) if files else "")
+            where.setObjectName("tagEditorPendingFile")
+            where.setWordWrap(True)
+            where.setLayoutDirection(Qt.LeftToRight)
+            row_layout.addWidget(name)
+            row_layout.addWidget(where)
+            # Which of the two strategies matched this group decides whether
+            # deleting from it is safe, so it is stated on the group itself
+            # rather than left to the manager dialog.
+            confidence_key = getattr(group, "confidence_key", None)
+            if confidence_key:
+                evidence = QLabel(t(confidence_key))
+                evidence.setObjectName("tagEditorDupesMeta")
+                evidence.setWordWrap(True)
+                row_layout.addWidget(evidence)
+            self._dupes_groups_layout.addWidget(row)
+        self._dupes_reopen_btn.setVisible(True)
+
+    def _open_duplicate_manager(self, groups, elapsed: float, strategy: str) -> None:
+        """Show the manager for a scan result and forward what it selected."""
+        from ui.dialogs.duplicate_files_dialog import DuplicateFilesDialog
+        dlg = DuplicateFilesDialog(groups, elapsed, strategy, self._root_folder, parent=self)
+        if dlg.exec() == QDialog.Accepted and dlg.files_to_delete:
+            self.delete_duplicates_requested.emit(dlg.files_to_delete)
+
+    def _reopen_duplicate_manager(self) -> None:
+        """Show the manager again for a scan that already ran."""
+        cached = getattr(self, "_last_duplicate_scan", None)
+        if cached is None:
+            return
+        self._open_duplicate_manager(*cached)
 
     def _build_problems_page(self) -> QScrollArea:
         page = QWidget()
@@ -1786,7 +2861,10 @@ class MetadataEditorPanel(QWidget):
         self._problems_summary = QLabel(t("meta_problems_empty"))
         self._problems_summary.setWordWrap(True)
         layout.addWidget(self._problems_summary)
-        filters = QHBoxLayout()
+        # Four filters in a fixed row wanted 852px -- three times the pane's
+        # own minimum -- so everything past the third combo was cut off with
+        # no way to scroll to it.
+        filters = ResponsiveButtonFlow(fill=True)
         self._problems_severity = QComboBox()
         self._problems_severity.addItem(t("meta_problems_all"), "")
         for key in ("information", "warning", "error", "blocker"):
@@ -1806,11 +2884,13 @@ class MetadataEditorPanel(QWidget):
         self._problems_category.currentIndexChanged.connect(self._render_problems)
         self._problems_state.currentIndexChanged.connect(self._render_problems)
         self._problems_search.textChanged.connect(self._render_problems)
-        filters.addWidget(self._problems_severity)
-        filters.addWidget(self._problems_category)
-        filters.addWidget(self._problems_state)
-        filters.addWidget(self._problems_search, stretch=1)
-        layout.addLayout(filters)
+        for control in (self._problems_severity, self._problems_category,
+                        self._problems_state, self._problems_search):
+            # A combo box elides its own current entry once it is allowed to
+            # shrink; without this its widest item is a hard floor.
+            control.setMinimumWidth(96)
+            filters.add_widget(control)
+        layout.addWidget(filters)
         self._problems_table = QTableWidget(0, 7)
         self._problems_table.setHorizontalHeaderLabels([t("meta_problems_severity"), t("meta_problems_problem"),
                                                          t("meta_problems_category"), t("meta_problems_state"),
@@ -1822,17 +2902,18 @@ class MetadataEditorPanel(QWidget):
         self._problem_selected_ids: set[str] = set()
         self._problems_table.itemSelectionChanged.connect(self._remember_problem_selection)
         layout.addWidget(self._problems_table, stretch=1)
-        controls = QHBoxLayout()
-        refresh = QPushButton(t("meta_problems_revalidate"))
+        controls = ResponsiveButtonFlow(fill=True)
+        refresh = ElidedPushButton(t("meta_problems_revalidate"))
         refresh.setAccessibleName(t("meta_problems_revalidate"))
         refresh.clicked.connect(self._begin_revalidate_problems)
-        fix = QPushButton(t("meta_problems_fix_selected"))
+        fix = ElidedPushButton(t("meta_problems_fix_selected"))
         fix.setAccessibleName(t("meta_problems_fix_selected"))
         fix.clicked.connect(self._on_fix_selected_problems)
-        select_all = QPushButton(t("meta_problems_select_all")); select_all.clicked.connect(self._problems_table.selectAll)
-        clear = QPushButton(t("meta_problems_clear_selection")); clear.clicked.connect(self._problems_table.clearSelection)
-        controls.addWidget(refresh); controls.addWidget(select_all); controls.addWidget(clear); controls.addWidget(fix); controls.addStretch()
-        layout.addLayout(controls)
+        select_all = ElidedPushButton(t("meta_problems_select_all")); select_all.clicked.connect(self._problems_table.selectAll)
+        clear = ElidedPushButton(t("meta_problems_clear_selection")); clear.clicked.connect(self._problems_table.clearSelection)
+        for button in (refresh, select_all, clear, fix):
+            controls.add_button(button)
+        layout.addWidget(controls)
         self._problems_snapshot = None
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1909,17 +2990,20 @@ class MetadataEditorPanel(QWidget):
         snapshot = getattr(self, "_problems_snapshot", None)
         issues = [] if snapshot is None else [issue for issue in snapshot.issues if issue.id in set(issue_ids)]
         if not issues or not all(issue.fixable for issue in issues):
-            show_warning(self, t("meta_problems_title"), t("meta_problems_no_safe_fix"))
+            prompts.show_warning(self, t("meta_problems_title"), t("meta_problems_no_safe_fix"))
             return
-        value, ok = get_text(self, t("meta_problems_fix_selected"), t("meta_problems_value"), text=text)
+        value, ok = prompts.get_text(self, t("meta_problems_fix_selected"), t("meta_problems_value"), text=text)
         if not ok or not value.strip():
             return
         self.problem_fix_preview_requested.emit(list(issue_ids), value.strip())
 
     def on_problem_fix_preview(self, preview) -> None:
         """Render the immutable Phase 9 action preview; never reconstruct it."""
-        dialog = QDialog(self); dialog.setWindowTitle(t("meta_problems_preview_title")); dialog.resize(760, 430)
+        dialog = QDialog(self); mark_tag_editor_dialog(dialog)
+        dialog.setWindowTitle(t("meta_problems_preview_title")); dialog.resize(760, 430)
         layout = QVBoxLayout(dialog)
+        add_header(layout, t("meta_problems_preview_title"),
+                   t("meta_problems_preview_subtitle"), icon=FluentIcon.EDIT.icon())
         action = getattr(preview, "action_preview", None)
         deltas = () if action is None else action.deltas
         changed = sum(delta.status is ActionResultStatus.CHANGED for delta in deltas)
@@ -1954,17 +3038,110 @@ class MetadataEditorPanel(QWidget):
             self._request_problem_fix(preview.issue_ids, text=preview.value)
 
     def on_problem_fix_preview_failed(self, message: str) -> None:
-        show_warning(self, t("meta_problems_title"), message)
+        prompts.show_warning(self, t("meta_problems_title"), message)
+
+    _INSPECTOR_MODE_KEYS = {
+        "edit": "meta_inspector_mode_edit",
+        "tools": "meta_inspector_mode_tools",
+        "check": "meta_inspector_mode_check",
+    }
+
+    @classmethod
+    def _inspector_mode_label(cls, mode: str) -> str:
+        return t(cls._INSPECTOR_MODE_KEYS[mode])
+
+    def _build_inspector_mode_tabs(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("tagEditorModeTabs")
+        bar.setFixedHeight(35)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(3)
+        self._inspector_mode_buttons: dict[str, QPushButton] = {}
+        for mode in ("edit", "tools", "check"):
+            label = self._inspector_mode_label(mode)
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setObjectName("tagEditorModeTab")
+            btn.setFixedHeight(27)
+            a11y.describe(btn, label, tooltip=label)
+            btn.clicked.connect(lambda _=False, m=mode: self._open_inspector_mode(m))
+            self._inspector_mode_buttons[mode] = btn
+            layout.addWidget(btn, stretch=1)
+        return bar
+
+    def _build_inspector_subtabs(self) -> QScrollArea:
+        """Chips for the panes of the active mode; rebuilt whenever it changes."""
+        self._inspector_subtab_host = QWidget()
+        self._inspector_subtab_layout = QHBoxLayout(self._inspector_subtab_host)
+        self._inspector_subtab_layout.setContentsMargins(0, 8, 0, 9)
+        self._inspector_subtab_layout.setSpacing(5)
+        self._inspector_subtab_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setObjectName("tagEditorSubtabs")
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(42)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Explicit minimum overrides the widgetResizable "avoid a scrollbar by
+        # growing" size hint (qSmartMinSize gives an explicit minimumWidth
+        # priority over the content-derived minimumSizeHint) -- without this
+        # the splitter gets shoved open to fit the widest chip row instead of
+        # showing a horizontal scrollbar.
+        scroll.setMinimumWidth(1)
+        scroll.setWidget(self._inspector_subtab_host)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._inspector_subtab_scroll = scroll
+        return scroll
+
+    def _open_inspector_mode(self, mode: str) -> None:
+        """Switch modes, landing on that mode's first pane."""
+        if self._right_collapsed:
+            self._set_inspector_collapsed(False)
+        if self._inspector_pane_modes[self._active_inspector_tool] == mode:
+            return
+        first_for_mode = {"edit": 0, "tools": 12, "check": 13}
+        self._select_inspector_tool(first_for_mode[mode])
+
+    def _rebuild_inspector_subtabs(self) -> None:
+        active_mode = self._inspector_pane_modes[self._active_inspector_tool]
+        while self._inspector_subtab_layout.count():
+            item = self._inspector_subtab_layout.takeAt(0)
+            if item.widget() is not None:
+                # Keep the button in the inspector's QObject tree.  Detaching
+                # it with setParent(None) leaves inactive mode buttons alive
+                # only through Python references, which can make Qt/PySide
+                # tear them down in the wrong order at interpreter exit.
+                item.widget().setVisible(False)
+        visual_order = {
+            "edit": (0, 8, 9, 10, 11),
+            "tools": (12, 1, 2, 3, 4, 5, 6),
+            "check": (13, 7, self._DUPES_RESULTS_PANE, 14),
+        }
+        for index in visual_order[active_mode]:
+            self._inspector_subtab_layout.addWidget(self._inspector_tool_buttons[index])
+            self._inspector_tool_buttons[index].setVisible(True)
+        self._inspector_subtab_layout.addStretch()
+        self._inspector_subtabs_mode = active_mode
 
     def _select_inspector_tool(self, index: int) -> None:
         self._active_inspector_tool = index
         if hasattr(self, "_inspector_pages"):
             self._inspector_pages.setCurrentIndex(index)
-        if hasattr(self, "_inspector_title_lbl"):
-            titles = getattr(self, "_inspector_tool_titles", [])
-            self._inspector_title_lbl.setText(titles[index] if 0 <= index < len(titles) else "")
         if self._right_collapsed:
             self._set_inspector_collapsed(False)
+        # Only rebuild the chip row when the mode actually changed -- tearing
+        # the layout down and re-adding the same chips on every click (even
+        # within the same mode) resets the subtab QScrollArea's horizontal
+        # scroll position, undoing any manual scroll the user just did.
+        if (hasattr(self, "_inspector_subtab_layout")
+                and self._inspector_pane_modes[index] != self._inspector_subtabs_mode):
+            self._rebuild_inspector_subtabs()
+        # Opening the pane is when the deferred scan status becomes worth paying
+        # a relayout for.
+        if hasattr(self, "_dupes_status_text"):
+            self._set_duplicate_status(*self._dupes_status_text)
         self._refresh_tool_button_states()
 
     def _toggle_inspector_tool(self, index: int) -> None:
@@ -1974,809 +3151,57 @@ class MetadataEditorPanel(QWidget):
         self._select_inspector_tool(index)
 
     def _refresh_tool_button_states(self) -> None:
+        """Track which pane is open.
+
+        Appearance for the mode tabs and sub-tab chips comes from their
+        stylesheets' :checked rule (see _apply_shell_theme), so for those this
+        only sets state. Checked state is also what carries "this one is open"
+        to a screen reader and in high contrast, where a background colour does
+        not. The collapsed rail is the exception: it is restyled outright,
+        because it needs its icons re-tinted after a theme change.
+        """
         c = get_colors()
         button_qss = (
             "QPushButton { background: transparent; border: none; border-radius: 8px; padding: 3px; }"
             f"QPushButton:hover {{ background: {c.surface2}; }}"
         )
-        active_qss = (
-            f"QPushButton {{ background: {c.surface2}; border: 1px solid {c.border};"
-            " border-radius: 8px; padding: 3px; }"
+        open_pane = self._active_inspector_tool
+        expanded = not self._right_collapsed
+        active_mode = (
+            self._inspector_pane_modes[open_pane]
+            if self._inspector_pane_modes else None
         )
-        if hasattr(self, "_inspector_tool_buttons"):
-            for idx, btn in enumerate(self._inspector_tool_buttons):
-                active = idx == self._active_inspector_tool and not self._right_collapsed
-                btn.setStyleSheet(active_qss if active else button_qss)
-                # Which tool is open was previously shown by background colour
-                # alone.  The checked state carries the same meaning to a screen
-                # reader and in high contrast; the stylesheet above still owns
-                # the appearance, so nothing changes visually.
-                btn.setChecked(active)
-                icon = self._inspector_tool_kinds[idx] if idx < len(self._inspector_tool_kinds) else FluentIcon.EDIT
-                self._set_tool_button_icon(btn, icon)
+
+        for idx, btn in enumerate(getattr(self, "_inspector_tool_buttons", [])):
+            btn.setChecked(idx == open_pane and expanded)
+        for mode, btn in getattr(self, "_inspector_mode_buttons", {}).items():
+            btn.setChecked(mode == active_mode and expanded)
+
+        # The collapsed rail's three modes are cards, all alike -- no selected
+        # state, as in the reference.  Re-icon here too: the tint is theme-bound
+        # and this is the one place the rail is refreshed after a theme change.
+        # Only when the tint actually moved, though -- a splitter drag lands
+        # here on every mouse move, and rasterising three glyphs per pixel is
+        # not what that path is for.
+        rail_qss = rail_btn_style()
+        rail_tint = tag_editor_colors().text_primary
+        retint = rail_tint != self._rail_icon_tint
+        for mode, btn in getattr(self, "_inspector_rail_buttons", {}).items():
+            btn.setStyleSheet(rail_qss)
+            if retint:
+                self._set_rail_button_icon(btn, mode)
+        self._rail_icon_tint = rail_tint
         if hasattr(self, "_tree_toggle_btn"):
             self._tree_toggle_btn.setStyleSheet(button_qss)
             self._set_tool_button_icon(self._tree_toggle_btn, FluentIcon.FOLDER)
 
-    def _set_pane_collapsed(self, pane: int, collapsed: bool) -> None:
-        """Collapse/expand a side pane (0 = tree, 2 = inspector) to/from its rail.
-
-        Expanding takes width from the table first (down to its minimum) and
-        then, if still short of the pane's open minimum, from the other side
-        pane. Collapsing hands the freed width to the table.
-        """
-        if not hasattr(self, "_body_splitter"):
-            return
-        other = 2 if pane == 0 else 0
-        rail, open_min = (
-            (self._TREE_RAIL_WIDTH, self._TREE_OPEN_MIN)
-            if pane == 0
-            else (self._INSPECTOR_RAIL_WIDTH, self._INSPECTOR_OPEN_MIN)
-        )
-        other_rail = self._INSPECTOR_RAIL_WIDTH if pane == 0 else self._TREE_RAIL_WIDTH
-
-        sizes = self._body_splitter.sizes()
-        if len(sizes) != 3:
-            sizes = list(self._DEFAULT_SPLITTER_SIZES)
-
-        if collapsed:
-            if sizes[pane] > rail + 4:
-                last = max(open_min, sizes[pane])
-                if pane == 0:
-                    self._last_tree_width = last
-                else:
-                    self._last_inspector_width = last
-            sizes[1] += max(0, sizes[pane] - rail)
-            sizes[pane] = rail
-        else:
-            last = self._last_tree_width if pane == 0 else self._last_inspector_width
-            want = max(open_min, last)
-            available = max(0, sizes[1] - self._TABLE_OPEN_MIN)
-            take = min(available, max(0, want - sizes[pane]))
-            sizes[pane] += take
-            sizes[1] -= take
-            if sizes[pane] < open_min and sizes[other] > other_rail:
-                extra = min(sizes[other] - other_rail, open_min - sizes[pane])
-                sizes[pane] += extra
-                sizes[other] -= extra
-        self._apply_body_sizes(sizes, save=True)
-
-    def _set_tree_collapsed(self, collapsed: bool) -> None:
-        self._set_pane_collapsed(0, collapsed)
-
-    def _toggle_tree_pane(self) -> None:
-        self._set_tree_collapsed(not self._left_collapsed)
-
-    def _set_inspector_collapsed(self, collapsed: bool) -> None:
-        self._set_pane_collapsed(2, collapsed)
-
-    def _apply_body_sizes(self, sizes: list[int], save: bool) -> None:
-        if not hasattr(self, "_body_splitter"):
-            return
-        sizes = self._normalize_body_sizes(list(sizes))
-        left_collapsed = sizes[0] <= self._TREE_RAIL_WIDTH + 4
-        right_collapsed = sizes[2] <= self._INSPECTOR_RAIL_WIDTH + 4
-        self._sync_collapsed_visuals(left_collapsed, right_collapsed)
-
-        self._ignore_splitter_save = True
-        try:
-            self._body_splitter.setSizes(sizes)
-        finally:
-            self._ignore_splitter_save = False
-        if save:
-            self._save_splitter_sizes(self._body_splitter)
-
-    @staticmethod
-    def _snap_side_size(size: int, rail: int, open_min: int) -> int:
-        """Sanitize a side-pane width: a pane is either collapsed to its rail
-        or open at >= its open minimum — never squished in between (stale
-        saved sizes, old configs)."""
-        if 0 < size < open_min:
-            return rail if size <= rail + 4 else open_min
-        return size
-
-    def _normalize_body_sizes(self, sizes: list[int]) -> list[int]:
-        """Clamp programmatic sizes (config restore, collapse toggles) to the
-        pane invariants. Native drags never pass through here — Qt enforces
-        the same floors via the pane widgets' minimumWidth."""
-        if len(sizes) != 3:
-            sizes = list(self._DEFAULT_SPLITTER_SIZES)
-        sizes = [max(0, int(v)) for v in sizes]
-        total = sum(sizes) or sum(self._DEFAULT_SPLITTER_SIZES)
-
-        sizes[0] = self._snap_side_size(sizes[0], self._TREE_RAIL_WIDTH, self._TREE_OPEN_MIN)
-        sizes[2] = self._snap_side_size(sizes[2], self._INSPECTOR_RAIL_WIDTH, self._INSPECTOR_OPEN_MIN)
-
-        # Keep the table at its minimum by collapsing side panes fully to
-        # their rail if needed (inspector first, then tree). A *partial* cut
-        # would leave a pane squished between its rail and open minimum --
-        # a state _snap_side_size does not allow to persist, so re-snapping
-        # a partial cut can jump it back up to its open minimum and silently
-        # undo the cut. Collapsing to rail outright is the only move that
-        # stays valid without a second snap pass.
-        side_total = sizes[0] + sizes[2]
-        if total - side_total < self._TABLE_OPEN_MIN:
-            deficit = self._TABLE_OPEN_MIN - (total - side_total)
-            if deficit > 0 and sizes[2] > self._INSPECTOR_RAIL_WIDTH:
-                deficit -= sizes[2] - self._INSPECTOR_RAIL_WIDTH
-                sizes[2] = self._INSPECTOR_RAIL_WIDTH
-            if deficit > 0 and sizes[0] > self._TREE_RAIL_WIDTH:
-                deficit -= sizes[0] - self._TREE_RAIL_WIDTH
-                sizes[0] = self._TREE_RAIL_WIDTH
-
-        sizes[1] = max(self._TABLE_OPEN_MIN, total - sizes[0] - sizes[2])
-        overflow = sum(sizes) - total
-        if overflow > 0:
-            sizes[1] = max(0, sizes[1] - overflow)
-        return sizes
-
-    def _sync_collapsed_visuals(self, left_collapsed: bool, right_collapsed: bool) -> None:
-        self._left_collapsed = left_collapsed
-        self._right_collapsed = right_collapsed
-        if hasattr(self, "_tree_rail"):
-            self._tree_rail.setVisible(left_collapsed)
-        if hasattr(self, "_tree_body"):
-            self._tree_body.setVisible(not left_collapsed)
-        if hasattr(self, "_tree_frame"):
-            self._tree_frame.setMaximumWidth(self._TREE_RAIL_WIDTH if left_collapsed else 16777215)
-        if hasattr(self, "_inspector_content"):
-            self._inspector_content.setVisible(not right_collapsed)
-        if hasattr(self, "_inspector_shell"):
-            self._inspector_shell.setMaximumWidth(self._INSPECTOR_RAIL_WIDTH if right_collapsed else 16777215)
-        self._refresh_tool_button_states()
-
-    def _pane_after_shrink(self, current: int, shrink: int, open_min: int, collapsed_width: int) -> int:
-        candidate = current - shrink
-        if candidate >= open_min:
-            return candidate
-        if candidate >= open_min - self._COLLAPSE_DRAG_MARGIN:
-            return open_min
-        return collapsed_width
-
-    def _visual_splitter_delta(self, delta: int) -> int:
-        if self._body_splitter.layoutDirection() == Qt.LayoutDirection.RightToLeft:
-            return -delta
-        return delta
-
-    def _cascade_splitter_sizes(self, handle_index: int, start_sizes: list[int], delta: int) -> list[int]:
-        delta = self._visual_splitter_delta(delta)
-        left, center, right = self._normalize_body_sizes(start_sizes)
-        total = left + center + right
-
-        if handle_index == 1:
-            if delta < 0:
-                left = self._pane_after_shrink(left, -delta, self._TREE_OPEN_MIN, self._TREE_RAIL_WIDTH)
-                center = total - left - right
-            else:
-                center_candidate = center - delta
-                if center_candidate >= self._TABLE_OPEN_MIN:
-                    center = center_candidate
-                elif center_candidate >= self._TABLE_OPEN_MIN - self._COLLAPSE_DRAG_MARGIN:
-                    center = self._TABLE_OPEN_MIN
-                else:
-                    extra = self._TABLE_OPEN_MIN - center_candidate
-                    center = self._TABLE_OPEN_MIN
-                    right = self._pane_after_shrink(right, extra, self._INSPECTOR_OPEN_MIN, self._INSPECTOR_RAIL_WIDTH)
-                left = total - center - right
-        else:
-            if delta > 0:
-                right = self._pane_after_shrink(right, delta, self._INSPECTOR_OPEN_MIN, self._INSPECTOR_RAIL_WIDTH)
-                center = total - left - right
-            else:
-                grow = -delta
-                center_candidate = center - grow
-                if center_candidate >= self._TABLE_OPEN_MIN:
-                    center = center_candidate
-                elif center_candidate >= self._TABLE_OPEN_MIN - self._COLLAPSE_DRAG_MARGIN:
-                    center = self._TABLE_OPEN_MIN
-                else:
-                    extra = self._TABLE_OPEN_MIN - center_candidate
-                    center = self._TABLE_OPEN_MIN
-                    left = self._pane_after_shrink(left, extra, self._TREE_OPEN_MIN, self._TREE_RAIL_WIDTH)
-                right = total - left - center
-
-        return self._normalize_body_sizes([left, center, right])
-
-    def eventFilter(self, obj, event) -> bool:
-        from PySide6.QtCore import QEvent
-        if hasattr(self, "_body_splitter") and obj in (self._body_splitter.handle(1), self._body_splitter.handle(2)):
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._splitter_drag = {
-                    "handle": int(obj.property("metadata_handle_index")),
-                    "x": int(event.globalPosition().x()),
-                    "sizes": self._body_splitter.sizes(),
-                }
-                return True
-            if event_type == QEvent.Type.MouseMove and self._splitter_drag is not None:
-                delta = int(event.globalPosition().x()) - int(self._splitter_drag["x"])
-                sizes = self._cascade_splitter_sizes(
-                    int(self._splitter_drag["handle"]),
-                    list(self._splitter_drag["sizes"]),
-                    delta,
-                )
-                if sizes[0] > self._TREE_RAIL_WIDTH + 4:
-                    self._last_tree_width = sizes[0]
-                if sizes[2] > self._INSPECTOR_RAIL_WIDTH + 4:
-                    self._last_inspector_width = sizes[2]
-                self._apply_body_sizes(sizes, save=False)
-                return True
-            if event_type == QEvent.Type.MouseButtonRelease and self._splitter_drag is not None:
-                self._save_splitter_sizes(self._body_splitter)
-                self._splitter_drag = None
-                return True
-        return super().eventFilter(obj, event)
-
-
-    def _build_inspector_empty(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setAlignment(Qt.AlignCenter)
-        lbl = QLabel(t("meta_select_files_prompt"))
-        lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet(f"color: {get_colors().text_tertiary}; font-size: 13px;")
-        lbl.setWordWrap(True)
-        layout.addWidget(lbl)
-        return w
-
-    def _build_inspector_folder(self) -> QScrollArea:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        layout.setAlignment(Qt.AlignTop)
-
-        self._insp_folder_title = QLabel(t("meta_inspector_no_selection_title"))
-        self._insp_folder_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        self._insp_folder_title.setWordWrap(True)
-        layout.addWidget(self._insp_folder_title)
-        note = QLabel(t("meta_inspector_no_selection_body"))
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 12px;")
-        layout.addWidget(note)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        return scroll
-
-    def _build_inspector_tracks(self) -> QScrollArea:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        layout.setAlignment(Qt.AlignTop)
-
-        self._insp_tracks_title = QLabel(t("meta_tracks_selected_count", n=0))
-        self._insp_tracks_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(self._insp_tracks_title)
-
-        self._insp_capability = QLabel()
-        self._insp_capability.setWordWrap(True)
-        self._insp_capability.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
-        layout.addWidget(self._insp_capability)
-
-        fields_grp = QGroupBox(t("meta_inspector_metadata_section"))
-        fields_layout = QVBoxLayout(fields_grp)
-        fields_layout.setSpacing(6)
-
-        self._insp_fields: dict[str, QLineEdit] = {}
-        self._insp_clear_buttons: dict[str, QToolButton] = {}
-
-        def _field(field_name: str, label: str) -> QLineEdit:
-            row = QHBoxLayout()
-            row.setSpacing(5)
-            lbl = QLabel(label)
-            # A minimum, not a fixed width: a long Hebrew field label at 200%
-            # would otherwise be cut off mid-word.
-            lbl.setMinimumWidth(96)
-            lbl.setStyleSheet("font-size: 12px;")
-            edit = QLineEdit()
-            edit.setPlaceholderText(t("meta_mixed_placeholder"))
-            # The visible QLabel is a sibling, not a buddy, so the field itself
-            # must carry the name a screen reader announces on focus.
-            lbl.setBuddy(edit)
-            a11y.describe(edit, label)
-            edit.textEdited.connect(
-                lambda text, name=field_name: self._mark_insp_field_dirty(name, text)
-            )
-            clear_btn = QToolButton()
-            clear_btn.setText(t("meta_inspector_clear_short"))
-            # Every field row has a button reading just "Clear"; only the
-            # accessible name can say which field this one clears.
-            a11y.describe(
-                clear_btn,
-                t("meta_a11y_clear_named_field", field=label),
-                tooltip=t("meta_inspector_clear_field"))
-            clear_btn.clicked.connect(
-                lambda _checked=False, name=field_name, target=edit: self._clear_insp_field(name, target)
-            )
-            row.addWidget(lbl)
-            row.addWidget(edit)
-            row.addWidget(clear_btn)
-            fields_layout.addLayout(row)
-            self._insp_fields[field_name] = edit
-            self._insp_clear_buttons[field_name] = clear_btn
-            return edit
-
-        field_specs = (
-            ("title", "meta_field_title"), ("artist", "meta_field_artist"),
-            ("album", "meta_field_album"), ("album_artist", "meta_field_album_artist"),
-            ("track_num", "meta_field_track"), ("track_total", "meta_field_track_total"),
-            ("disc_num", "meta_field_disc"), ("disc_total", "meta_field_disc_total"),
-            ("year", "meta_field_date"), ("genre", "meta_field_genre"),
-            ("comment", "meta_field_comment"), ("composer", "meta_field_composer"),
-            ("publisher", "meta_field_publisher"), ("copyright", "meta_field_copyright"),
-            ("bpm", "meta_field_bpm"), ("isrc", "meta_field_isrc"),
-            ("grouping", "meta_field_grouping"), ("sort_title", "meta_field_sort_title"),
-            ("sort_artist", "meta_field_sort_artist"), ("sort_album", "meta_field_sort_album"),
-            ("sort_album_artist", "meta_field_sort_album_artist"),
-        )
-        for field_name, label_key in field_specs:
-            _field(field_name, t(label_key))
-
-        # Compatibility aliases used by existing panel tests and handlers.
-        self._insp_title = self._insp_fields["title"]
-        self._insp_artist = self._insp_fields["artist"]
-        self._insp_album = self._insp_fields["album"]
-        self._insp_album_artist = self._insp_fields["album_artist"]
-        self._insp_track = self._insp_fields["track_num"]
-
-        btn_apply_fields = QPushButton(t("meta_apply_to_selection"))
-        btn_apply_fields.setIcon(FluentIcon.ACCEPT.icon(color="#000000"))
-        btn_apply_fields.setIconSize(QSize(14, 14))
-        btn_apply_fields.setProperty("accentRole", "primary")
-        btn_apply_fields.setStyleSheet(primary_btn_style())
-        btn_apply_fields.clicked.connect(self._on_insp_apply_fields)
-        self._selection_scope_buttons.append(btn_apply_fields)
-        fields_layout.addWidget(btn_apply_fields)
-        layout.addWidget(fields_grp)
-
-        lyrics_grp = QGroupBox(t("meta_inspector_lyrics_section"))
-        lyrics_layout = QVBoxLayout(lyrics_grp)
-        self._insp_lyrics_state = QLabel()
-        self._insp_lyrics_state.setWordWrap(True)
-        lyrics_layout.addWidget(self._insp_lyrics_state)
-        self._insp_lyrics = QTextEdit()
-        self._insp_lyrics.setAcceptRichText(False)
-        self._insp_lyrics.setMinimumHeight(120)
-        self._insp_lyrics.setLayoutDirection(Qt.LayoutDirectionAuto)
-        self._insp_lyrics.textChanged.connect(self._on_lyrics_text_changed)
-        lyrics_layout.addWidget(self._insp_lyrics)
-        lyrics_meta = QHBoxLayout()
-        self._insp_lyrics_language = QLineEdit()
-        self._insp_lyrics_language.setPlaceholderText(t("meta_lyrics_language"))
-        self._insp_lyrics_description = QLineEdit()
-        self._insp_lyrics_description.setPlaceholderText(t("meta_lyrics_description"))
-        lyrics_meta.addWidget(self._insp_lyrics_language)
-        lyrics_meta.addWidget(self._insp_lyrics_description)
-        lyrics_layout.addLayout(lyrics_meta)
-        lyrics_buttons = QHBoxLayout()
-        self._insp_lyrics_set_btn = QPushButton(t("meta_lyrics_propose_replace"))
-        self._insp_lyrics_set_btn.clicked.connect(self._on_lyrics_propose_set)
-        self._insp_lyrics_clear_btn = QPushButton(t("meta_lyrics_propose_clear"))
-        self._insp_lyrics_clear_btn.clicked.connect(self._on_lyrics_propose_clear)
-        self._insp_lyrics_revert_btn = QPushButton(t("meta_lyrics_revert_pending"))
-        self._insp_lyrics_revert_btn.clicked.connect(self._on_lyrics_revert)
-        for button in (self._insp_lyrics_set_btn, self._insp_lyrics_clear_btn, self._insp_lyrics_revert_btn):
-            lyrics_buttons.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        lyrics_layout.addLayout(lyrics_buttons)
-        layout.addWidget(lyrics_grp)
-
-        artwork_grp = QGroupBox(t("meta_inspector_artwork_section"))
-        artwork_layout = QVBoxLayout(artwork_grp)
-        self._insp_artwork_current_label = QLabel(t("meta_artwork_current"))
-        artwork_layout.addWidget(self._insp_artwork_current_label)
-        self._insp_artwork_preview = ArtworkDropPreview(self._on_artwork_drop)
-        self._insp_artwork_preview.setFixedSize(150, 150)
-        self._insp_artwork_preview.setAlignment(Qt.AlignCenter)
-        self._insp_artwork_preview.setStyleSheet("border: 1px dashed #8a8a8a; border-radius: 4px;")
-        artwork_layout.addWidget(self._insp_artwork_preview, alignment=Qt.AlignHCenter)
-        self._insp_artwork_proposed_label = QLabel(t("meta_artwork_proposed"))
-        self._insp_artwork_proposed_preview = QLabel()
-        self._insp_artwork_proposed_preview.setFixedSize(150, 150)
-        self._insp_artwork_proposed_preview.setAlignment(Qt.AlignCenter)
-        self._insp_artwork_proposed_preview.setStyleSheet("border: 1px solid #8a8a8a; border-radius: 4px;")
-        artwork_layout.addWidget(self._insp_artwork_proposed_label)
-        artwork_layout.addWidget(self._insp_artwork_proposed_preview, alignment=Qt.AlignHCenter)
-        self._insp_artwork_state = QLabel()
-        self._insp_artwork_state.setWordWrap(True)
-        artwork_layout.addWidget(self._insp_artwork_state)
-        artwork_buttons = QHBoxLayout()
-        self._insp_artwork_add_btn = QPushButton(t("meta_artwork_add"))
-        self._insp_artwork_replace_btn = QPushButton(t("meta_artwork_replace"))
-        self._insp_artwork_remove_btn = QPushButton(t("meta_artwork_remove"))
-        self._insp_artwork_paste_btn = QPushButton(t("meta_artwork_paste"))
-        self._insp_artwork_export_btn = QPushButton(t("meta_artwork_export"))
-        self._insp_artwork_revert_btn = QPushButton(t("meta_artwork_revert"))
-        self._insp_artwork_add_btn.clicked.connect(self._on_artwork_add_choose)
-        self._insp_artwork_replace_btn.clicked.connect(self._on_artwork_replace_choose)
-        self._insp_artwork_remove_btn.clicked.connect(self._on_artwork_remove)
-        self._insp_artwork_paste_btn.clicked.connect(self._on_artwork_paste)
-        self._insp_artwork_export_btn.clicked.connect(self._on_artwork_export)
-        self._insp_artwork_revert_btn.clicked.connect(self._on_artwork_revert)
-        for button in (self._insp_artwork_add_btn, self._insp_artwork_replace_btn,
-                       self._insp_artwork_remove_btn, self._insp_artwork_paste_btn,
-                       self._insp_artwork_export_btn, self._insp_artwork_revert_btn):
-            artwork_buttons.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        artwork_layout.addLayout(artwork_buttons)
-        layout.addWidget(artwork_grp)
-
-        replay_grp = QGroupBox(t("meta_inspector_replaygain_section"))
-        replay_layout = QVBoxLayout(replay_grp)
-        replay_note = QLabel(t("meta_replaygain_plain_explanation"))
-        replay_note.setWordWrap(True)
-        replay_note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
-        replay_layout.addWidget(replay_note)
-        self._insp_replay_values: dict[str, QLabel] = {}
-        for field_name, key in (
-            (REPLAYGAIN_TRACK_GAIN, "meta_replaygain_track_gain"),
-            (REPLAYGAIN_TRACK_PEAK, "meta_replaygain_track_peak"),
-            (REPLAYGAIN_ALBUM_GAIN, "meta_replaygain_album_gain"),
-            (REPLAYGAIN_ALBUM_PEAK, "meta_replaygain_album_peak"),
-            (REPLAYGAIN_REFERENCE_LOUDNESS, "meta_replaygain_reference_loudness"),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(t(key)))
-            value_label = QLabel(t("meta_inspector_empty_value"))
-            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            row.addWidget(value_label, stretch=1)
-            replay_layout.addLayout(row)
-            self._insp_replay_values[field_name] = value_label
-        replay_actions = QHBoxLayout()
-        self._insp_rg_track_btn = QPushButton(t("meta_replaygain_analyze_track"))
-        self._insp_rg_album_btn = QPushButton(t("meta_replaygain_analyze_album"))
-        self._insp_rg_cancel_btn = QPushButton(t("meta_replaygain_cancel"))
-        self._insp_rg_cancel_btn.setVisible(False)
-        self._insp_rg_track_btn.clicked.connect(self._on_replaygain_track)
-        self._insp_rg_album_btn.clicked.connect(self._on_replaygain_album)
-        self._insp_rg_cancel_btn.clicked.connect(self.replaygain_cancel_requested)
-        for button in (self._insp_rg_track_btn, self._insp_rg_album_btn):
-            replay_actions.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        replay_actions.addWidget(self._insp_rg_cancel_btn)
-        replay_layout.addLayout(replay_actions)
-        replay_clear = QHBoxLayout()
-        self._insp_rg_clear_track_btn = QPushButton(t("meta_replaygain_clear_track"))
-        self._insp_rg_clear_album_btn = QPushButton(t("meta_replaygain_clear_album"))
-        self._insp_rg_revert_btn = QPushButton(t("meta_replaygain_revert"))
-        self._insp_rg_clear_track_btn.clicked.connect(self._on_replaygain_clear_track)
-        self._insp_rg_clear_album_btn.clicked.connect(self._on_replaygain_clear_album)
-        self._insp_rg_revert_btn.clicked.connect(self._on_replaygain_revert)
-        for button in (self._insp_rg_clear_track_btn, self._insp_rg_clear_album_btn, self._insp_rg_revert_btn):
-            replay_clear.addWidget(button)
-            self._selection_scope_buttons.append(button)
-        replay_layout.addLayout(replay_clear)
-        self._insp_rg_progress = QProgressBar()
-        self._insp_rg_progress.setVisible(False)
-        replay_layout.addWidget(self._insp_rg_progress)
-        layout.addWidget(replay_grp)
-
-        props_grp = QGroupBox(t("meta_inspector_file_properties_section"))
-        props_layout = QVBoxLayout(props_grp)
-        self._insp_properties = QLabel()
-        self._insp_properties.setWordWrap(True)
-        self._insp_properties.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        props_layout.addWidget(self._insp_properties)
-        self._insp_external_status = QLabel()
-        self._insp_external_status.setWordWrap(True)
-        props_layout.addWidget(self._insp_external_status)
-        self._insp_external_review_btn = QPushButton(t("meta_external_review_action"))
-        a11y.describe(self._insp_external_review_btn, t("meta_external_review_action"),
-                      description=t("meta_external_review_title"))
-        self._insp_external_review_btn.clicked.connect(
-            self._review_selected_external_conflict)
-        self._insp_external_review_btn.setVisible(False)
-        props_layout.addWidget(self._insp_external_review_btn)
-        layout.addWidget(props_grp)
-
-        rename_grp = QGroupBox(t("meta_rename_group"))
-        rename_layout = QVBoxLayout(rename_grp)
-        rename_layout.setSpacing(6)
-        rename_note = QLabel(t("meta_rename_note"))
-        rename_note.setWordWrap(True)
-        rename_note.setStyleSheet(f"color: {get_colors().text_secondary}; font-size: 11px;")
-        rename_layout.addWidget(rename_note)
-        btn_rename = QPushButton(t("meta_rename_btn"))
-        btn_rename.setIcon(FluentIcon.SAVE_AS.icon(color="#000000"))
-        btn_rename.setIconSize(QSize(14, 14))
-        btn_rename.setStyleSheet(btn_style())
-        btn_rename.clicked.connect(self._on_insp_rename_from_title)
-        self._selection_scope_buttons.append(btn_rename)
-        rename_layout.addWidget(btn_rename)
-        layout.addWidget(rename_grp)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        return scroll
-
-    def _make_op_side_button(self, glyph: str, tooltip: str, accent: bool = False) -> QPushButton:
-        """Small icon button shown on the trailing edge of an op row.
-
-        ``accent=True`` gives the button a tinted, always-visible look so
-        configurable actions (the settings gear) are easy to spot next to
-        the subtler info icon.
-        """
-        c = get_colors()
-        btn = QPushButton(glyph)
-        btn.setFixedSize(28, 28)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # The glyph is decorative, so the tooltip is the only stated meaning;
-        # it must also be the accessible name or the button is announced as an
-        # unlabelled symbol.
-        a11y.describe(btn, tooltip, tooltip=tooltip)
-        if accent:
-            btn.setStyleSheet(
-                f"QPushButton {{ border: 1px solid transparent; font-size: 14px;"
-                f"  background: transparent; color: {c.text_secondary}; border-radius: 8px; }}"
-                f"QPushButton:hover {{ background: {c.surface2}; color: {c.accent}; border-color: {c.border}; }}"
-            )
-        else:
-            btn.setStyleSheet(
-                f"QPushButton {{ border: none; background: transparent; font-size: 13px;"
-                f"  color: {c.text_secondary}; border-radius: 8px; }}"
-                f"QPushButton:hover {{ background: {c.surface2}; color: {c.accent}; }}"
-            )
-        return btn
-
-    def _refresh_op_rows_style(self) -> None:
-        """Re-apply theme-aware styling to all inspector op rows."""
-        if not hasattr(self, "_op_rows"):
-            return
-        qss = op_row_qss()
-        for row in self._op_rows:
-            row.setStyleSheet(qss)
-
-    def _build_magic_ops_widget(
-        self,
-        op_keys: Optional[tuple[str, ...]] = None,
-        *,
-        sections: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None,
-    ) -> QWidget:
-        """Build the magic operations list — modern card rows, all act on checked tracks.
-
-        Either pass `op_keys` (a flat, already-ordered list of op ids) or
-        `sections` — a list of (subheader_i18n_key, op_ids) groups — to add
-        light dividers inside a single category (e.g. "Text Cleanup" vs
-        "Clear Fields" inside the broader cleanup category).
-        """
-        container = QWidget()
-        grp_layout = QVBoxLayout(container)
-        grp_layout.setContentsMargins(0, 0, 0, 0)
-        grp_layout.setSpacing(8)
-
-        op_handlers: dict[str, object] = {
-            "title_strip":      lambda tracks: self.title_from_filename.emit(tracks, True),
-            "title_full":       lambda tracks: self.title_from_filename.emit(tracks, False),
-            "normalize_spaces": lambda tracks: self.normalize_title_spaces.emit(tracks),
-            "track_num":        lambda tracks: self.track_from_filename.emit(tracks),
-            "split_at":         lambda tracks: self.split_artist_title.emit(tracks),
-            "album_artist":     lambda tracks: self.album_artist_from_artist.emit(tracks),
-            "strip_junk":       lambda tracks: self.strip_web_junk.emit(tracks),
-            "clear_comments":   lambda tracks: self.clear_comments.emit(tracks),
-            "clear_track_num":  lambda tracks: self.clear_track_num.emit(tracks),
-            "clear_year":       lambda tracks: self.clear_year.emit(tracks),
-            "clear_genre":      lambda tracks: self.clear_genre.emit(tracks),
-            "clear_title":      lambda tracks: self.clear_title.emit(tracks),
-            "clear_artist":     lambda tracks: self.clear_artist.emit(tracks),
-            "clear_album":      lambda tracks: self.clear_album.emit(tracks),
-            "clear_album_artist": lambda tracks: self.clear_album_artist.emit(tracks),
-            "clean_filename":   lambda tracks: self.clean_filename.emit(tracks),
-            "strip_filename_numbering": lambda tracks: self.strip_filename_numbering.emit(tracks),
-        }
-        op_defs_by_key = {key: (label_key, desc_key) for key, label_key, desc_key in MAGIC_OP_DEFS}
-
-        def run_for_checked(handler) -> None:
-            tracks = self._workspace.edit_scope()
-            if not tracks:
-                self._refresh_checked_scope_state()
-                return
-            handler(tracks)
-
-        def add_row(key: str) -> None:
-            label_key, desc_key = op_defs_by_key[key]
-            label = t(label_key)
-            desc  = t(desc_key)
-            row = OpRow(label)
-            if key in op_handlers:
-                row.clicked.connect(lambda handler=op_handlers[key]: run_for_checked(handler))
-
-            if key in ("strip_junk", "clean_filename"):
-                cfg_btn = self._make_op_side_button("", t("meta_clean_cfg_tooltip"), accent=True)
-                cfg_btn.setIcon(FluentIcon.SETTING.icon())
-                cfg_btn.setIconSize(QSize(14, 14))
-                a11y.describe(cfg_btn, t("meta_a11y_configure_action", action=label),
-                              description=t("meta_clean_cfg_tooltip"))
-                cfg_btn.clicked.connect(self._on_clean_settings)
-                row.add_side_button(cfg_btn)
-
-            info_btn = self._make_op_side_button("", desc)
-            info_btn.setIcon(FluentIcon.INFO.icon())
-            info_btn.setIconSize(QSize(14, 14))
-            # A short name to announce, the full explanation as the description:
-            # the raw tooltip is a paragraph and makes a poor accessible name.
-            a11y.describe(info_btn, t("meta_a11y_about_action", action=label),
-                          description=desc)
-            info_btn.clicked.connect(lambda _, l=label, d=desc: self._show_info(l, d))
-            row.add_side_button(info_btn)
-
-            grp_layout.addWidget(row)
-            self._op_rows.append(row)
-
-        if sections is not None:
-            for i, (subheader_key, keys) in enumerate(sections):
-                header = QLabel(t(subheader_key))
-                header.setStyleSheet(
-                    f"color: {get_colors().text_tertiary}; font-size: 11px; font-weight: bold;"
-                    f"{'margin-top: 4px;' if i else ''}"
-                )
-                grp_layout.addWidget(header)
-                for key in keys:
-                    add_row(key)
-        else:
-            allowed = set(op_keys) if op_keys is not None else None
-            for key, _, _ in MAGIC_OP_DEFS:
-                if allowed is not None and key not in allowed:
-                    continue
-                add_row(key)
-
-        self._refresh_op_rows_style()
-        self._refresh_checked_scope_state()
-        return container
-
-    def _on_clean_settings(self) -> None:
-        dlg = CleanSettingsDialog(self._cfg, self)
-        dlg.exec()
-
-    def _show_info(self, title: str, desc: str) -> None:
-        show_info(self, title, desc)
-
-    def _request_delete_files(self, paths: list[Path]) -> None:
-        """Single-confirm Recycle Bin send for selected table rows.
-
-        Called from `ExplorerFileListView.keyPressEvent` on Delete. Emits
-        `delete_files_requested` only after the user confirms — the actual
-        send2trash + rescan is owned by `MetadataController.delete_files`.
-        """
-        if not paths:
-            return
-        if confirm(
-            self.window(),
-            t("meta_delete_to_trash_title"),
-            t("meta_delete_to_trash_body", n=len(paths)),
-            accept_text=t("meta_delete_to_trash_confirm"),
-            cancel_text=t("cancel_btn"),
-            danger=True,
-        ):
-            result = self._run_file_operation("recycle_paths", list(paths))
-            if result is None:
-                return
-            deleted = [outcome.source for outcome in result.succeeded]
-            if deleted:
-                self._model.remove_paths(deleted)
-                self._rebuild_tree_from_loaded_tracks()
-                self._update_summary()
-                self._refresh_checked_scope_state()
-
-    def _on_table_context_menu(self, pos: QPoint) -> None:
-        index = self._table.indexAt(pos)
-        if index.isValid() and not self._table.selectionModel().isSelected(index):
-            self._table.selectRow(index.row())
-            self._table.setCurrentIndex(index)
-        tracks = self._get_selected_tracks()
-        if not tracks:
-            return
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        open_action = menu.addAction(t("meta_open_file"))
-        reveal_action = menu.addAction(t("meta_reveal_in_explorer"))
-        copy_action = menu.addAction(t("meta_copy_path"))
-        menu.addSeparator()
-        rename_action = menu.addAction(t("meta_rename_menu")) if len(tracks) == 1 else None
-        move_action = menu.addAction(t("meta_move_menu"))
-        properties_action = menu.addAction(t("meta_properties"))
-        menu.addSeparator()
-        delete_action = menu.addAction(t("meta_delete_menu"))
-        action = menu.exec(self._table.viewport().mapToGlobal(pos))
-        if action == open_action:
-            self._open_tracks(tracks)
-        elif action == reveal_action:
-            self._reveal_tracks(tracks)
-        elif action == copy_action:
-            self._copy_paths(tracks)
-        elif rename_action is not None and action == rename_action:
-            self._rename_tracks(tracks)
-        elif action == move_action:
-            self._move_tracks(tracks)
-        elif action == properties_action:
-            self._show_properties(tracks)
-        elif action == delete_action:
-            self._request_delete_files([track.path for track in tracks])
-
-    def _open_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        self._perform_track_operation(tracks, self._file_operations.open_file)
-
-    def _reveal_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        self._perform_track_operation(tracks, self._file_operations.reveal_in_explorer)
-
-    def _copy_paths(self, tracks: list[AudioTrackItem]) -> None:
-        try:
-            paths = [self._file_operations.copy_path(track.path) for track in tracks]
-        except FileOperationError as exc:
-            show_warning(self, t("meta_error_title"), str(exc))
-            return
-        QApplication.clipboard().setText("\n".join(paths))
-
-    def _rename_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        if len(tracks) != 1:
-            return
-        track = tracks[0]
-        new_name, ok = get_text(self, t("meta_rename_dialog_title"), t("meta_rename_prompt"), text=track.path.name)
-        if not ok or not new_name.strip():
-            return
-        result = self._run_file_operation("rename_path", track.path, new_name)
-        if result is None or not result.succeeded:
-            return
-        destination = result.succeeded[0].destination
-        if track.proposed_filename == destination.name:
-            track.proposed_filename = None
-        self._model.update_file_path(track, destination)
-        self._rebuild_tree_from_loaded_tracks()
-        self._refresh_checked_scope_state()
-
-    def _move_tracks(self, tracks: list[AudioTrackItem]) -> None:
-        if not self._root_folder:
-            return
-        folder = QFileDialog.getExistingDirectory(self, t("meta_move_choose_folder"), str(self._root_folder))
-        if not folder:
-            return
-        by_path = {track.path: track for track in tracks}
-        result = self._run_file_operation(
-            "move_paths", list(by_path), Path(folder))
-        if result is None:
-            return
-        for outcome in result.succeeded:
-            track = by_path.get(outcome.source)
-            if track is not None:
-                self._model.update_file_path(track, outcome.destination)
-        if result.succeeded:
-            self._rebuild_tree_from_loaded_tracks()
-            self._refresh_checked_scope_state()
-
-    def _show_properties(self, tracks: list[AudioTrackItem]) -> None:
-        lines: list[str] = []
-        for track in tracks:
-            try:
-                props = self._file_operations.properties(track.path)
-            except FileOperationError as exc:
-                lines.append(str(exc))
-                continue
-            lines.append(t("meta_properties_item", name=props.path.name, path=str(props.path), size=isolate_number(f"{props.size_bytes:,}"), modified=isolate_number(display_timestamp(props.modified_at))))
-        if lines:
-            show_info(self, t("meta_properties"), "\n\n".join(lines))
-
-    def _perform_track_operation(self, tracks: list[AudioTrackItem], operation) -> None:
-        errors: list[str] = []
-        for track in tracks:
-            try:
-                operation(track.path)
-            except FileOperationError as exc:
-                errors.append(str(exc))
-        if errors:
-            show_warning(self, t("meta_error_title"), "\n".join(errors))
 
     # ── Toolbar handlers ──────────────────────────────────────────────────────
+
+    def _on_tree_header_add_folder(self) -> None:
+        parent = self._navigation.current or self._root_folder
+        if parent is not None:
+            self._on_tree_add_folder(Path(parent))
 
     def _on_browse(self) -> None:
         saved_folder = getattr(self._cfg, "tag_editor_last_folder", "") if self._cfg else ""
@@ -2804,6 +3229,17 @@ class MetadataEditorPanel(QWidget):
             return
         self.scan_requested.emit(self._root_folder, True)
 
+    def _show_refresh_menu(self) -> None:
+        """Open the compact rescan action aligned to its refresh group."""
+        menu = self._refresh_menu
+        menu_width = menu.sizeHint().width()
+        x = self._refresh_control.width() - menu_width if (
+            QApplication.layoutDirection() == Qt.RightToLeft
+        ) else 0
+        menu.popup(self._refresh_control.mapToGlobal(
+            QPoint(x, self._refresh_control.height() + 4)
+        ))
+
     def on_workspace_replacement_started(self, folder: Path) -> None:
         """Update the visible root only after the controller accepts replacement."""
         self._root_folder = Path(folder)
@@ -2822,6 +3258,9 @@ class MetadataEditorPanel(QWidget):
         self._apply_btn.setEnabled(False)
         self._revert_btn.setEnabled(False)
         self._dupes_btn.setEnabled(False)
+        # Findings belong to the folder they were found in; carrying them into
+        # the next one would have the Check pane describe files no longer here.
+        self._reset_duplicate_results()
         self._set_scan_loading(True)
         self._summary_lbl.setText(t("meta_scanning"))
 
@@ -2839,7 +3278,7 @@ class MetadataEditorPanel(QWidget):
         if not candidates:
             blocked = self._workspace.apply_blockers()
             if blocked:
-                show_warning(
+                prompts.show_warning(
                     self, t("meta_apply_blocked_title"),
                     t("meta_external_apply_blocked", n=len(blocked)))
                 self._workspace.set_selected_items([blocked[0]])
@@ -2848,9 +3287,21 @@ class MetadataEditorPanel(QWidget):
             return
         if ApplyReviewPolicy.requires_full_review(self._workspace.change_set):
             self._on_review_changes()
-        # The always-visible Apply-scope label already shows this exact count
-        # before the action is invoked. Keep Apply a single toolbar action;
-        # confirmation dialogs here hide that scope and break keyboard flow.
+            # Review may exclude files or revert proposals.  Never apply the
+            # stale pre-review list merely because it was safe a moment ago.
+            candidates = self._workspace.apply_candidates()
+            if not candidates:
+                self._refresh_checked_scope_state()
+                return
+        if self.isVisible():
+            confirmation = ApplyConfirmationDialog(
+                self._workspace.change_set.summary(),
+                candidate_count=len(candidates),
+                blocker_count=len(self._workspace.apply_blockers()),
+                parent=self,
+            )
+            if confirmation.exec() != QDialog.DialogCode.Accepted:
+                return
         self._apply_refresh_counter = 0
         self.apply_requested.emit(backup_dir, candidates)
 
@@ -2872,9 +3323,12 @@ class MetadataEditorPanel(QWidget):
         if not records:
             return
         dialog = QDialog(self)
+        mark_tag_editor_dialog(dialog)
         dialog.setWindowTitle(t("meta_pending_changes"))
         dialog.setMinimumSize(860, 420)
         layout = QVBoxLayout(dialog)
+        add_header(layout, t("meta_pending_changes"), t("meta_review_subtitle"),
+                   icon=FluentIcon.VIEW.icon())
         summary_label = QLabel(dialog)
         layout.addWidget(summary_label)
         filters = QHBoxLayout()
@@ -3000,7 +3454,7 @@ class MetadataEditorPanel(QWidget):
             messages = [blocked.get((record.item_id, record.field))
                         for record in selected if blocked.get((record.item_id, record.field))]
             if messages:
-                show_warning(dialog, t("meta_review_blocker_details"), "\n".join(sorted(set(messages))))
+                prompts.show_warning(dialog, t("meta_review_blocker_details"), "\n".join(sorted(set(messages))))
         details.clicked.connect(show_blocker_details)
         for button in (include, exclude, revert_field, revert_file, revert_filename,
                        revert_artwork, revert_lyrics, revert_replaygain, revert_all, details):
@@ -3084,19 +3538,19 @@ class MetadataEditorPanel(QWidget):
         try:
             records = load_tag_backup(Path(path))
         except Exception as exc:
-            show_warning(
+            prompts.show_warning(
                 self, t("md_restore_invalid_title"), t("md_restore_invalid_msg"),
                 details=str(exc),
             )
             return
         if not records:
-            show_warning(self, t("md_restore_invalid_title"), t("md_restore_empty_msg"))
+            prompts.show_warning(self, t("md_restore_invalid_title"), t("md_restore_empty_msg"))
             return
 
         existing = [p for p, _tags in records if p.exists()]
         missing_n = len(records) - len(existing)
         if not existing:
-            show_warning(self, t("md_restore_invalid_title"),
+            prompts.show_warning(self, t("md_restore_invalid_title"),
                          t("md_restore_all_missing_msg"))
             return
 
@@ -3108,7 +3562,7 @@ class MetadataEditorPanel(QWidget):
             names += "\n" + t("md_restore_more_files", n=len(existing) - 10)
         msg += "\n\n" + names
 
-        if confirm(
+        if prompts.confirm(
             self,
             t("md_restore_confirm_title"),
             msg,
@@ -3147,10 +3601,10 @@ class MetadataEditorPanel(QWidget):
             for o in outcomes if o.status in (RestoreStatus.FAILED, RestoreStatus.MISSING)
         )
         if failed:
-            show_warning(self, t("md_restore_summary_title"), summary,
+            prompts.show_warning(self, t("md_restore_summary_title"), summary,
                          details=problem_lines)
         else:
-            show_info(self, t("md_restore_summary_title"), summary,
+            prompts.show_info(self, t("md_restore_summary_title"), summary,
                       details=problem_lines)
 
         if self._root_folder:
@@ -3174,6 +3628,7 @@ class MetadataEditorPanel(QWidget):
             return
         self._dupes_btn.setEnabled(False)
         self._summary_lbl.setText(t("meta_searching_duplicates"))
+        self._set_duplicate_status(t("meta_searching_duplicates"))
         self.find_duplicates_requested.emit(self._root_folder, True)  # always recursive
 
     # ── Tree handlers ─────────────────────────────────────────────────────────
@@ -3322,9 +3777,67 @@ class MetadataEditorPanel(QWidget):
             # Default back to "apply to all checked" panel
             visible = self._proxy.rowCount()
             self._insp_folder_title.setText(t("meta_n_files_checked", n=visible))
+            self._inspector_title_lbl.setText(t("meta_inspector_no_selection_header"))
+            self._inspector_selection_lbl.clear()
             self._inspector.setCurrentIndex(PAGE_FOLDER)
+            self._clear_inspector_pages()
         else:
+            self._inspector_title_lbl.setText(t("meta_inspector_no_selection_header"))
+            self._inspector_selection_lbl.clear()
             self._inspector.setCurrentIndex(PAGE_EMPTY)
+            self._clear_inspector_pages()
+
+    def _clear_inspector_pages(self) -> None:
+        """Blank the pages that describe one selection when there is none.
+
+        Only the Fields page lives in the empty/folder/tracks stack, so
+        Artwork, Lyrics, ReplayGain and Properties used to keep rendering the
+        last file the user had selected -- with its real path, size and cover
+        -- long after it was deselected.  Worse, the three property buttons
+        stayed enabled and silently did nothing, because their handlers read a
+        selection that was no longer there.
+        """
+        self._cancel_artwork_thumbnails()
+
+        if hasattr(self, "_insp_lyrics"):
+            self._lyrics_refreshing = True
+            try:
+                self._insp_lyrics.clear()
+                self._insp_lyrics_language.clear()
+                self._insp_lyrics_description.clear()
+            finally:
+                self._lyrics_refreshing = False
+            self._lyrics_dirty = False
+            self._insp_lyrics_state.setText(t("meta_inspector_no_selection_header"))
+            # The editor itself must go dead too: an enabled text box invites
+            # typing lyrics that belong to nothing.
+            self._insp_lyrics.setEnabled(False)
+            self._insp_lyrics_language.setEnabled(False)
+            self._insp_lyrics_description.setEnabled(False)
+
+        if hasattr(self, "_insp_artwork_preview"):
+            for preview, text_key in (
+                (self._insp_artwork_preview, "meta_artwork_none_short"),
+                (self._insp_artwork_proposed_preview, "meta_artwork_drop_prompt"),
+            ):
+                preview.setPixmap(QPixmap())
+                preview.setText(t(text_key))
+            self._insp_artwork_state.setText(t("meta_inspector_no_selection_header"))
+
+        if hasattr(self, "_insp_replay_values"):
+            for label in self._insp_replay_values.values():
+                label.setText(t("meta_inspector_empty_value"))
+
+        if hasattr(self, "_insp_property_values"):
+            for label in self._insp_property_values.values():
+                label.clear()
+            self._insp_property_table.setVisible(False)
+            self._insp_properties.setText(t("meta_inspector_no_selection_header"))
+            self._insp_properties.setVisible(True)
+            self._insp_external_status.clear()
+            self._insp_external_review_btn.setVisible(False)
+
+        self._refresh_selection_scope_state()
 
 
     def _on_select_all_toggled(self, checked: bool) -> None:
@@ -3343,26 +3856,6 @@ class MetadataEditorPanel(QWidget):
             self._refresh_checked_scope_state()
 
     # ── Inspector handlers ────────────────────────────────────────────────────
-
-    def _on_insp_folder_artist(self) -> None:
-        artist = self._insp_folder_artist.text().strip()
-        if not artist:
-            return
-        tracks = self._workspace.edit_scope()
-        if not tracks:
-            self._refresh_checked_scope_state()
-            return
-        self.artist_to_scope.emit(artist, tracks)
-
-    def _on_insp_folder_album(self) -> None:
-        album = self._insp_folder_album.text().strip()
-        if not album:
-            return
-        tracks = self._workspace.edit_scope()
-        if not tracks:
-            self._refresh_checked_scope_state()
-            return
-        self.album_to_scope.emit(album, tracks)
 
     def _on_insp_apply_fields(self) -> None:
         self._commit_inspector_draft(show_invalid=True)
@@ -3410,7 +3903,7 @@ class MetadataEditorPanel(QWidget):
         for field_name in completed:
             self._insp_draft_values.pop(field_name, None)
         if invalid and show_invalid:
-            show_warning(
+            prompts.show_warning(
                 self.window(),
                 t("meta_inspector_invalid_value_title"),
                 t("meta_inspector_invalid_value_body", fields=", ".join(invalid)),
@@ -3444,6 +3937,16 @@ class MetadataEditorPanel(QWidget):
         self._insp_draft_item_ids = current_ids
         self._insp_field_dirty.add(field_name)
         self._insp_draft_values[field_name] = value
+        # The green outline is a draft affordance: it appears as soon as the
+        # user touches a field, before the draft is promoted to a pending
+        # change by the Apply button.
+        edit = self._insp_fields.get(field_name)
+        if edit is not None:
+            c = tag_editor_colors()
+            edit.setStyleSheet(
+                f"QLineEdit {{ border: 1px solid {c.accent}; border-radius: 8px;"
+                f" padding: 0 9px; background: {c.surface}; }}"
+            )
 
     def _clear_insp_field(self, field_name: str, edit: QLineEdit) -> None:
         self._mark_insp_field_dirty(field_name, "")
@@ -3498,6 +4001,15 @@ class MetadataEditorPanel(QWidget):
     def _on_artwork_replace_choose(self) -> None:
         self._on_artwork_choose(add=False)
 
+    def _on_artwork_choose_adaptive(self) -> None:
+        """Prototype's single Choose button: append only when nothing exists."""
+        tracks = self._get_selected_tracks()
+        if not tracks:
+            return
+        has_artwork = any(track.original.artwork.entries for track in tracks)
+        can_append = all(track.format_id != "m4a" for track in tracks)
+        self._on_artwork_choose(add=not has_artwork and can_append)
+
     def _on_artwork_choose(self, *, add: bool) -> None:
         tracks = self._get_selected_tracks()
         if not tracks:
@@ -3512,7 +4024,7 @@ class MetadataEditorPanel(QWidget):
         try:
             entry = load_artwork_file(path)
         except ArtworkValidationError as exc:
-            show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key))
+            prompts.show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key))
             return
         result = (self._inspector_state.propose_add_artwork(tracks, entry)
                   if add else self._inspector_state.propose_set(tracks, ARTWORK_FIELD, entry))
@@ -3539,7 +4051,7 @@ class MetadataEditorPanel(QWidget):
         tracks = self._get_selected_tracks()
         image = QApplication.clipboard().image() if tracks else QPixmap()
         if image.isNull():
-            show_warning(self.window(), t("meta_inspector_artwork_section"), t("meta_artwork_invalid_image"))
+            prompts.show_warning(self.window(), t("meta_inspector_artwork_section"), t("meta_artwork_invalid_image"))
             return
         payload = QByteArray(); buffer = QBuffer(payload); buffer.open(QBuffer.WriteOnly)
         image.save(buffer, "PNG"); buffer.close()
@@ -3547,7 +4059,7 @@ class MetadataEditorPanel(QWidget):
         try:
             entry = validate_artwork_bytes(bytes(payload))
         except ArtworkValidationError as exc:
-            show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key)); return
+            prompts.show_warning(self.window(), t("meta_inspector_artwork_section"), t(exc.key)); return
         self._after_inspector_proposal(tracks, self._inspector_state.propose_set(tracks, ARTWORK_FIELD, entry), ChangeOrigin.ARTWORK_REPLACE)
 
     def _on_artwork_export(self) -> None:
@@ -3561,13 +4073,16 @@ class MetadataEditorPanel(QWidget):
         try:
             export_artwork_entries(Path(destination), tracks[0].path.stem, tracks[0].original.artwork.entries)
         except ArtworkValidationError as exc:
-            show_warning(self.window(), t("meta_artwork_export_title"), t(exc.key))
+            prompts.show_warning(self.window(), t("meta_artwork_export_title"), t(exc.key))
 
     def _on_replaygain_clear_track(self) -> None:
         self._propose_replaygain_clear({REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK})
 
     def _on_replaygain_clear_album(self) -> None:
         self._propose_replaygain_clear({REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK})
+
+    def _on_replaygain_clear_all(self) -> None:
+        self._propose_replaygain_clear(set(REPLAYGAIN_FIELDS))
 
     def _propose_replaygain_clear(self, fields: set[str]) -> None:
         tracks = self._get_selected_tracks()
@@ -3609,7 +4124,7 @@ class MetadataEditorPanel(QWidget):
             + "\n".join(f"  \u2068{track.path.name}\u2069" for track in group.tracks)
             for group in groups
         )
-        if confirm(
+        if prompts.confirm(
             self.window(),
             t("meta_replaygain_album_confirm_title"),
             t(
@@ -3636,6 +4151,55 @@ class MetadataEditorPanel(QWidget):
                 unsupported=result.unsupported_count,
             ))
 
+    # Fields copied from one file, waiting to be pasted onto others. Artwork,
+    # lyrics and ReplayGain are excluded because each has its own page and its
+    # own safety rules. Three text fields are excluded on purpose because they
+    # identify one recording and must never be duplicated across files:
+    # track_num, isrc, and the per-title sort fields.
+    _TAG_CLIPBOARD_FIELDS = (
+        "title", "artist", "album", "album_artist", "genre", "year", "comment",
+        "composer", "publisher", "copyright", "bpm", "grouping",
+        "disc_num", "disc_total", "track_total",
+    )
+
+    def _on_copy_tags(self) -> None:
+        """Remember one file's tag values so they can be pasted onto others."""
+        tracks = self._get_selected_tracks()
+        if len(tracks) != 1:
+            prompts.show_warning(self.window(), t("meta_copy_tags"),
+                                 t("meta_copy_tags_needs_one"))
+            return
+        source = tracks[0].proposed.effective_tags(tracks[0].original)
+        values = {
+            name: value
+            for name in self._TAG_CLIPBOARD_FIELDS
+            if (value := source.field_value(name)) not in (None, "")
+        }
+        self._tag_clipboard = values
+        # Track number is excluded on purpose: copying it across files would
+        # give every track in the selection the same number.
+        self._insp_tag_clipboard_lbl.setText(
+            t("meta_tag_clipboard_holds", n=len(values), name=tracks[0].path.name)
+            if values else t("meta_tag_clipboard_empty_source")
+        )
+        self._insp_paste_tags_btn.setEnabled(bool(values))
+
+    def _on_paste_tags(self) -> None:
+        """Propose the copied values for every selected file."""
+        values = getattr(self, "_tag_clipboard", None)
+        tracks = self._get_selected_tracks()
+        if not values or not tracks:
+            return
+        affected = unsupported = 0
+        for name, value in values.items():
+            result = self._inspector_state.propose_set(tracks, name, value)
+            affected += result.affected_count
+            unsupported += result.unsupported_count
+        self._after_inspector_proposal(tracks, origin=ChangeOrigin.MANUAL)
+        if unsupported:
+            self._insp_capability.setText(
+                t("meta_inspector_partial_scope", affected=affected, unsupported=unsupported))
+
     def _on_insp_rename_from_title(self) -> None:
         tracks = self._get_selected_tracks()
         if not tracks:
@@ -3650,223 +4214,9 @@ class MetadataEditorPanel(QWidget):
             if self._cfg:
                 self._cfg.magic_auto_ops = list(self._auto_ops)
                 self._cfg.save()
+            # The Tools > Auto arrange page lists what the button will run.
+            self._refresh_auto_enabled_list()
 
-    def _on_section_moved(self, logical: int, old_visual: int, new_visual: int) -> None:
-        """Keep Name pinned first and the fixed empty gutter pinned last."""
-        hdr = self._table.horizontalHeader()
-
-        target_gutter_visual = COLUMN_COUNT - 1
-        if hdr.visualIndex(COL_CHECK) != target_gutter_visual:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_CHECK), target_gutter_visual)
-            finally:
-                hdr.blockSignals(False)
-
-        if logical == COL_FILENAME and new_visual != 0:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_FILENAME), 0)
-            finally:
-                hdr.blockSignals(False)
-        elif new_visual == 0 and logical != COL_FILENAME:
-            hdr.blockSignals(True)
-            try:
-                hdr.moveSection(hdr.visualIndex(COL_FILENAME), 0)
-            finally:
-                hdr.blockSignals(False)
-
-        self._save_column_order()
-        self._fill_leftover_space()
-
-    def _fill_leftover_space(self) -> None:
-        """Grow the visually-last real content column to absorb any leftover
-        viewport width, so there's never blank space with no column in it.
-
-        COL_CHECK is pinned to the trailing edge as a deliberate thin gutter
-        (mirrors the empty-area margin on the leading edge). Deliberately a
-        *one-time* width top-up via `resizeSection` rather than Qt's
-        `Stretch` resize mode — Stretch permanently locks that column so the
-        user can no longer drag it narrower, which just traded "dead space"
-        for "a column you can't resize". This recomputes (and can grow OR
-        shrink the filler column) whenever the viewport, column set, or
-        column order changes, but a manual drag on any column in between
-        those events is left alone.
-        """
-        hdr = self._table.horizontalHeader()
-        best_col = self._visual_filler_column()
-        if best_col is None:
-            return
-
-        others_total = sum(
-            hdr.sectionSize(c) for c in range(COLUMN_COUNT)
-            if c != best_col and not self._table.isColumnHidden(c)
-        )
-        target_width = max(40, self._table.viewport().width() - others_total)
-        if target_width == hdr.sectionSize(best_col):
-            return
-
-        prev_ignore = self._ignore_header_resize
-        self._ignore_header_resize = True
-        try:
-            hdr.resizeSection(best_col, target_width)
-        finally:
-            self._ignore_header_resize = prev_ignore
-
-    def _visual_filler_column(self) -> int | None:
-        """The visually-last visible content column — the one that absorbs
-        leftover viewport width in _fill_leftover_space()."""
-        hdr = self._table.horizontalHeader()
-        best_col, best_visual = None, -1
-        for col in range(COLUMN_COUNT):
-            if col == COL_CHECK or self._table.isColumnHidden(col):
-                continue
-            visual = hdr.visualIndex(col)
-            if visual > best_visual:
-                best_visual, best_col = visual, col
-        return best_col
-
-    def _refresh_table_geometry_after_column_resize(self) -> None:
-        if not hasattr(self, "_table"):
-            return
-        hdr = self._table.horizontalHeader()
-        sb = self._table.horizontalScrollBar()
-        self._table.updateGeometries()
-        hdr.viewport().repaint()
-        self._table.viewport().repaint()
-        sb.update()
-
-    def _refresh_after_manual_column_resize(self) -> None:
-        self._refresh_table_geometry_after_column_resize()
-
-    def _flush_geometry_save(self) -> None:
-        """Debounce target — cfg fields were updated in-memory by the geometry
-        handlers; this writes them to disk once the burst has settled."""
-        if self._cfg:
-            self._cfg.save()
-
-    def _save_column_order(self) -> None:
-        if self._cfg:
-            hdr = self._table.horizontalHeader()
-            order = []
-            for visual_idx in range(COLUMN_COUNT):
-                logical_idx = hdr.logicalIndex(visual_idx)
-                order.append(logical_idx)
-            self._cfg.tag_editor_column_order = order
-            self._cfg.save()
-
-    def _on_section_resized(self, logical: int, old_size: int, new_size: int) -> None:
-        if getattr(self, "_ignore_header_resize", False):
-            return
-        if logical == COL_CHECK:
-            return
-
-        factor = self._zoom_level / 100.0
-        if factor <= 0:
-            factor = 1.0
-
-        base_width = int(new_size / factor)
-        if self._cfg:
-            widths = dict(self._cfg.tag_editor_column_widths)
-            widths[str(logical)] = base_width
-            self._cfg.tag_editor_column_widths = widths
-            self._geometry_save_timer.start()
-
-        self._refresh_after_manual_column_resize()
-
-    def _on_sort_indicator_changed(self, column: int, order: Qt.SortOrder) -> None:
-        hdr = self._table.horizontalHeader()
-        if column == COL_CHECK:
-            hdr.setSortIndicatorShown(False)
-            if self._cfg:
-                self._cfg.tag_editor_sort_column = -1
-                self._cfg.save()
-            return
-
-        hdr.setSortIndicatorShown(column != -1)
-        if self._cfg:
-            self._cfg.tag_editor_sort_column = column
-            order_val = order.value if hasattr(order, 'value') else int(order)
-            self._cfg.tag_editor_sort_order = int(order_val)
-            self._cfg.save()
-
-    def _save_column_visibility(self) -> None:
-        if self._cfg:
-            hidden_cols = []
-            for col in range(COLUMN_COUNT):
-                if self._table.isColumnHidden(col):
-                    hidden_cols.append(col)
-            self._cfg.tag_editor_column_visibility = hidden_cols
-            self._cfg.save()
-
-    def _set_column_hidden(self, col: int, hide: bool) -> None:
-        self._table.setColumnHidden(col, hide)
-        self._save_column_visibility()
-        self._fill_leftover_space()
-
-    def _on_header_context_menu(self, pos) -> None:
-        from PySide6.QtWidgets import QMenu
-
-        # Short "common" column list — mirrors the Windows Explorer header
-        # right-click menu (5-7 items, not the full attribute sheet).
-        COMMON_COLS = [
-            COL_FILENAME,      # Name  — always visible
-            COL_TITLE_NEW,     # Title (new)
-            COL_ARTIST_NEW,    # Artist (new)
-            COL_ALBUM_NEW,     # Album (new)
-            COL_TRACK_NEW,     # Track (new)
-            COL_FILENAME_NEW,  # Filename (new)
-        ]
-        ALWAYS_VISIBLE = {COL_FILENAME}
-
-        menu = QMenu(self)
-        for col in COMMON_COLS:
-            key = _HEADER_KEYS[col] if col < len(_HEADER_KEYS) else ""
-            lbl = t(key) if key else ""
-            if not lbl:
-                continue
-            action = menu.addAction(lbl)
-            action.setCheckable(True)
-            action.setChecked(not self._table.isColumnHidden(col))
-            if col in ALWAYS_VISIBLE:
-                action.setEnabled(False)
-            else:
-                action.triggered.connect(
-                    lambda checked, c=col: self._set_column_hidden(c, not checked)
-                )
-
-        menu.addSeparator()
-        menu.addAction(t("mt_size_all_to_fit")).triggered.connect(
-            self._size_all_columns_to_fit
-        )
-        menu.addSeparator()
-        menu.addAction(t("mt_more_columns")).triggered.connect(self._on_more_columns)
-
-        menu.exec(self._table.horizontalHeader().mapToGlobal(pos))
-
-    def _size_all_columns_to_fit(self) -> None:
-        """Resize every visible column to its content width (Win11 'Best fit')."""
-        for col in range(COLUMN_COUNT):
-            if not self._table.isColumnHidden(col):
-                self._table.resizeColumnToContents(col)
-        # Best-fit can leave a gap at the trailing edge — re-settle the filler.
-        self._fill_leftover_space()
-
-    def _size_column_to_fit(self, col: int) -> None:
-        """Resize one visible content column to fit its header/cells."""
-        if col == COL_CHECK or col < 0 or col >= COLUMN_COUNT:
-            return
-        if self._table.isColumnHidden(col):
-            return
-
-        self._table.resizeColumnToContents(col)
-        self._fill_leftover_space()
-
-    def _on_more_columns(self) -> None:
-        dlg = MoreColumnsDialog(self._table, self)
-        if dlg.exec() == QDialog.Accepted:
-            self._save_column_visibility()
-            self._fill_leftover_space()
 
     # ── Public slots (wired by AppWindow) ─────────────────────────────────────
 
@@ -3904,6 +4254,10 @@ class MetadataEditorPanel(QWidget):
     def on_scan_error(self, msg: str) -> None:
         self._set_scan_loading(False)
         self._summary_lbl.setText(t("md_scan_error", msg=msg))
+        # Only show the failure card when there is nothing to fall back to;
+        # a failed refresh of an already-loaded folder must not blank the table.
+        if not self._model.get_all_tracks():
+            self._show_table_error(msg)
 
     def on_scan_complete(self, result: ScanResult) -> None:
         n = result.files_count
@@ -3952,11 +4306,8 @@ class MetadataEditorPanel(QWidget):
             self._populate_track_inspector(tracks)
 
     def on_monitoring_state_changed(self, state, diagnostic: str = "") -> None:
+        """Keep refresh availability in sync without exposing monitor internals."""
         value = getattr(state, "value", str(state))
-        self._monitoring_status.setText(t(f"meta_monitoring_{value}"))
-        self._monitoring_status.setToolTip(
-            t("meta_monitoring_diagnostic", detail=diagnostic)
-            if diagnostic else t("meta_monitoring_status_tooltip"))
         self._manual_refresh_btn.setEnabled(
             self._root_folder is not None and value != "disabled")
 
@@ -4011,7 +4362,7 @@ class MetadataEditorPanel(QWidget):
 
     def on_conflict_resolution_finished(self, summary) -> None:
         if summary is not None and not summary.accepted:
-            show_warning(
+            prompts.show_warning(
                 self, t("meta_external_resolution_failed_title"),
                 t("meta_external_resolution_failed", detail=summary.diagnostic))
         self._update_summary()
@@ -4073,6 +4424,8 @@ class MetadataEditorPanel(QWidget):
             )
         except Exception:
             logger.debug("InfoBar notification failed", exc_info=True)
+        if self.isVisible():
+            ApplyResultDialog(error_message=message, parent=self).exec()
 
     def on_apply_batch_complete(self, result) -> None:
         """Render the structured batch result (backup-blocked / partial / done)."""
@@ -4138,6 +4491,8 @@ class MetadataEditorPanel(QWidget):
             # Toast is a nice-to-have; the summary label above already shows
             # the result, so a themed-InfoBar failure must not crash apply.
             logger.debug("InfoBar notification failed", exc_info=True)
+        if self.isVisible():
+            ApplyResultDialog(result, parent=self).exec()
 
     def on_recovery_available(self, summary: dict) -> None:
         """Offer review-first recovery of a crashed Apply operation (TE-SAFE-11).
@@ -4151,6 +4506,7 @@ class MetadataEditorPanel(QWidget):
 
         incomplete = summary.get("incomplete", 0)
         box = QMessageBox(self)
+        mark_tag_editor_dialog(box)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(t("md_recovery_prompt_title"))
         box.setText(t("md_recovery_prompt_msg", n=incomplete))
@@ -4189,7 +4545,7 @@ class MetadataEditorPanel(QWidget):
             self.recover_requested.emit(summary)
         elif clicked is forget_btn:
             # Destructive: require an explicit second confirmation.
-            if confirm(
+            if prompts.confirm(
                 self, t("md_recovery_forget_title"), t("md_recovery_forget_msg"),
                 accept_text=t("md_recovery_forget_btn"), danger=True,
             ):
@@ -4208,6 +4564,7 @@ class MetadataEditorPanel(QWidget):
         from PySide6.QtWidgets import QMessageBox
         root = Path(str(info.get("root") or ""))
         box = QMessageBox(self)
+        mark_tag_editor_dialog(box)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(t("meta_draft_available_title"))
         box.setText(t("meta_draft_available_message", n=info.get("affected_files", 0),
@@ -4236,6 +4593,7 @@ class MetadataEditorPanel(QWidget):
         from PySide6.QtWidgets import QMessageBox
         operation = request.get("operation", "operation") if isinstance(request, dict) else str(request)
         box = QMessageBox(self)
+        mark_tag_editor_dialog(box)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(t("meta_draft_unsaved_title"))
         box.setText(t("meta_draft_unsaved_message", operation=operation))
@@ -4259,31 +4617,35 @@ class MetadataEditorPanel(QWidget):
             self.unsaved_choice_requested.emit("cancel")
 
     def on_duplicate_scan_progress(self, done: int, total: int, eta: str) -> None:
-        self._summary_lbl.setText(t("meta_searching_duplicates_progress", done=done, total=total, eta=eta))
+        progress = t("meta_searching_duplicates_progress", done=done, total=total, eta=eta)
+        self._summary_lbl.setText(progress)
+        self._set_duplicate_status(progress)
 
     def on_duplicate_scan_complete(self, groups, elapsed: float, strategy: str) -> None:
         self._dupes_btn.setEnabled(True)
         if getattr(groups, "cancelled", False):
             self.on_status_update(t("meta_problems_cancelled"))
+            self._set_duplicate_status(t("meta_problems_cancelled"), "idle")
             self._update_summary()
             return
-        if hasattr(groups, "groups"):
-            if not groups.groups:
-                self.on_status_update(t("meta_no_duplicates_found", elapsed=elapsed))
-                self._update_summary()
-                return
-        elif not groups:
+        # Keep the result so the Duplicates page can describe it, and so the
+        # manager can be reopened without paying for a second scan.
+        self._last_duplicate_scan = (groups, elapsed, strategy)
+        self._render_duplicate_groups(groups)
+        # The verdict the Check pane now holds, echoed where the scan was run.
+        self._set_duplicate_status(
+            self._dupes_summary.text(),
+            "found" if self._duplicate_group_list(groups) else "clean")
+        if not self._duplicate_group_list(groups):
             self.on_status_update(t("meta_no_duplicates_found", elapsed=elapsed))
             self._update_summary()
             return
 
-        from ui.dialogs.duplicate_files_dialog import DuplicateFilesDialog
-        dlg = DuplicateFilesDialog(groups, elapsed, strategy, self._root_folder, parent=self)
-        if dlg.exec() == QDialog.Accepted and dlg.files_to_delete:
-            self.delete_duplicates_requested.emit(dlg.files_to_delete)
+        self._open_duplicate_manager(groups, elapsed, strategy)
 
     def on_duplicate_scan_error(self, msg: str) -> None:
         self._dupes_btn.setEnabled(True)
+        self._set_duplicate_status(t("meta_duplicate_search_error", msg=msg), "error")
         self.on_status_update(t("meta_duplicate_search_error", msg=msg))
         self._update_summary()
 
@@ -4514,7 +4876,10 @@ class MetadataEditorPanel(QWidget):
         self._refresh_navigation_controls()
 
         for row in getattr(self, "_op_rows", []):
-            row.setActionEnabled(has_edit_scope)
+            if hasattr(row, "setActionEnabled"):
+                row.setActionEnabled(has_edit_scope)
+            else:
+                row.setEnabled(has_edit_scope)
         for btn in getattr(self, "_checked_scope_buttons", []):
             btn.setEnabled(has_edit_scope)
 
@@ -4556,7 +4921,10 @@ class MetadataEditorPanel(QWidget):
         if hasattr(self, "_dupes_btn"):
             self._dupes_btn.setEnabled(self._root_folder is not None and not self._is_scanning)
         if hasattr(self, "_action_engine_btn"):
-            self._action_engine_btn.setEnabled(has_tracks and not self._is_scanning and not self._is_applying)
+            engine_available = has_tracks and not self._is_scanning and not self._is_applying
+            self._action_engine_btn.setEnabled(engine_available)
+            for row in getattr(self, "_action_catalog_rows", ()):
+                row.setActionEnabled(engine_available)
         if hasattr(self, "_backup_manager_btn"):
             self._backup_manager_btn.setEnabled(not self._is_applying and not self._is_restoring)
         if hasattr(self, "_insp_folder_title"):
@@ -4566,7 +4934,37 @@ class MetadataEditorPanel(QWidget):
             self._browse_btn.setText(
                 self._toolbar_text("meta_change_folder" if (self._root_folder and has_tracks) else "meta_browse_folder")
             )
+        if hasattr(self, "_rescan_action"):
+            can_rescan = (
+                self._root_folder is not None
+                and not self._is_scanning
+                and not self._is_applying
+                and not self._is_restoring
+            )
+            self._rescan_action.setEnabled(can_rescan)
+            if hasattr(self, "_refresh_menu_btn"):
+                self._refresh_menu_btn.setEnabled(can_rescan)
+            if hasattr(self, "_rescan_menu_btn"):
+                self._rescan_menu_btn.setEnabled(can_rescan)
+        self._refresh_path_chip()
+        self._refresh_footer()
+        self._refresh_check_pages()
         self._refresh_toolbar_action_styles()
+
+    def _refresh_path_chip(self) -> None:
+        """Show the active folder, elided from the left so the leaf survives."""
+        if not hasattr(self, "_path_chip"):
+            return
+        if self._root_folder is None:
+            self._path_chip.setText(t("meta_shell_no_folder"))
+            self._path_chip.setToolTip("")
+            return
+        full = str(self._root_folder)
+        metrics = self._path_chip.fontMetrics()
+        self._path_chip.setText(
+            metrics.elidedText(full, Qt.ElideLeft, self._path_chip.maximumWidth() - 16)
+        )
+        self._path_chip.setToolTip(full)
 
     def _refresh_selection_scope_state(self) -> None:
         selected_count = len(self._get_selected_tracks()) if hasattr(self, "_table") else 0
@@ -4577,6 +4975,19 @@ class MetadataEditorPanel(QWidget):
             self._online_open_button.setEnabled(has_selection)
         for btn in getattr(self, "_selection_scope_buttons", []):
             btn.setEnabled(has_selection)
+        # Open / Reveal / Copy path address one file by name; with several
+        # selected there is no single answer, so they need a stricter rule than
+        # the rest of the selection-scoped controls.
+        if hasattr(self, "_insp_property_open_btn"):
+            for btn in (self._insp_property_open_btn, self._insp_property_reveal_btn,
+                        self._insp_property_copy_btn):
+                btn.setEnabled(selected_count == 1)
+        if hasattr(self, "_insp_copy_tags_btn"):
+            # Copy reads exactly one file; paste needs something on the
+            # clipboard as well as somewhere to put it.
+            self._insp_copy_tags_btn.setEnabled(selected_count == 1)
+            self._insp_paste_tags_btn.setEnabled(
+                has_selection and bool(getattr(self, "_tag_clipboard", None)))
         if getattr(self, "_replaygain_analysis_running", False):
             self._insp_rg_track_btn.setEnabled(False)
             self._insp_rg_album_btn.setEnabled(False)
@@ -4691,11 +5102,14 @@ class MetadataEditorPanel(QWidget):
         self._insp_tracks_title.setText(
             t("meta_tracks_selected_summary", n=len(tracks), plural=plural)
         )
+        if hasattr(self, "_inspector_title_lbl"):
+            self._inspector_title_lbl.setText(
+                t("meta_tracks_selected_summary", n=len(tracks), plural=plural))
         field_names = tuple(self._insp_fields) + (LYRICS_FIELD, ARTWORK_FIELD) + tuple(REPLAYGAIN_FIELDS)
         snapshot = self._inspector_state.snapshot(tracks, field_names)
         pending_total = sum(track.has_changes for track in tracks)
         if snapshot.editable_count == len(tracks):
-            capability_text = t("meta_inspector_capability_all", n=len(tracks))
+            capability_text = t("meta_fields_scope_note")
         elif snapshot.editable_count:
             capability_text = t(
                 "meta_inspector_capability_some",
@@ -4704,6 +5118,9 @@ class MetadataEditorPanel(QWidget):
             )
         else:
             capability_text = t("meta_inspector_capability_none")
+        if hasattr(self, "_inspector_selection_lbl"):
+            self._inspector_selection_lbl.setText(
+                t("mt_status_read_only") if snapshot.editable_count == 0 else "")
         if pending_total:
             capability_text += " " + t("meta_inspector_pending_files", n=pending_total)
         self._insp_capability.setText(capability_text)
@@ -4727,10 +5144,14 @@ class MetadataEditorPanel(QWidget):
                     edit.blockSignals(False)
             edit.setEnabled(state.supported_count > 0)
             self._insp_clear_buttons[field_name].setEnabled(state.supported_count > 0)
-            edit.setStyleSheet(
-                f"QLineEdit {{ border-bottom: 2px solid {get_colors().accent}; }}"
-                if state.pending else ""
-            )
+            if state.pending:
+                c = tag_editor_colors()
+                edit.setStyleSheet(
+                    f"QLineEdit {{ border: 1px solid {c.accent}; border-radius: 8px;"
+                    f"  padding: 0 9px; background: {c.surface}; }}"
+                )
+            else:
+                edit.setStyleSheet("")
             edit.setAccessibleDescription(
                 t("meta_inspector_field_pending_tooltip") if state.pending else ""
             )
@@ -4802,10 +5223,13 @@ class MetadataEditorPanel(QWidget):
         if artwork_state.value_state is ValueState.MIXED:
             artwork_text = t("meta_artwork_mixed")
             self._insp_artwork_preview.setPixmap(QPixmap())
+            self._insp_artwork_preview.setText(t("meta_artwork_mixed_short"))
         elif stored_primary is None:
             artwork_text = t("meta_artwork_none")
             self._insp_artwork_preview.setPixmap(QPixmap())
+            self._insp_artwork_preview.setText(t("meta_artwork_none_short"))
         else:
+            self._insp_artwork_preview.clear()
             self._request_artwork_thumbnail("current", stored_primary, track_ids)
             artwork_text = t("meta_artwork_present", n=len(common_stored.entries))
             artwork_text += f" \u2066{stored_primary.mime_type} · {stored_primary.width}×{stored_primary.height}\u2069"
@@ -4817,17 +5241,24 @@ class MetadataEditorPanel(QWidget):
                 self._insp_artwork_proposed_preview.setPixmap(QPixmap())
                 self._insp_artwork_proposed_preview.setText(t("meta_artwork_pending_removal"))
         else:
-            self._insp_artwork_proposed_preview.clear()
-        self._insp_artwork_proposed_label.setVisible(artwork_state.pending)
-        self._insp_artwork_proposed_preview.setVisible(artwork_state.pending)
+            self._insp_artwork_proposed_preview.setPixmap(QPixmap())
+            self._insp_artwork_proposed_preview.setText(t("meta_artwork_drop_prompt"))
+        # The reference always shows both cover slots.  Hiding the proposed
+        # slot made the entire page jump sideways before/after an edit.
+        self._insp_artwork_proposed_label.setVisible(True)
+        self._insp_artwork_proposed_preview.setVisible(True)
         if artwork_state.supported_count == 0:
             artwork_text += " " + t("meta_artwork_read_only")
         if common_stored and common_stored.diagnostics:
             artwork_text += " " + t("meta_artwork_invalid_image")
         self._insp_artwork_state.setText(artwork_text)
         editable_artwork = artwork_state.supported_count > 0
-        can_add = editable_artwork and all(track.format_id != "m4a" for track in tracks)
-        self._insp_artwork_add_btn.setEnabled(can_add)
+        # "Choose image" is the adaptive entry point: it appends when the file
+        # has no cover and can hold several, and replaces otherwise.  It used
+        # to be disabled outright for M4A (single-cover format), which -- with
+        # Replace hidden at the time -- left no way at all to set a cover on an
+        # M4A file.
+        self._insp_artwork_add_btn.setEnabled(editable_artwork)
         self._insp_artwork_replace_btn.setEnabled(editable_artwork)
         removable = any(track.original.artwork.entries or track.original.artwork.diagnostics for track in tracks)
         self._insp_artwork_remove_btn.setEnabled(editable_artwork and removable)
@@ -4858,6 +5289,7 @@ class MetadataEditorPanel(QWidget):
             self._insp_rg_album_btn.setEnabled(replay_supported)
         self._insp_rg_clear_track_btn.setEnabled(replay_supported)
         self._insp_rg_clear_album_btn.setEnabled(replay_supported)
+        self._insp_rg_clear_all_btn.setEnabled(replay_supported)
         self._insp_rg_revert_btn.setEnabled(
             any(snapshot.fields[field_name].pending for field_name in REPLAYGAIN_FIELDS)
         )
@@ -4879,6 +5311,35 @@ class MetadataEditorPanel(QWidget):
                 if key in props:
                     prop_lines.append(t(label_key) + ": " + self._format_property_value(key, props[key]))
             self._insp_properties.setText("\n".join(prop_lines) or t("meta_property_unavailable"))
+            def display_property(key: str, value: object) -> str:
+                if value is None or value == "":
+                    return t("meta_inspector_empty_value")
+                return self._format_property_value(key, value)
+
+            property_values = {
+                "path": str(tracks[0].path),
+                "format_id": display_property(
+                    "format_id", props.get("format_id", tracks[0].format_id)),
+                "size_bytes": display_property("size_bytes", props.get("size_bytes")),
+                "duration_seconds": display_property(
+                    "duration_seconds", props.get("duration_seconds", 0)),
+                "bitrate": display_property("bitrate", props.get("bitrate")),
+                "sample_rate": display_property("sample_rate", props.get("sample_rate")),
+                "channels": display_property("channels", props.get("channels")),
+                "modified_time": display_property(
+                    "modified_time", props.get("modified_time")),
+                "capability": (
+                    t("meta_property_capability_full")
+                    if snapshot.editable_count else t("mt_status_read_only")
+                ),
+            }
+            for key, label in self._insp_property_values.items():
+                label.setText(str(property_values.get(key, "")))
+            self._insp_property_table.setVisible(True)
+            self._insp_properties.setVisible(False)
+            for button in (self._insp_property_open_btn, self._insp_property_reveal_btn,
+                           self._insp_property_copy_btn):
+                button.setEnabled(True)
             state = getattr(tracks[0], "external_state", "current")
             self._insp_external_status.setText(
                 t("meta_external_inspector_status",
@@ -4887,6 +5348,13 @@ class MetadataEditorPanel(QWidget):
                 getattr(tracks[0], "external_conflict", None) is not None)
         else:
             self._insp_properties.setText(t("meta_property_single_selection_only"))
+            self._insp_properties.setVisible(True)
+            for label in self._insp_property_values.values():
+                label.clear()
+            self._insp_property_table.setVisible(False)
+            for button in (self._insp_property_open_btn, self._insp_property_reveal_btn,
+                           self._insp_property_copy_btn):
+                button.setEnabled(False)
             states = {getattr(track, "external_state", "current") for track in tracks}
             self._insp_external_status.setText(
                 t("meta_external_multiple_states", n=len(states)))
@@ -4985,24 +5453,24 @@ class MetadataEditorPanel(QWidget):
         font_size = max(6, int(10 * (pct / 100.0)))
         factor = pct / 100.0
         
-        table_colors = get_colors()
+        table_colors = tag_editor_colors()
         # Win11 Details View: flat header (no per-section vertical borders,
         # no bold, muted color, single underline). Capsule paint handles
         # selection — keep selection-background-color transparent so Qt
         # doesn't overdraw it with a flat rectangle.
         self._table.setStyleSheet(
-            f"QTableView {{ background: {table_colors.bg}; color: {table_colors.text_primary};"
+            f"QTableView {{ background: {table_colors.surface}; color: {table_colors.text_primary};"
             f"  border: none; border-radius: 0;"
             f"  selection-background-color: transparent; selection-color: {table_colors.text_primary};"
             f"  font-size: {font_size}pt; }}"
             "QTableView::item { background: transparent; border: none; }"
-            f"QHeaderView::section {{ background: {table_colors.bg};"
+            f"QHeaderView::section {{ background: {table_colors.surface3};"
             f"  color: {table_colors.text_secondary};"
             f"  border: none;"
-            f"  padding: 0 12px; height: 32px;"
-            f"  font-size: {font_size}pt; font-weight: normal; }}"
+            f"  padding: 0 8px; height: 36px;"
+            f"  font-size: {font_size}pt; font-weight: 800; }}"
             f"QHeaderView::section:hover {{ color: {table_colors.text_primary}; }}"
-            f"QTableCornerButton::section {{ background: {table_colors.bg};"
+            f"QTableCornerButton::section {{ background: {table_colors.surface3};"
             f"  border: none; }}"
         )
 
@@ -5027,8 +5495,12 @@ class MetadataEditorPanel(QWidget):
         try:
             for col in range(COLUMN_COUNT):
                 base_w = saved_widths.get(col, DEFAULT_COL_WIDTHS.get(col, 100))
-                if col == COL_CHECK:
+                if col == COL_GUTTER:
                     self._table.setColumnWidth(col, ExplorerDetailsView._SIDE_EMPTY_GUTTER)
+                elif col == COL_END_GUTTER:
+                    self._table.setColumnWidth(col, ExplorerDetailsView._END_EMPTY_GUTTER)
+                elif col == COL_CHECK:
+                    self._table.setColumnWidth(col, ExplorerDetailsView._CHECK_COLUMN_WIDTH)
                 else:
                     self._table.setColumnWidth(col, max(10, int(base_w * factor)))
         finally:
@@ -5038,185 +5510,74 @@ class MetadataEditorPanel(QWidget):
         # (or overshoot the viewport) — re-settle the filler column last.
         self._fill_leftover_space()
 
-    def _on_tree_item_moved(self, src: Path, dest: Path) -> None:
-        """Physically moves a file or folder on the disk, and updates UI.
 
-        The controller owns the lifecycle guard, the evidence and the
-        reconciliation; the panel only rebases what it displays afterwards.
-        """
-        result = self._run_file_operation("move_paths", [src], Path(dest).parent)
-        if result is not None and result.succeeded:
-            self._rebase_loaded_paths(src, result.succeeded[0].destination)
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout(event.size().width())
 
-    def _on_tree_context_menu(self, pos: QPoint) -> None:
-        item = self._tree.itemAt(pos)
-        if not item:
+    def _apply_responsive_layout(self, width: int) -> None:
+        """Mirror the prototype's 1180/1040 responsive breakpoints."""
+        if not hasattr(self, "_toolbar_bar"):
             return
+        compact = width <= 1180
+        narrow = width <= 1040
+        mode = "narrow" if narrow else "compact" if compact else "wide"
+        for widget in (self._path_chip,):
+            widget.setVisible(not compact)
+        self._search_edit.setFixedWidth(150 if narrow else 180 if compact else 230)
+        if hasattr(self, "_footer_desc"):
+            self._footer_desc.setVisible(not compact)
 
-        path_str = item.data(0, Qt.UserRole)
-        if not path_str:
+        if not hasattr(self, "_body_splitter"):
             return
-        path = Path(path_str)
-        is_file = item.data(0, self._ROLE_IS_FILE)
-        add_folder_action = None
-
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        open_action = menu.addAction(t("meta_open_file")) if is_file else None
-        reveal_action = menu.addAction(t("meta_reveal_in_explorer"))
-        copy_action = menu.addAction(t("meta_copy_path"))
-        properties_action = menu.addAction(t("meta_properties"))
-        menu.addSeparator()
-        if not is_file:
-            add_folder_action = menu.addAction(FluentIcon.FOLDER_ADD.icon(), t("meta_add_folder"))
-            menu.addSeparator()
-
-        rename_action = menu.addAction(FluentIcon.EDIT.icon(), t("meta_rename_menu"))
-        move_action = menu.addAction(t("meta_move_menu"))
-        delete_action = menu.addAction(FluentIcon.DELETE.icon(), t("meta_delete_menu"))
-
-        action = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if open_action is not None and action == open_action:
-            self._perform_path_operation([path], self._file_operations.open_file)
-        elif action == reveal_action:
-            self._perform_path_operation([path], self._file_operations.reveal_in_explorer)
-        elif action == copy_action:
-            self._copy_tree_path(path)
-        elif action == properties_action:
-            self._show_path_properties(path)
-        elif add_folder_action is not None and action == add_folder_action:
-            self._on_tree_add_folder(path)
-        elif action == rename_action:
-            self._on_tree_rename(path, is_file)
-        elif action == move_action:
-            self._move_tree_path(path)
-        elif action == delete_action:
-            self._on_tree_delete(path, is_file)
-
-    def _on_tree_add_folder(self, parent_path: Path) -> None:
-        new_name, ok = get_text(
-            self,
-            t("meta_new_folder_dialog_title"),
-            t("meta_new_folder_prompt"),
-            text=t("meta_new_folder_default"),
-        )
-        if not ok or not new_name.strip():
+        sizes = self._body_splitter.sizes()
+        if len(sizes) != 3:
             return
+        changed = False
 
-        result = self._run_file_operation("create_folder", parent_path, new_name)
-        if result is not None and result.succeeded:
-            self._rebuild_tree_from_loaded_tracks()
-            self._get_or_create_folder_item(result.succeeded[0].destination)
+        if narrow:
+            if sizes[0] > self._TREE_RAIL_WIDTH + 4:
+                self._last_tree_width = max(self._TREE_OPEN_MIN, sizes[0])
+                sizes[1] += sizes[0] - self._TREE_RAIL_WIDTH
+                sizes[0] = self._TREE_RAIL_WIDTH
+                self._responsive_forced_tree_collapse = True
+                changed = True
+        else:
+            tree_target = min(self._last_tree_width, 195) if compact else self._last_tree_width
+            if self._responsive_forced_tree_collapse:
+                available = max(0, sizes[1] - self._TABLE_OPEN_MIN)
+                take = min(available, max(0, tree_target - sizes[0]))
+                sizes[0] += take
+                sizes[1] -= take
+                if sizes[0] >= self._TREE_OPEN_MIN:
+                    self._responsive_forced_tree_collapse = False
+                changed = changed or take > 0
+            elif sizes[0] > self._TREE_RAIL_WIDTH + 4:
+                delta = tree_target - sizes[0]
+                if delta > 0:
+                    take = min(max(0, sizes[1] - self._TABLE_OPEN_MIN), delta)
+                    sizes[0] += take
+                    sizes[1] -= take
+                    changed = changed or take > 0
+                elif delta < 0:
+                    sizes[0] += delta
+                    sizes[1] -= delta
+                    changed = True
 
-    def _on_tree_rename(self, path: Path, is_file: bool) -> None:
-        new_name, ok = get_text(
-            self,
-            t("meta_rename_dialog_title"),
-            t("meta_rename_prompt"),
-            text=path.name,
-        )
-        if not ok or not new_name.strip():
-            return
+        inspector_target = 300 if narrow else 330 if compact else self._last_inspector_width
+        if sizes[2] > inspector_target:
+            sizes[1] += sizes[2] - inspector_target
+            sizes[2] = inspector_target
+            changed = True
+        elif sizes[2] > self._INSPECTOR_RAIL_WIDTH + 4 and sizes[2] < inspector_target:
+            take = min(max(0, sizes[1] - self._TABLE_OPEN_MIN), inspector_target - sizes[2])
+            sizes[2] += take
+            sizes[1] -= take
+            changed = changed or take > 0
+        if changed:
+            self._apply_body_sizes(sizes, save=False)
+        self._responsive_mode = mode
 
-        result = self._run_file_operation("rename_path", path, new_name)
-        if result is not None and result.succeeded:
-            self._rebase_loaded_paths(path, result.succeeded[0].destination)
-
-    def _on_tree_delete(self, path: Path, is_file: bool) -> None:
-        title = t("meta_delete_file_title") if is_file else t("meta_delete_folder_title")
-        text = t("meta_delete_confirm", name=path.name)
-        if not is_file:
-            text += t("meta_delete_recursive_note")
-
-        if not confirm(self, title, text, accept_text=t("meta_delete_menu"),
-                       cancel_text=t("cancel_btn"), danger=True):
-            return
-        result = self._run_file_operation("recycle_paths", [path])
-        if result is None or not result.succeeded:
-            return
-        removed = [track.path for track in self._model.get_all_tracks()
-                   if track.path == path or self._is_path_within(track.path, path)]
-        self._model.remove_paths(removed)
-        self._navigation.reconcile_after_delete(path)
-        self._rebuild_tree_from_loaded_tracks()
-        self._apply_navigation_filter()
-        self._update_summary()
-        self._refresh_checked_scope_state()
-
-    def _move_tree_path(self, path: Path) -> None:
-        if not self._root_folder:
-            return
-        folder = QFileDialog.getExistingDirectory(self, t("meta_move_choose_folder"), str(self._root_folder))
-        if not folder:
-            return
-        destination = Path(folder) / path.name
-        self._on_tree_item_moved(path, destination)
-
-    def _copy_tree_path(self, path: Path) -> None:
-        try:
-            QApplication.clipboard().setText(self._file_operations.copy_path(path))
-        except FileOperationError as exc:
-            show_warning(self, t("meta_error_title"), str(exc))
-
-    def _show_path_properties(self, path: Path) -> None:
-        try:
-            props = self._file_operations.properties(path)
-        except FileOperationError as exc:
-            show_warning(self, t("meta_error_title"), str(exc))
-            return
-        show_info(self, t("meta_properties"), t("meta_properties_item", name=props.path.name, path=str(props.path), size=isolate_number(f"{props.size_bytes:,}"), modified=isolate_number(display_timestamp(props.modified_at))))
-
-    def _perform_path_operation(self, paths: list[Path], operation) -> None:
-        errors: list[str] = []
-        for path in paths:
-            try:
-                operation(path)
-            except FileOperationError as exc:
-                errors.append(str(exc))
-        if errors:
-            show_warning(self, t("meta_error_title"), "\n".join(errors))
-
-    @staticmethod
-    def _is_path_within(path: Path, parent: Path) -> bool:
-        try:
-            path.relative_to(parent)
-            return True
-        except ValueError:
-            return False
-
-    def _rebase_loaded_paths(self, source: Path, destination: Path) -> None:
-        self._navigation.remap_folder(source, destination)
-        for track in self._model.get_all_tracks():
-            try:
-                relative = track.path.relative_to(source)
-            except ValueError:
-                continue
-            new_path = destination / relative
-            if track.proposed_filename == new_path.name:
-                track.proposed_filename = None
-            self._model.update_file_path(track, new_path)
-        self._rebuild_tree_from_loaded_tracks()
-        self._apply_navigation_filter()
-
-    def _rebuild_tree_from_loaded_tracks(self) -> None:
-        if not self._root_folder:
-            return
-        was_blocked = self._tree.blockSignals(True)
-        self._tree.setUpdatesEnabled(False)
-        self._ignore_tree_changes = True
-        try:
-            self._tree.clear()
-            self._folder_items.clear()
-            self._file_items.clear()
-            self._ensure_root_item()
-            self._add_many_to_tree(self._model.get_all_tracks())
-            current = self._navigation.current
-            if current is not None and current.is_dir():
-                self._get_or_create_folder_item(current)
-        finally:
-            self._ignore_tree_changes = False
-            self._tree.blockSignals(was_blocked)
-            self._tree.setUpdatesEnabled(True)
 
     def closeEvent(self, event) -> None:
         if not self.shutdown_artwork_workers():

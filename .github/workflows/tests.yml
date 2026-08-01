@@ -72,8 +72,8 @@ jobs:
         # Python package needs to be importable, so `playwright install
         # chromium` would just add ~300MB of download for zero coverage.
         run: |
-          pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
         shell: bash
 
       - name: Run full test suite (isolated, fresh process per file)
@@ -94,6 +94,10 @@ jobs:
         shell: bash
         env:
           PYTHONPATH: .
+          # Preserve Python frames when a native Qt/PySide fault terminates a
+          # child process.  The isolated runner still treats that exit as a
+          # failure; this only makes the evidence actionable.
+          PYTHONFAULTHANDLER: "1"
 
       - name: Upload isolated test evidence
         # Uploaded even when the gate fails — a red leg is exactly when the

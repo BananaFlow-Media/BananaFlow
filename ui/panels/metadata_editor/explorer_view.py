@@ -3,7 +3,8 @@ ui/panels/metadata_editor/explorer_view.py  –  Win11-Explorer-style table
 ===========================================================================
 The Details-View mimicry widgets for the Tag Editor:
   ExplorerFileListDelegate — plain cells (row background painted by view)
-  FilenameDelegate         — LTR filename cells: icon + hover checkbox
+  FilenameDelegate         — LTR filename cells with their media icon
+  SelectionCheckDelegate   — fixed standalone row-selection checkboxes
   MetadataHeaderView       — header with 'Select All' check + resize grips
   ExplorerTableStyle       — suppresses Qt's flat selection rectangle
   ExplorerFileListView     — row-capsule painting, rubber band, empty-area
@@ -45,14 +46,18 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
-from ui.models.metadata_table_model import COL_CHECK, COL_FILENAME, COL_FILENAME_NEW
-from ui.theme_manager import get_colors
-
-from .shared import CB_SIZE, paint_check_mark
+from ui.models.metadata_table_model import (
+    COL_CHECK,
+    COL_END_GUTTER,
+    COL_FILENAME,
+    COL_FILENAME_NEW,
+    COL_GUTTER,
+)
+from .shared import CB_SIZE, paint_check_mark, tag_editor_colors
 
 
 def _accent_color() -> QColor:
-    accent = QColor(get_colors().accent)
+    accent = QColor(tag_editor_colors().accent)
     if not accent.isValid():
         return QColor(0, 120, 212)
     return accent
@@ -80,8 +85,8 @@ class ExplorerFileListDelegate(QStyledItemDelegate):
         super().__init__(parent)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
-        if index.column() == COL_CHECK:
-            return  # Draw absolutely nothing in the gutter column
+        if index.column() in (COL_CHECK, COL_GUTTER, COL_END_GUTTER):
+            return  # Dedicated fixed-column delegates own these cells.
 
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -99,7 +104,7 @@ class ExplorerFileListDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.State_Selected
         opt.state &= ~QStyle.State_HasFocus
         opt.backgroundBrush = QBrush(Qt.NoBrush)
-        text_color = QColor(get_colors().text_primary)
+        text_color = QColor(tag_editor_colors().text_primary)
         opt.palette.setColor(QPalette.Text, text_color)
         opt.palette.setColor(QPalette.HighlightedText, text_color)
 
@@ -185,7 +190,7 @@ class FilenameDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.State_HasFocus
         opt.backgroundBrush = QBrush(Qt.NoBrush)
 
-        text_color = QColor(get_colors().text_primary)
+        text_color = QColor(tag_editor_colors().text_primary)
         opt.palette.setColor(QPalette.Text, text_color)
         opt.palette.setColor(QPalette.HighlightedText, text_color)
 
@@ -312,9 +317,26 @@ class FilenameDelegate(QStyledItemDelegate):
         paint_check_mark(painter, cx, cy, is_checked)
 
 
+class SelectionCheckDelegate(QStyledItemDelegate):
+    """Paint a persistent checkbox that directly mirrors row selection."""
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        table = self.parent()
+        selection_model = table.selectionModel() if table is not None else None
+        checked = bool(
+            selection_model
+            and selection_model.isRowSelected(index.row(), QModelIndex())
+        )
+        painter.save()
+        painter.setClipping(False)
+        paint_check_mark(
+            painter, option.rect.center().x(), option.rect.center().y(), checked
+        )
+        painter.restore()
+
+
 class MetadataHeaderView(QHeaderView):
-    """Custom horizontal header that draws a check-mark 'Select All' toggle
-    in the filename column, perfectly aligned with the row checkboxes."""
+    """Draw Select All in the fixed standalone checkbox column."""
     
     toggled = Signal(bool)
     sectionAutoSizeRequested = Signal(int)
@@ -363,25 +385,17 @@ class MetadataHeaderView(QHeaderView):
             self.viewport().update()
 
     def _get_cb_rect(self, logicalIndex, rect):
-        if logicalIndex != COL_FILENAME:
+        if logicalIndex != COL_CHECK:
             return QRect()
-
-        is_rtl = QApplication.layoutDirection() == Qt.RightToLeft
-        margin_x = FilenameDelegate._RTL_FILENAME_GUTTER if is_rtl else 8
-        cb_width = CB_SIZE + FilenameDelegate._CB_INSET + 4
-
-        if is_rtl:
-            return QRect(rect.right() - margin_x - cb_width, rect.top(), cb_width, rect.height())
-        else:
-            return QRect(rect.left() + margin_x, rect.top(), cb_width, rect.height())
+        return QRect(rect)
 
     def _draw_resize_grip(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:
         """Draw the subtle Windows-like separator that marks resize handles."""
-        if logicalIndex == COL_CHECK or self.isSectionHidden(logicalIndex) or rect.width() <= 0:
+        if logicalIndex in (COL_CHECK, COL_GUTTER, COL_END_GUTTER) or self.isSectionHidden(logicalIndex) or rect.width() <= 0:
             return
 
         is_rtl = self.isRightToLeft()
-        colors = get_colors()
+        colors = tag_editor_colors()
         line = QColor(colors.border)
         line.setAlpha(185)
         
@@ -413,8 +427,8 @@ class MetadataHeaderView(QHeaderView):
             painter.end()
 
     def paintSection(self, painter, rect, logicalIndex):
-        if logicalIndex == COL_CHECK:
-            colors = get_colors()
+        if logicalIndex in (COL_CHECK, COL_GUTTER, COL_END_GUTTER):
+            colors = tag_editor_colors()
             painter.save()
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(colors.bg))
@@ -422,71 +436,21 @@ class MetadataHeaderView(QHeaderView):
             line = QColor(colors.border)
             line.setAlpha(185)
             painter.setPen(QPen(line, 1))
-            x = rect.right() if self.isRightToLeft() else rect.left()
-            painter.drawLine(x, rect.top() + 7, x, rect.bottom() - 7)
+            if logicalIndex in (COL_GUTTER, COL_END_GUTTER):
+                # Each empty strip draws its divider toward the table content.
+                if logicalIndex == COL_GUTTER:
+                    x = rect.left() if self.isRightToLeft() else rect.right()
+                else:
+                    x = rect.right() if self.isRightToLeft() else rect.left()
+                painter.drawLine(x, rect.top() + 7, x, rect.bottom() - 7)
+            else:
+                paint_check_mark(
+                    painter, rect.center().x(), rect.center().y(), self._is_checked
+                )
             painter.restore()
             return
 
         super().paintSection(painter, rect, logicalIndex)
-        
-        cb_rect = self._get_cb_rect(logicalIndex, rect)
-        if not cb_rect.isValid():
-            return
-        
-        colors = get_colors()
-        is_rtl = self.isRightToLeft()
-
-        # --- Step 1: Clear the text/overlap area with normal header background ---
-        bg_main = QColor(colors.bg)
-        painter.save()
-        painter.setClipping(False)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(bg_main)
-        if is_rtl:
-            clear_rect = QRect(cb_rect.left() - 2, rect.top(),
-                               rect.right() - cb_rect.left() + 2, rect.height())
-        else:
-            clear_rect = QRect(rect.left(), rect.top(),
-                               cb_rect.right() - rect.left() + 2, rect.height())
-        painter.drawRect(clear_rect)
-        painter.restore()
-
-        # --- Step 2: Redraw the header text in the safe area (left of mark) ---
-        header_text = self.model().headerData(logicalIndex, Qt.Horizontal, Qt.DisplayRole) or ""
-        header_text = str(header_text)
-        if header_text:
-            painter.save()
-            painter.setClipping(False)
-            painter.setFont(self.font())
-            painter.setPen(QColor(colors.text_secondary))
-            PADDING = 8
-            if is_rtl:
-                text_rect = QRect(rect.left() + PADDING, rect.top(),
-                                  cb_rect.left() - rect.left() - PADDING * 2, rect.height())
-                # AlignAbsolute forces physical-right regardless of RTL layout direction
-                align = (Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute
-                         | Qt.AlignmentFlag.AlignVCenter)
-            else:
-                text_rect = QRect(cb_rect.right() + PADDING, rect.top(),
-                                  rect.right() - cb_rect.right() - PADDING * 2, rect.height())
-                align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            if text_rect.width() > 0:
-                fm = painter.fontMetrics()
-                elided = fm.elidedText(header_text, Qt.ElideRight, text_rect.width())
-                painter.drawText(text_rect, align, elided)
-            painter.restore()
-
-        # --- Step 3: Draw the check mark on top (shared Win11 painter) ---
-        painter.save()
-        painter.setClipping(False)
-        CB_INSET = 4
-        if is_rtl:
-            cx = cb_rect.right() - CB_INSET - CB_SIZE // 2
-        else:
-            cx = cb_rect.left() + CB_INSET + CB_SIZE // 2
-        cy = cb_rect.top() + cb_rect.height() // 2
-        paint_check_mark(painter, cx, cy, self._is_checked)
-        painter.restore()
 
     def mousePressEvent(self, e):
         logicalIndex = self.logicalIndexAt(e.position().toPoint().x())
@@ -503,7 +467,7 @@ class MetadataHeaderView(QHeaderView):
                 self.toggled.emit(self._is_checked)
                 return
 
-            if logicalIndex == COL_CHECK:
+            if logicalIndex in (COL_CHECK, COL_GUTTER, COL_END_GUTTER):
                 e.accept()
                 return
                 
@@ -511,7 +475,7 @@ class MetadataHeaderView(QHeaderView):
 
     def mouseReleaseEvent(self, e):
         logicalIndex = self.logicalIndexAt(e.position().toPoint().x())
-        if logicalIndex == COL_CHECK:
+        if logicalIndex in (COL_CHECK, COL_GUTTER, COL_END_GUTTER):
             e.accept()
             return
 
@@ -578,7 +542,11 @@ class ExplorerDetailsView(QTableView):
     viewportResized = Signal()
     selectedItemsChanged = Signal(list)  # items resolved through model.track_at_row()
 
-    _SIDE_EMPTY_GUTTER = 28
+    _CHECK_COLUMN_WIDTH = 24
+    # 60% of the original 28 px gutter, rounded to the nearest pixel.
+    _SIDE_EMPTY_GUTTER = 17
+    # Opposite-edge clear area: about half the leading gutter.
+    _END_EMPTY_GUTTER = 9
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -597,15 +565,15 @@ class ExplorerDetailsView(QTableView):
 
         # Win11 Details View row geometry — 40 px tall, no grid.
         vh = self.verticalHeader()
-        vh.setDefaultSectionSize(40)
-        vh.setMinimumSectionSize(40)
+        vh.setDefaultSectionSize(42)
+        vh.setMinimumSectionSize(42)
 
         # Win11-style inset: small margins around the content area so the row
         # capsule visually floats inside the panel (left/right/bottom gutter).
-        self.setViewportMargins(4, 0, 4, 4)
+        self.setViewportMargins(0, 0, 0, 0)
 
         # Make the empty area follow the theme by default
-        bg = QColor(get_colors().bg)
+        bg = QColor(tag_editor_colors().surface)
         pal = self.viewport().palette()
         pal.setColor(QPalette.Base, bg)
         pal.setColor(QPalette.Window, bg)
@@ -619,7 +587,7 @@ class ExplorerDetailsView(QTableView):
             _tm.theme_changed.connect(self._refresh_viewport_palette)
 
     def _refresh_viewport_palette(self) -> None:
-        bg = QColor(get_colors().bg)
+        bg = QColor(tag_editor_colors().surface)
         pal = self.viewport().palette()
         pal.setColor(QPalette.Base, bg)
         pal.setColor(QPalette.Window, bg)
@@ -637,7 +605,7 @@ class ExplorerDetailsView(QTableView):
     def paintEvent(self, event) -> None:
         # Fill the entire viewport with the theme background first
         painter = QPainter(self.viewport())
-        painter.fillRect(self.viewport().rect(), QColor(get_colors().bg))
+        painter.fillRect(self.viewport().rect(), QColor(tag_editor_colors().surface))
         
         # Draw custom selection/hover row backgrounds before drawing cells on top
         model = self.model()
@@ -679,29 +647,25 @@ class ExplorerDetailsView(QTableView):
         pos = self._event_pos(event)
 
         if event.button() == Qt.LeftButton:
-            # ── Checkbox hit-test in COL_FILENAME ────────────────────────────
+            # ── Checkbox hit-test in its dedicated fixed column ──────────────
             # Toggle is DEFERRED to mouseReleaseEvent so that dragging from the
             # checkbox zone can still start a rubber-band selection.
             idx = self.indexAt(pos)
-            if idx.isValid() and idx.column() == COL_FILENAME:
-                delegate = self.itemDelegateForColumn(COL_FILENAME)
-                if hasattr(delegate, "checkbox_hit_rect"):
-                    cell_rect = self.visualRect(idx)
-                    if delegate.checkbox_hit_rect(cell_rect).contains(pos):
-                        self._pending_cb_row = idx.row()
-                        self._rubber_origin = pos
-                        self._rubber_active = True
-                        self._rubber_dragging = False
-                        self._rubber_modifiers = event.modifiers()
-                        self._rubber_rect = QRect()
-                        selection_model = self.selectionModel()
-                        self._rubber_base_selection = (
-                            selection_model.selection()
-                            if selection_model is not None else QItemSelection()
-                        )
-                        self._empty_area_pressed = False
-                        event.accept()
-                        return
+            if idx.isValid() and idx.column() == COL_CHECK:
+                self._pending_cb_row = idx.row()
+                self._rubber_origin = pos
+                self._rubber_active = True
+                self._rubber_dragging = False
+                self._rubber_modifiers = event.modifiers()
+                self._rubber_rect = QRect()
+                selection_model = self.selectionModel()
+                self._rubber_base_selection = (
+                    selection_model.selection()
+                    if selection_model is not None else QItemSelection()
+                )
+                self._empty_area_pressed = False
+                event.accept()
+                return
 
             # ── Rubber-band tracking: start on any left-button press ─────────
             self._rubber_origin = pos
@@ -757,7 +721,7 @@ class ExplorerDetailsView(QTableView):
                 selection_model = self.selectionModel()
                 if selection_model is not None:
                     model = self.model()
-                    index = model.index(row, COL_FILENAME)
+                    index = model.index(row, COL_CHECK)
                     selection_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
                     selection_model.select(
                         index,
@@ -986,22 +950,21 @@ class ExplorerDetailsView(QTableView):
     def _explorer_palette(self) -> dict[str, QColor]:
         """Win11 Details-View palette in Microsoft system-accent blue.
 
-        Keys ``base`` / ``row_alt`` track the theme background (used by the
-        COL_CHECK gutter strip). ``separator`` is transparent — Win11 has
+        Keys ``base`` / ``row_alt`` track the theme background. ``separator`` is transparent — Win11 has
         no inter-row separator lines. ``hover_border`` is transparent too —
         Win11 hover has fill only, no outline.
         """
-        colors = get_colors()
-        is_dark = QColor(colors.bg).lightness() < 128
-        bg = QColor(colors.bg)
+        colors = tag_editor_colors()
+        is_dark = QColor(colors.surface).lightness() < 128
+        bg = QColor(colors.surface)
         transparent = QColor(0, 0, 0, 0)
         accent = _accent_color()
         if is_dark:
             # Selected fill at ~50 % opacity over dark bg gives clearly visible blue.
-            sel_fill = _with_alpha(accent, 60)
-            sel_fill_ia = _with_alpha(accent, 35)   # inactive
-            sel_border = _with_alpha(accent, 220)
-            sel_border_ia = _with_alpha(accent, 90)
+            sel_fill = _with_alpha(accent, 32)
+            sel_fill_ia = _with_alpha(accent, 24)
+            sel_border = transparent
+            sel_border_ia = transparent
             hover_fill = QColor(255, 255, 255, 18)
             return {
                 "base": bg, "row_alt": bg,
@@ -1009,21 +972,21 @@ class ExplorerDetailsView(QTableView):
                 "selected": sel_fill, "selected_inactive": sel_fill_ia,
                 "selected_border": sel_border,
                 "selected_inactive_border": sel_border_ia,
-                "separator": transparent,
+                "separator": QColor(colors.border),
             }
         # Light mode
-        sel_fill = _with_alpha(accent, 60)
-        sel_fill_ia = _with_alpha(accent, 35)   # inactive
-        sel_border = _with_alpha(accent.darker(145), 180)
-        sel_border_ia = _with_alpha(accent.darker(145), 90)
-        hover_fill = QColor(0, 0, 0, 12)
+        sel_fill = _with_alpha(accent, 19)
+        sel_fill_ia = _with_alpha(accent, 16)
+        sel_border = transparent
+        sel_border_ia = transparent
+        hover_fill = QColor("#F8FAF9")
         return {
             "base": bg, "row_alt": bg,
             "hover": hover_fill, "hover_border": transparent,
             "selected": sel_fill, "selected_inactive": sel_fill_ia,
             "selected_border": sel_border,
             "selected_inactive_border": sel_border_ia,
-            "separator": transparent,
+            "separator": QColor("#EEF2EF"),
         }
 
     def _content_row_rect(self, row_rect: QRect, row: int) -> QRect:
@@ -1034,7 +997,7 @@ class ExplorerDetailsView(QTableView):
         left: int | None = None
         right: int | None = None
         for logical in range(model.columnCount()):
-            if logical == COL_CHECK or self.isColumnHidden(logical):
+            if logical in (COL_GUTTER, COL_END_GUTTER) or self.isColumnHidden(logical):
                 continue
             width = self.columnWidth(logical)
             if width <= 0:
@@ -1046,59 +1009,9 @@ class ExplorerDetailsView(QTableView):
         if left is None or right is None:
             return QRect()
 
-        rect = QRect(left, row_rect.top(), right - left + 1, row_rect.height())
-        
-        is_rtl = QApplication.layoutDirection() == Qt.RightToLeft
-        x_check = self.columnViewportPosition(COL_CHECK)
-        w_check = self.columnWidth(COL_CHECK)
-        
-        if is_rtl:
-            # In RTL, the check column is on the left.
-            # The capsule's left edge must not overlap the check column's right edge.
-            gutter_limit = x_check + w_check
-            if rect.left() < gutter_limit:
-                rect.setLeft(gutter_limit)
-
-            filename_x = self.columnViewportPosition(COL_FILENAME)
-            filename_w = self.columnWidth(COL_FILENAME)
-            cb_width = (
-                FilenameDelegate._CB_INSET
-                + FilenameDelegate._CB_SIZE
-                + FilenameDelegate._CB_GAP
-            )
-            # Stop at the outer edge of the header's gray select-all box,
-            # leaving the same clean checkbox gutter in selected rows.
-            gray_box_right = (
-                filename_x
-                + filename_w
-                - FilenameDelegate._RTL_FILENAME_GUTTER
-                + 2
-            )
-            if rect.right() > gray_box_right:
-                rect.setRight(max(rect.left(), gray_box_right))
-        else:
-            # In LTR, the check column is on the right.
-            # The capsule's right edge must not overlap the check column's left edge.
-            gutter_limit = x_check - 1
-            if rect.right() > gutter_limit:
-                rect.setRight(max(rect.left(), gutter_limit))
-
-            filename_x = self.columnViewportPosition(COL_FILENAME)
-            cb_width = (
-                FilenameDelegate._CB_INSET
-                + FilenameDelegate._CB_SIZE
-                + FilenameDelegate._CB_GAP
-            )
-            gray_box_right = filename_x + 8 + cb_width + 2
-            if rect.left() < gray_box_right:
-                rect.setLeft(min(rect.right(), gray_box_right))
-        return rect
-
-    def _empty_side_rect(self) -> QRect:
-        if QApplication.layoutDirection() == Qt.LayoutDirection.RightToLeft:
-            return QRect(0, 0, self._SIDE_EMPTY_GUTTER, self.viewport().height())
-        return QRect(self.viewport().width() - self._SIDE_EMPTY_GUTTER, 0,
-                     self._SIDE_EMPTY_GUTTER, self.viewport().height())
+        # The fixed empty gutter is excluded above.  Do not derive the row
+        # bounds from Filename: that column is user-movable now.
+        return QRect(left, row_rect.top(), right - left + 1, row_rect.height())
 
     def _should_paint_row_background(self, index) -> bool:
         header = self.horizontalHeader()
@@ -1111,7 +1024,7 @@ class ExplorerDetailsView(QTableView):
                 return index.column() == logical
         return False
 
-    # IDE-style details view geometry — inset from row edges, square corners.
+    # Prototype details-table geometry: full-width flat rows.
     _CAPSULE_INSET_X = 0
     _CAPSULE_INSET_Y = 2
     _CAPSULE_RADIUS  = 0
@@ -1153,41 +1066,46 @@ class ExplorerDetailsView(QTableView):
             painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(colors[fill_key]))
         painter.drawRect(capsule)
+        if is_selected:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(_accent_color())
+            if QApplication.layoutDirection() == Qt.RightToLeft:
+                painter.drawRect(capsule.right() - 3, capsule.top(), 4, capsule.height())
+            else:
+                painter.drawRect(capsule.left(), capsule.top(), 4, capsule.height())
         painter.restore()
 
     def _paint_explorer_row_separator(self, painter: QPainter, row_rect: QRect) -> None:
-        # Win11 Details View has no inter-row separator lines.
-        return
+        color = self._explorer_palette()["separator"]
+        if color.alpha() <= 0:
+            return
+        painter.save()
+        painter.setPen(QPen(color, 1))
+        painter.drawLine(row_rect.left(), row_rect.bottom(), row_rect.right(), row_rect.bottom())
+        painter.restore()
 
     def _is_empty_viewport_area(self, pos: QPoint) -> bool:
         if not self.viewport().rect().contains(pos):
             return True
 
         is_rtl = QApplication.layoutDirection() == Qt.RightToLeft
-
-        # Check side empty gutter based on layout direction
         if is_rtl:
-            # In RTL, the left side of the viewport is the empty gutter.
-            if pos.x() < self._SIDE_EMPTY_GUTTER:
+            if pos.x() >= self.viewport().width() - self._SIDE_EMPTY_GUTTER:
+                return True
+            if pos.x() < self._END_EMPTY_GUTTER:
                 return True
         else:
-            # In LTR, the right side of the viewport is the empty gutter.
-            if pos.x() >= self.viewport().width() - self._SIDE_EMPTY_GUTTER:
+            if pos.x() < self._SIDE_EMPTY_GUTTER:
+                return True
+            if pos.x() >= self.viewport().width() - self._END_EMPTY_GUTTER:
                 return True
 
         idx = self.indexAt(pos)
         if not idx.isValid():
             return True
 
-        # Check specific column margins
-        if idx.column() == COL_CHECK:
+        if idx.column() in (COL_GUTTER, COL_END_GUTTER):
             return True
-
-        # In RTL, the Name column (COL_FILENAME) is visual index 0 (far right) and has an empty margin on its right side.
-        if is_rtl and idx.column() == COL_FILENAME:
-            cell_rect = self.visualRect(idx)
-            if cell_rect.isValid() and pos.x() >= cell_rect.right() - FilenameDelegate._RTL_FILENAME_GUTTER:
-                return True
 
         model = self.model()
         if model is None or model.rowCount() == 0:

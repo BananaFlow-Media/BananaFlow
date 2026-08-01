@@ -15,6 +15,9 @@ def explorer_view_qt():
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication, QAbstractItemView
         from ui.panels.metadata_editor.explorer_view import ExplorerDetailsView
+        from ui.models.metadata_table_model import (
+            COLUMN_COUNT, COL_CHECK, COL_END_GUTTER, COL_GUTTER,
+        )
     except ImportError:
         pytest.skip("PySide6 not available in this environment")
 
@@ -24,10 +27,10 @@ def explorer_view_qt():
 
     class TrackModel(QStandardItemModel):
         def __init__(self):
-            super().__init__(3, 2)
+            super().__init__(3, COLUMN_COUNT)
             self.items = [Item(f"track-{i}") for i in range(3)]
             for row in range(3):
-                for col in range(2):
+                for col in range(COLUMN_COUNT):
                     self.setItem(row, col, QStandardItem(f"{row}:{col}"))
 
         def track_at_row(self, row: int):
@@ -38,6 +41,13 @@ def explorer_view_qt():
     view.setModel(TrackModel())
     view.setSelectionBehavior(QAbstractItemView.SelectRows)
     view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    header = view.horizontalHeader()
+    header.moveSection(header.visualIndex(COL_GUTTER), 0)
+    header.moveSection(header.visualIndex(COL_CHECK), 1)
+    header.moveSection(header.visualIndex(COL_END_GUTTER), COLUMN_COUNT - 1)
+    view.setColumnWidth(COL_GUTTER, view._SIDE_EMPTY_GUTTER)
+    view.setColumnWidth(COL_CHECK, view._CHECK_COLUMN_WIDTH)
+    view.setColumnWidth(COL_END_GUTTER, view._END_EMPTY_GUTTER)
     view.resize(320, 160)
     view.show()
     app.processEvents()
@@ -124,6 +134,63 @@ def test_space_toggles_current_row_selection(explorer_view_qt):
     app.processEvents()
 
     assert [idx.row() for idx in view.selectionModel().selectedRows()] == [1]
+
+
+def test_dedicated_checkbox_column_toggles_a_row_without_clearing_others(explorer_view_qt):
+    app, qtest, qt, view = explorer_view_qt
+    from ui.models.metadata_table_model import COL_CHECK
+
+    view.selectRow(0)
+    checkbox = view.visualRect(view.model().index(2, COL_CHECK)).center()
+    qtest.mouseClick(view.viewport(), qt.MouseButton.LeftButton, qt.KeyboardModifier.NoModifier, checkbox)
+    app.processEvents()
+
+    assert [idx.row() for idx in view.selectionModel().selectedRows()] == [0, 2]
+
+
+def test_empty_gutter_column_clears_the_current_selection(explorer_view_qt):
+    app, qtest, qt, view = explorer_view_qt
+    from ui.models.metadata_table_model import COL_GUTTER
+
+    view.selectAll()
+    gutter = view.visualRect(view.model().index(1, COL_GUTTER)).center()
+    qtest.mouseClick(view.viewport(), qt.MouseButton.LeftButton, qt.KeyboardModifier.NoModifier, gutter)
+    app.processEvents()
+
+    assert view.selectionModel().selectedRows() == []
+
+
+def test_opposite_empty_gutter_column_clears_the_current_selection(explorer_view_qt):
+    app, qtest, qt, view = explorer_view_qt
+    from ui.models.metadata_table_model import COL_END_GUTTER
+
+    view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum())
+    app.processEvents()
+    view.selectAll()
+    gutter = view.visualRect(view.model().index(1, COL_END_GUTTER)).center()
+    qtest.mouseClick(view.viewport(), qt.MouseButton.LeftButton, qt.KeyboardModifier.NoModifier, gutter)
+    app.processEvents()
+
+    assert view.selectionModel().selectedRows() == []
+
+
+def test_empty_side_gutter_clears_the_current_selection(explorer_view_qt):
+    app, qtest, qt, view = explorer_view_qt
+    from PySide6.QtCore import QPoint
+
+    view.selectAll()
+    x = (
+        view.viewport().width() - 1
+        if app.layoutDirection() == qt.LayoutDirection.RightToLeft
+        else 0
+    )
+    qtest.mouseClick(
+        view.viewport(), qt.MouseButton.LeftButton, qt.KeyboardModifier.NoModifier,
+        QPoint(x, view.rowViewportPosition(1) + view.rowHeight(1) // 2),
+    )
+    app.processEvents()
+
+    assert view.selectionModel().selectedRows() == []
 
 
 def test_keyboard_context_menu_key_emits_position(explorer_view_qt):
