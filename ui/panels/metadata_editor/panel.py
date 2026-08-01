@@ -43,6 +43,7 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
+    QKeySequence,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -2286,6 +2287,11 @@ class MetadataEditorPanel(
             chip.setObjectName("tagEditorSubtab")
             chip.setCheckable(True)
             chip.setFixedHeight(25)
+            # Translated labels can contain the same mnemonic marker (for
+            # example two English labels both produce Alt+Space).  The tabs
+            # are reachable through the normal focus order, so leave their
+            # shortcut empty rather than registering ambiguous global keys.
+            chip.setShortcut(QKeySequence())
             a11y.describe(chip, title, tooltip=title)
             chip.clicked.connect(lambda _=False, i=index: self._toggle_inspector_tool(i))
             self._inspector_tool_buttons.append(chip)
