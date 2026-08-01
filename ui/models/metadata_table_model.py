@@ -444,12 +444,19 @@ class MetadataTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._tracks = list(tracks)
         loaded = self._workspace.tracks
-        if len(loaded) != len(self._tracks) or any(
-                left is not right for left, right in zip(loaded, self._tracks)):
-            self._workspace.set_tracks(self._tracks)
+        workspace_changed = len(loaded) != len(self._tracks) or any(
+            left is not right for left, right in zip(loaded, self._tracks))
         self._path_to_idx = {t.path: i for i, t in enumerate(self._tracks)}
         self._rebuild_visible()
         self.endResetModel()
+        # set_tracks emits content_changed, which makes the proxy invalidate
+        # and synchronously query this model.  Emitting it between
+        # beginResetModel/endResetModel re-entered QSortFilterProxyModel while
+        # its source rows were transient, causing a native Qt/PySide crash
+        # when replacing the current folder.  Publish the workspace only once
+        # the source reset is complete and its rows are safe to inspect.
+        if workspace_changed:
+            self._workspace.set_tracks(self._tracks)
 
     def add_track(self, item: AudioTrackItem) -> None:
         """Incrementally insert one source track."""

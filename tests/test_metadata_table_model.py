@@ -26,6 +26,34 @@ def test_file_operation_rebase_preserves_workspace_identity(tmp_path):
     assert workspace.track_for_path(destination) is track
     assert track.proposed.title == "Pending title"
 
+
+def test_replacing_tracks_notifies_workspace_after_source_reset(tmp_path):
+    """A proxy may inspect source rows when workspace content changes."""
+    from PySide6.QtCore import QCoreApplication
+    from ui.controllers.tag_editor_workspace_state import TagEditorWorkspaceState
+    from ui.models.metadata_filter_proxy_model import MetadataFilterProxyModel
+
+    QCoreApplication.instance() or QCoreApplication([])
+    workspace = TagEditorWorkspaceState()
+    model = MetadataTableModel(workspace=workspace)
+    model.load_tracks([_item(tmp_path)])
+    proxy = MetadataFilterProxyModel(workspace)
+    proxy.setSourceModel(model)
+
+    content_during_source_reset: list[bool] = []
+    model.modelAboutToBeReset.connect(
+        lambda: setattr(model, "_test_reset_active", True))
+    model.modelReset.connect(lambda: setattr(model, "_test_reset_active", False))
+    workspace.content_changed.connect(
+        lambda _revision: content_during_source_reset.append(
+            bool(getattr(model, "_test_reset_active", False))))
+
+    model.load_tracks([])
+
+    assert content_during_source_reset == [False]
+    assert proxy.rowCount() == 0
+    assert workspace.tracks == []
+
 from PySide6.QtCore import Qt
 
 from core.metadata_models import AudioTrackItem, OriginalTags, TrackStatus
