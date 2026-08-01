@@ -1296,6 +1296,7 @@ class MetadataEditorPanel(
 
         self._summary_lbl = QLabel("")
         self._summary_lbl.setVisible(False)
+        layout.addWidget(self._summary_lbl)
 
         return bar
 

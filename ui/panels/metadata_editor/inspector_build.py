@@ -680,7 +680,10 @@ class InspectorBuildMixin:
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
 
-        note = QLabel(t("meta_auto_header"))
+        # Give the note an owner immediately.  Relying on a later layout
+        # reparent left this label alive after the inspector was destroyed on
+        # some PySide runtimes.
+        note = QLabel(t("meta_auto_header"), w)
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(note)
