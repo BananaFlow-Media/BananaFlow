@@ -94,6 +94,10 @@ jobs:
         shell: bash
         env:
           PYTHONPATH: .
+          # Preserve Python frames when a native Qt/PySide fault terminates a
+          # child process.  The isolated runner still treats that exit as a
+          # failure; this only makes the evidence actionable.
+          PYTHONFAULTHANDLER: "1"
 
       - name: Upload isolated test evidence
         # Uploaded even when the gate fails — a red leg is exactly when the
