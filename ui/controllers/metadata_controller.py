@@ -21,7 +21,11 @@ from core.change_sets import ChangeOrigin
 from core.filesystem_monitoring import FilesystemEventKind
 from core.metadata_lookup import LookupMode, LookupState
 from core.metadata_models import AudioTrackItem, TagEditSession, TrackStatus
-from core.tag_actions import LEGACY_ACTION_IDS, builtin_registry
+from core.tag_actions import (
+    AUTO_ARRANGE_INCLUDED_LEGACY_OPS,
+    LEGACY_ACTION_IDS,
+    builtin_registry,
+)
 from core.tag_action_presets import PresetStep
 from core.tag_action_service import TagActionService
 from core.metadata_validation import (
@@ -949,15 +953,7 @@ class MetadataController(QObject):
         """Run Auto Arrange and configured actions as one preview/Undo command."""
         if not tracks:
             return
-        steps = [PresetStep("tag.auto_arrange.v1")]
-        for legacy_id in legacy_ops:
-            action_id = LEGACY_ACTION_IDS.get(legacy_id)
-            if not action_id:
-                continue
-            parameters = ({"strip_numbering": False} if legacy_id == "title_full"
-                          else {"strip_numbering": True} if legacy_id == "title_strip"
-                          else {"field": "title"} if legacy_id == "normalize_spaces" else {})
-            steps.append(PresetStep(action_id, parameters))
+        steps = self._auto_sequence_steps(legacy_ops)
         ids = [self.workspace_state.item_id(item) for item in tracks]
         preview = self._tag_action_service.preview_sequence(
             self.workspace_state, steps, item_ids=ids,
@@ -966,6 +962,22 @@ class MetadataController(QObject):
         self.auto_rules_applied.emit()
         changed = preview.changed_count if accepted else 0
         self.status_update.emit(t("md_auto_changes_proposed", n=changed) if changed else t("md_auto_no_changes"))
+
+    @staticmethod
+    def _auto_sequence_steps(legacy_ops: list[str]) -> tuple[PresetStep, ...]:
+        """Build one Auto Arrange command without repeating its core work."""
+        steps = [PresetStep("tag.auto_arrange.v1")]
+        for legacy_id in legacy_ops:
+            if legacy_id in AUTO_ARRANGE_INCLUDED_LEGACY_OPS:
+                continue
+            action_id = LEGACY_ACTION_IDS.get(legacy_id)
+            if not action_id:
+                continue
+            parameters = ({"strip_numbering": False} if legacy_id == "title_full"
+                          else {"strip_numbering": True} if legacy_id == "title_strip"
+                          else {"field": "title"} if legacy_id == "normalize_spaces" else {})
+            steps.append(PresetStep(action_id, parameters))
+        return tuple(steps)
 
     # ── Operation coordination (TE-SAFE-09/13) ──────────────────────────────────
 

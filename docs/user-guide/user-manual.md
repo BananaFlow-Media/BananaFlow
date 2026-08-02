@@ -46,6 +46,12 @@ value and where it came from; undo/redo work on proposals, not on disk. A
 changed file you are not ready to write can be explicitly excluded — it stays
 pending, visible and reviewable, and it does not hold up the rest of the batch.
 
+**Inspector navigation.** Edit contains Fields, Artwork, Lyrics, ReplayGain and
+File Properties. Tools contains Auto Arrange, All Actions, Duplicates and Online
+Metadata. Check contains Pending Changes, Problems and External Changes. All
+Actions keeps the common filename, cleanup, clear-field and rename operations
+first, followed by the complete action engine, templates and saved workflows.
+
 **External changes.** The active folder is monitored. A file changed outside the
 app refreshes on its own if you have no pending edit for it; if you do, your
 proposal is never discarded or silently overwritten — the file is blocked from
@@ -57,7 +63,7 @@ mount) removes nothing. Manual Refresh is always available.
 **Also included:** artwork, lyrics and ReplayGain as reviewable actions; a
 Problems centre; duplicate detection with confidence tiers; MusicBrainz and
 Cover Art Archive lookups that propose rather than overwrite; CSV import with a
-dry run; change/problem reports; M3U/M3U8 export; and action-preset transfer.
+dry run; change/problem reports; M3U/M3U8 export; and saved-workflow transfer.
 
 **Accessibility.** Keyboard-complete, screen-reader labelled, no state carried by
 colour alone, Hebrew RTL with technical values (paths, URLs, codecs, ISRC) kept

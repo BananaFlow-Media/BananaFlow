@@ -138,6 +138,7 @@ from .explorer_view import (
     SelectionCheckDelegate,
 )
 from .shared import (
+    AUTO_ARRANGE_INCLUDED_LEGACY_OPS,
     DEFAULT_AUTO_OPS,
     DEFAULT_COL_WIDTHS,
     MAGIC_OP_DEFS,
@@ -336,7 +337,9 @@ class MetadataEditorPanel(
 
         # Auto-arrange configurable ops
         if self._cfg:
-            self._auto_ops = set(self._cfg.magic_auto_ops)
+            self._auto_ops = (
+                set(self._cfg.magic_auto_ops) - AUTO_ARRANGE_INCLUDED_LEGACY_OPS
+            )
             self._zoom_level = self._cfg.tag_editor_zoom
         else:
             self._auto_ops = set(DEFAULT_AUTO_OPS)
@@ -527,7 +530,7 @@ class MetadataEditorPanel(
         if hasattr(self, "_summary_lbl"):
             self._summary_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 11px;")
 
-        # The Auto-Order control used to be one gradient-filled frame tinted
+        # The Auto Arrange control used to be one gradient-filled frame tinted
         # with nine derived accent shades.  It is now a plain container holding
         # two ordinary buttons, so only the soft tint and the primary text
         # colour are still needed; the other shades were computed on every
@@ -570,12 +573,10 @@ class MetadataEditorPanel(
                 f"QToolButton:hover {{ background: {c.surface3}; }}"
                 f"QToolButton:disabled {{ color: {c.text_tertiary}; }}"
             )
-        # The two that lead somewhere carry the accent; the two that only
-        # navigate stay quiet.
+        # Scan and management are the two primary duplicate actions on the
+        # consolidated page.
         for name, style in (("_dupes_btn", primary_btn_style()),
-                            ("_dupes_reopen_btn", primary_btn_style()),
-                            ("_dupes_results_btn", btn_style()),
-                            ("_dupes_rescan_btn", btn_style())):
+                            ("_dupes_reopen_btn", primary_btn_style())):
             if hasattr(self, name):
                 getattr(self, name).setStyleSheet(style)
         if hasattr(self, "_dupes_btn"):
@@ -2214,59 +2215,25 @@ class MetadataEditorPanel(
         self._inspector.addWidget(self._build_inspector_folder())  # 1
         self._inspector.addWidget(self._build_inspector_tracks())  # 2
 
-        # Three modes answering three different questions — what are these
-        # files, what do I want done to them, what is wrong with them — each
-        # with its own sub-tabs. The flat page list below is deliberately
-        # ordered so its first eight entries are the eight tools the old rail
-        # exposed, in the same order: _select_inspector_tool() is part of the
-        # panel's API and indices 0..7 have to keep meaning what they meant.
+        # Three modes answer three different questions: what metadata am I
+        # editing, what operation do I want to run, and what needs review.
+        # The list is deliberately in visual order so page indices, mode
+        # switching and the sub-tab row all share one source of truth.
         inspector_panes = [
             # (mode, title, icon, page)
             ("edit",  t("meta_edit_tags_group"),        FluentIcon.EDIT,        self._inspector),
-            ("tools", t("meta_action_engine_title"),    FluentIcon.TAG,         self._build_action_engine_page()),
-            ("tools", t("meta_group_from_filename"),    FluentIcon.PASTE,
-             self._build_inspector_actions(
-                 ("title_strip", "title_full", "track_num", "split_at"),
-                 note_key="meta_filename_ops_note")),
-            ("tools", t("meta_group_cleanup"),          FluentIcon.ERASE_TOOL,
-             self._build_inspector_actions(
-                 None,
-                 note_key="meta_cleanup_warn_note",
-                 settings_key="meta_clean_settings_open",
-                 settings_handler=self._on_clean_settings,
-                 sections=(
-                     ("meta_section_text_cleanup", (
-                         "normalize_spaces", "strip_junk", "album_artist",
-                         "replace_text", "change_case", "number_tracks",
-                     )),
-                     ("meta_section_clear_fields", (
-                         "clear_title", "clear_artist", "clear_album", "clear_album_artist",
-                         "clear_track_num", "clear_year", "clear_genre", "clear_comments",
-                     )),
-                 ),
-             )),
-            ("tools", t("meta_rename_group"),           FluentIcon.DOCUMENT,
-             self._build_inspector_actions(
-                 ("clean_filename", "strip_filename_numbering", "rename_from_title"),
-                 note_key="meta_rename_ops_note",
-                 settings_key="meta_clean_settings_open",
-                 settings_handler=self._on_clean_settings)),
-            # The scan is an action, so it sits with the other actions under
-            # Tools; what the scan found is a verdict to come back to, so it
-            # lives on its own Check pane (index 15) instead.
-            ("tools", t("meta_duplicates_tools_title"), FluentIcon.FINGERPRINT, self._build_duplicate_tools_page()),
-            ("tools", t("meta_online_title"),           FluentIcon.SEARCH,      self._build_online_metadata_page()),
-            ("check", t("meta_problems_title"),         FluentIcon.INFO,        self._build_problems_page()),
-            # Everything past here is new to the redesign.
             ("edit",  t("meta_inspector_artwork_section"),         FluentIcon.PHOTO,   self._build_edit_artwork_page()),
             ("edit",  t("meta_inspector_lyrics_section"),          FluentIcon.FONT,    self._build_edit_lyrics_page()),
             ("edit",  t("meta_inspector_replaygain_section"),      FluentIcon.VOLUME,  self._build_edit_gain_page()),
             ("edit",  t("meta_inspector_file_properties_section"), FluentIcon.INFO,    self._build_edit_properties_page()),
             ("tools", t("meta_auto_btn").strip(),                  FluentIcon.BRUSH,   self._build_tools_auto_page()),
+            ("tools", t("meta_action_engine_title"),               FluentIcon.TAG,     self._build_action_engine_page()),
+            ("tools", t("meta_duplicates_tools_title"),            FluentIcon.FINGERPRINT,
+             self._build_duplicates_page()),
+            ("tools", t("meta_online_title"),                      FluentIcon.SEARCH,  self._build_online_metadata_page()),
             ("check", t("meta_pending_tab"),                       FluentIcon.VIEW,    self._build_check_pending_page()),
+            ("check", t("meta_problems_title"),                    FluentIcon.INFO,    self._build_problems_page()),
             ("check", t("meta_external_tab"),                      FluentIcon.SYNC,    self._build_check_external_page()),
-            ("check", t("meta_dupes_results_title"),               FluentIcon.FINGERPRINT,
-             self._build_duplicate_results_page()),
         ]
 
         self._inspector_pane_modes: list[str] = []
@@ -2337,81 +2304,93 @@ class MetadataEditorPanel(
         self._select_inspector_tool(0)
         return shell
 
-    # Registry categories, in the order they are offered on the Actions page.
-    # "clear" is deliberately absent: those eight live as compact buttons on
-    # the Clean Up page and would only be noise repeated here.
-    _ACTION_CATEGORY_KEYS: tuple[tuple[str, str], ...] = (
-        ("template", "meta_action_category_template"),
-        ("cleanup", "meta_action_category_cleanup"),
-        ("edit", "meta_action_category_edit"),
-        ("organize", "meta_action_category_organize"),
-        ("filename_to_tags", "meta_group_from_filename"),
-        ("filename", "meta_action_category_filename"),
+    # Every one-click operation from the former From Filename, Clean Up &
+    # Clear, and Rename File panes.  Keeping this as one ordered definition
+    # prevents consolidation from silently dropping an affordance.
+    _COMMON_ACTION_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("meta_group_from_filename", (
+            "title_strip", "title_full", "track_num", "split_at",
+        )),
+        ("meta_section_text_cleanup", (
+            "normalize_spaces", "strip_junk", "album_artist",
+            "replace_text", "change_case", "number_tracks",
+        )),
+        ("meta_section_clear_fields", (
+            "clear_title", "clear_artist", "clear_album", "clear_album_artist",
+            "clear_track_num", "clear_year", "clear_genre", "clear_comments",
+        )),
+        ("meta_action_category_filename", (
+            "clean_filename", "strip_filename_numbering", "rename_from_title",
+        )),
     )
 
     def _build_action_engine_page(self) -> QScrollArea:
-        """Tools > Actions.
-
-        The page was a paragraph and one button, which made the registry's
-        most capable actions -- the two template converters, find and replace,
-        case conversion, track numbering -- reachable only by opening a modal
-        and hunting through a flat 23-entry combo box.  Listing them here is
-        what makes them findable; each row opens the engine on that action.
-        """
+        """Tools > All Actions, including every former quick-action pane."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 14, 12, 14)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
 
-        body = QLabel(t("meta_action_engine_page_body"))
+        body = QLabel(t("meta_all_actions_page_body"))
         body.setWordWrap(True)
         body.setStyleSheet(f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
         layout.addWidget(body)
 
-        self._action_engine_btn = ElidedPushButton(t("meta_action_engine_open"))
-        self._action_engine_btn.setIcon(FluentIcon.TAG.icon())
-        self._action_engine_btn.setAccessibleName(t("meta_action_engine_open"))
-        self._action_engine_btn.setProperty("accentRole", "primary")
-        self._action_engine_btn.setStyleSheet(primary_btn_style())
-        # Not a bare connect: QPushButton.clicked would pass its checked flag
-        # straight into initial_action_id.
-        self._action_engine_btn.clicked.connect(lambda: self._on_action_engine())
-        layout.addWidget(self._action_engine_btn)
+        common_header = QLabel(t("meta_all_actions_common_heading"))
+        common_header.setWordWrap(True)
+        common_header.setStyleSheet(
+            f"color: {tag_editor_colors().text_secondary};"
+            " font-size: 11px; font-weight: 800; margin-top: 4px;")
+        layout.addWidget(common_header)
+        layout.addWidget(self._build_magic_ops_widget(
+            None, sections=self._COMMON_ACTION_SECTIONS))
 
-        from core.tag_actions import builtin_registry
-        by_category: dict[str, list] = {}
-        for action in builtin_registry().actions():
-            by_category.setdefault(action.category, []).append(action)
+        # The former cleanup and rename pages both opened this same dialog.
+        # One shared entry retains the setting without retaining duplicate
+        # navigation or duplicate buttons.
+        self._all_actions_clean_settings_btn = ElidedPushButton(
+            t("meta_clean_settings_open"))
+        self._all_actions_clean_settings_btn.setIcon(
+            FluentIcon.SETTING.icon(color=get_colors().text_primary))
+        self._all_actions_clean_settings_btn.setIconSize(QSize(14, 14))
+        self._all_actions_clean_settings_btn.setStyleSheet(btn_style())
+        self._all_actions_clean_settings_btn.clicked.connect(self._on_clean_settings)
+        layout.addWidget(self._all_actions_clean_settings_btn)
 
-        for category, header_key in self._ACTION_CATEGORY_KEYS:
-            actions = by_category.get(category, ())
-            if not actions:
-                continue
-            header = QLabel(t(header_key))
+        destinations = (
+            ("_action_engine_btn", "meta_all_actions_engine_heading",
+             "meta_all_actions_engine_body", "meta_all_actions_engine_open",
+             "actions", FluentIcon.TAG, True),
+            ("_templates_btn", "meta_all_actions_templates_heading",
+             "meta_all_actions_templates_body", "meta_all_actions_templates_open",
+             "templates", FluentIcon.DOCUMENT, False),
+            ("_saved_workflows_btn", "meta_all_actions_workflows_heading",
+             "meta_all_actions_workflows_body", "meta_all_actions_workflows_open",
+             "workflows", FluentIcon.SAVE, False),
+        )
+        for (attribute, heading_key, body_key, button_key,
+             initial_tab, icon, primary) in destinations:
+            header = QLabel(t(heading_key))
+            header.setWordWrap(True)
             header.setStyleSheet(
                 f"color: {tag_editor_colors().text_secondary};"
                 " font-size: 11px; font-weight: 800; margin-top: 4px;")
             layout.addWidget(header)
-            for action in actions:
-                label = t(action.name_key)
-                row = OpRow(label)
-                a11y.describe(row, label, description=t(action.description_key))
-                row.clicked.connect(
-                    lambda action_id=action.id: self._on_action_engine(action_id))
-                info = self._make_op_side_button("", t(action.description_key))
-                info.setIcon(FluentIcon.INFO.icon())
-                info.setIconSize(QSize(14, 14))
-                a11y.describe(info, t("meta_a11y_about_action", action=label),
-                              description=t(action.description_key))
-                info.clicked.connect(
-                    lambda _=False, l=label, d=t(action.description_key): self._show_info(l, d))
-                row.add_side_button(info)
-                layout.addWidget(row)
-                # A separate registry from _op_rows on purpose: those run on
-                # the table selection and are greyed without one, while these
-                # open the engine, which carries its own scope picker.
-                self._action_catalog_rows.append(row)
+            description = QLabel(t(body_key))
+            description.setWordWrap(True)
+            description.setStyleSheet(
+                f"color: {tag_editor_colors().text_secondary}; font-size: 11px;")
+            layout.addWidget(description)
+            button = ElidedPushButton(t(button_key))
+            button.setIcon(icon.icon())
+            button.setAccessibleName(t(button_key))
+            button.setStyleSheet(primary_btn_style() if primary else btn_style())
+            button.clicked.connect(
+                lambda _checked=False, tab=initial_tab: self._on_action_engine(
+                    initial_tab=tab))
+            setattr(self, attribute, button)
+            layout.addWidget(button)
 
         layout.addStretch()
         scroll = QScrollArea()
@@ -2421,7 +2400,9 @@ class MetadataEditorPanel(
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         return scroll
 
-    def _create_action_engine_dialog(self, initial_action_id: str = "") -> TagActionDialog:
+    def _create_action_engine_dialog(
+        self, initial_action_id: str = "", initial_tab: str = "",
+    ) -> TagActionDialog:
         return TagActionDialog(
             self._workspace,
             active_folder=self._navigation.current,
@@ -2429,16 +2410,19 @@ class MetadataEditorPanel(
             accept_preview=self._accept_tag_action_preview,
             open_preset_transfer=self._on_metadata_io,
             initial_action_id=initial_action_id,
+            initial_tab=initial_tab,
         )
 
-    def _on_action_engine(self, initial_action_id: str = "") -> None:
+    def _on_action_engine(
+        self, initial_action_id: str = "", initial_tab: str = "",
+    ) -> None:
         """Open the action engine, optionally landing on one action.
 
         The parameterised operations in the Tools pages route here: they are
         real actions in the registry, but they need a value before they can
         run, and the engine is where values are entered and previewed.
         """
-        dialog = self._create_action_engine_dialog(initial_action_id)
+        dialog = self._create_action_engine_dialog(initial_action_id, initial_tab)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._model.refresh_all()
             self._update_summary()
@@ -2609,17 +2593,8 @@ class MetadataEditorPanel(
             f"QScrollArea > QWidget > QWidget {{ background: {surface}; }}")
         return scroll
 
-    # Index of the Check pane that reports the scan, referenced from the Tools
-    # pane that starts it and from the scan callbacks.
-    _DUPES_RESULTS_PANE = 15
-
-    def _build_duplicate_tools_page(self) -> QScrollArea:
-        """Tools > Duplicate Cleanup.
-
-        Starting a scan is the action; reading its verdict is not, so this
-        page carries only the trigger and a way over to the Check pane that
-        holds the findings.
-        """
+    def _build_duplicates_page(self) -> QScrollArea:
+        """Tools > Duplicates: scan, status, findings and management."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -2631,8 +2606,6 @@ class MetadataEditorPanel(
         note.setObjectName("tagEditorInspectorNote")
         layout.addWidget(note)
 
-        # The pane's one action, so it carries the accent the way every other
-        # tools pane gives its primary button.
         self._dupes_btn = ElidedPushButton(self._toolbar_text("meta_find_duplicates"))
         self._dupes_btn.setIcon(FluentIcon.SEARCH_MIRROR.icon(color="#ffffff"))
         self._dupes_btn.setIconSize(QSize(16, 16))
@@ -2644,9 +2617,6 @@ class MetadataEditorPanel(
         self._dupes_btn.clicked.connect(self._on_find_duplicates)
         layout.addWidget(self._dupes_btn)
 
-        # Splitting the findings onto the Check pane left this one with nothing
-        # that reacts to the click, so a scan of a large folder read as a dead
-        # button. The action has to report on itself where it was started.
         self._dupes_status = QLabel("")
         self._dupes_status.setWordWrap(True)
         self._dupes_status.setObjectName("tagEditorDupesStatus")
@@ -2655,39 +2625,11 @@ class MetadataEditorPanel(
         self._dupes_status_text: tuple[str, str] = ("", "running")
         layout.addWidget(self._dupes_status)
 
-        self._dupes_results_btn = ElidedPushButton(t("meta_dupes_show_results"))
-        self._dupes_results_btn.setIcon(FluentIcon.CHEVRON_RIGHT.icon(color=get_colors().text_primary))
-        self._dupes_results_btn.setIconSize(QSize(12, 12))
-        self._dupes_results_btn.setStyleSheet(btn_style())
-        self._dupes_results_btn.setVisible(False)
-        a11y.describe(self._dupes_results_btn, t("meta_dupes_show_results"),
-                      tooltip=t("meta_dupes_show_results"))
-        self._dupes_results_btn.clicked.connect(
-            lambda: self._select_inspector_tool(self._DUPES_RESULTS_PANE))
-        layout.addWidget(self._dupes_results_btn)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        return scroll
-
-    def _build_duplicate_results_page(self) -> QScrollArea:
-        """Check > Duplicates.
-
-        Findings used to disappear with the manager dialog, so the only way
-        back to them was to rescan.  They are kept here instead, summarised,
-        with the manager one click away.
-        """
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        layout.setAlignment(Qt.AlignTop)
-
+        results_header = QLabel(t("meta_dupes_results_title"))
+        results_header.setStyleSheet(
+            f"color: {tag_editor_colors().text_secondary};"
+            " font-size: 11px; font-weight: 800; margin-top: 4px;")
+        layout.addWidget(results_header)
         note = QLabel(t("meta_dupes_results_note"))
         note.setWordWrap(True)
         note.setObjectName("tagEditorInspectorNote")
@@ -2704,8 +2646,6 @@ class MetadataEditorPanel(
         self._dupes_groups_layout.setSpacing(6)
         layout.addWidget(self._dupes_groups)
 
-        # Deleting is what this pane leads to, so the manager gets the accent
-        # and the way back to a fresh scan stays a quiet secondary.
         self._dupes_reopen_btn = ElidedPushButton(t("meta_dupes_reopen"))
         self._dupes_reopen_btn.setStyleSheet(primary_btn_style())
         self._dupes_reopen_btn.setVisible(False)
@@ -2713,13 +2653,6 @@ class MetadataEditorPanel(
                       tooltip=t("meta_dupes_reopen"))
         self._dupes_reopen_btn.clicked.connect(self._reopen_duplicate_manager)
         layout.addWidget(self._dupes_reopen_btn)
-
-        self._dupes_rescan_btn = ElidedPushButton(t("meta_dupes_rescan"))
-        self._dupes_rescan_btn.setStyleSheet(btn_style())
-        a11y.describe(self._dupes_rescan_btn, t("meta_dupes_rescan"),
-                      tooltip=t("meta_dupes_tooltip"))
-        self._dupes_rescan_btn.clicked.connect(self._on_rescan_duplicates)
-        layout.addWidget(self._dupes_rescan_btn)
 
         layout.addStretch()
 
@@ -2772,23 +2705,14 @@ class MetadataEditorPanel(
             self._dupes_status.style().unpolish(self._dupes_status)
             self._dupes_status.style().polish(self._dupes_status)
 
-    def _on_rescan_duplicates(self) -> None:
-        """Run a fresh scan from the findings pane, showing it where it runs."""
-        if not self._root_folder:
-            return
-        self._select_inspector_tool(self._inspector_tool_titles.index(
-            t("meta_duplicates_tools_title")))
-        self._on_find_duplicates()
-
     def _reset_duplicate_results(self) -> None:
-        """Forget the last scan, so the Check pane reads as never-scanned."""
+        """Forget the last scan when the active folder is replaced."""
         self._last_duplicate_scan = None
         if not hasattr(self, "_dupes_groups_layout"):
             return
         self._clear_dynamic_layout(self._dupes_groups_layout)
         self._dupes_summary.setText(t("meta_dupes_never_scanned"))
         self._dupes_reopen_btn.setVisible(False)
-        self._dupes_results_btn.setVisible(False)
         self._set_duplicate_status("")
 
     def _render_duplicate_groups(self, groups) -> None:
@@ -2797,9 +2721,6 @@ class MetadataEditorPanel(
             return
         self._clear_dynamic_layout(self._dupes_groups_layout)
         entries = self._duplicate_group_list(groups)
-        # A scan that found nothing is still a result worth returning to, so
-        # the Tools page keeps pointing at it either way.
-        self._dupes_results_btn.setVisible(True)
         if not entries:
             self._dupes_summary.setText(t("meta_dupes_none_found"))
             self._dupes_reopen_btn.setVisible(False)
@@ -3101,8 +3022,8 @@ class MetadataEditorPanel(
             self._set_inspector_collapsed(False)
         if self._inspector_pane_modes[self._active_inspector_tool] == mode:
             return
-        first_for_mode = {"edit": 0, "tools": 12, "check": 13}
-        self._select_inspector_tool(first_for_mode[mode])
+        first_for_mode = self._inspector_pane_modes.index(mode)
+        self._select_inspector_tool(first_for_mode)
 
     def _rebuild_inspector_subtabs(self) -> None:
         active_mode = self._inspector_pane_modes[self._active_inspector_tool]
@@ -3114,12 +3035,9 @@ class MetadataEditorPanel(
                 # only through Python references, which can make Qt/PySide
                 # tear them down in the wrong order at interpreter exit.
                 item.widget().setVisible(False)
-        visual_order = {
-            "edit": (0, 8, 9, 10, 11),
-            "tools": (12, 1, 2, 3, 4, 5, 6),
-            "check": (13, 7, self._DUPES_RESULTS_PANE, 14),
-        }
-        for index in visual_order[active_mode]:
+        for index, mode in enumerate(self._inspector_pane_modes):
+            if mode != active_mode:
+                continue
             self._inspector_subtab_layout.addWidget(self._inspector_tool_buttons[index])
             self._inspector_tool_buttons[index].setVisible(True)
         self._inspector_subtab_layout.addStretch()
@@ -4641,11 +4559,10 @@ class MetadataEditorPanel(
             self._set_duplicate_status(t("meta_problems_cancelled"), "idle")
             self._update_summary()
             return
-        # Keep the result so the Duplicates page can describe it, and so the
-        # manager can be reopened without paying for a second scan.
+        # Keep the result on the same Duplicates page so the manager can be
+        # reopened without paying for a second scan.
         self._last_duplicate_scan = (groups, elapsed, strategy)
         self._render_duplicate_groups(groups)
-        # The verdict the Check pane now holds, echoed where the scan was run.
         self._set_duplicate_status(
             self._dupes_summary.text(),
             "found" if self._duplicate_group_list(groups) else "clean")
@@ -4935,7 +4852,9 @@ class MetadataEditorPanel(
             self._dupes_btn.setEnabled(self._root_folder is not None and not self._is_scanning)
         if hasattr(self, "_action_engine_btn"):
             engine_available = has_tracks and not self._is_scanning and not self._is_applying
-            self._action_engine_btn.setEnabled(engine_available)
+            for name in ("_action_engine_btn", "_templates_btn", "_saved_workflows_btn"):
+                if hasattr(self, name):
+                    getattr(self, name).setEnabled(engine_available)
             for row in getattr(self, "_action_catalog_rows", ()):
                 row.setActionEnabled(engine_available)
         if hasattr(self, "_backup_manager_btn"):

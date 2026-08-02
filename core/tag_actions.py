@@ -571,3 +571,11 @@ LEGACY_ACTION_IDS = {
     "strip_filename_numbering": "file.strip_numbering.v1",
     "rename_from_title": "file.from_title.v1",
 }
+
+# ``tag.auto_arrange.v1`` already derives a cleaned title and track number
+# from the filename.  Older Auto Arrange preferences may still name the two
+# equivalent one-click operations, so sequence builders must ignore them
+# rather than evaluating the same change twice.
+AUTO_ARRANGE_INCLUDED_LEGACY_OPS: frozenset[str] = frozenset({
+    "title_strip", "track_num",
+})
