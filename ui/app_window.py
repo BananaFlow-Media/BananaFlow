@@ -40,6 +40,7 @@ from core.services import ServiceContainer
 from core.search_engine import SearchResult, ResultKind
 from core.update_state import UpdateStateStore, app_update_id, component_update_id
 from ui.workers.offline_monitor import OfflineMonitor
+from ui.touch import apply_touch_density_sizes, apply_touch_support
 from core.downloader import AudioQuality, DownloadEngine, DownloadRequest, MediaType, VideoQuality
 from core.playlist_parser import (
     ParseResult, SourcePlatform, UrlKind, classify_url,
@@ -309,6 +310,15 @@ class AppWindow(FluentWindow):
         self._restore_state()
         self._setup_tray()
         self._setup_drag_drop()
+        # One sweep over the finished widget tree makes every scroll area and
+        # every context menu in the panels finger-usable. Runs after the panels
+        # exist and after context-menu policies are set, because it reacts to
+        # both. Dialogs sweep themselves — they are built on demand.
+        apply_touch_support(self)
+        # Toggling touch density emits theme_changed. Re-running the size pass
+        # on that signal is what lets the setting apply without a restart —
+        # the stylesheet half updates itself, this half cannot.
+        self._theme.theme_changed.connect(lambda: apply_touch_density_sizes(self))
 
         QTimer.singleShot(300,  self._start_background_workers)
         QTimer.singleShot(450,  self._show_browser_cookie_migration_notice)

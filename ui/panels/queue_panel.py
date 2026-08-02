@@ -299,6 +299,7 @@ class QueuePanel(QWidget):
             parent=self._drop_area,
         )
         card.remove_requested.connect(self._on_card_remove)
+        card.move_requested.connect(self._on_card_move)
         card.selection_changed.connect(lambda: self._on_card_selected(card))
         card.shift_selection_triggered.connect(self._on_card_shift_selected)
         card.status_changed.connect(lambda _: self._update_stats())
@@ -687,6 +688,32 @@ class QueuePanel(QWidget):
             layout.insertWidget(to_layout_idx, from_card)
             to_list_idx = self._cards.index(to_card)
             self._cards.insert(to_list_idx, from_card)
+
+    def _on_card_move(self, queue_index: int, delta: int) -> None:
+        """Move one card a single step, for input that cannot drag.
+
+        Works in *list* positions, not queue indices: queue_index is a stable
+        identity that does not track a card's place in the list, so stepping
+        it arithmetically would move the wrong card once anything has been
+        removed or reordered.
+        """
+        card = self.card_by_index(queue_index)
+        if card is None or card not in self._cards:
+            return
+        position = self._cards.index(card)
+        neighbour_at = position + delta
+        if not 0 <= neighbour_at < len(self._cards):
+            return  # already at the end it is being pushed towards
+        neighbour = self._cards[neighbour_at]
+
+        # _on_reorder only ever inserts the first card *before* the second, so
+        # moving down is expressed as pulling the card below this one up.
+        # Asking it to insert this card before its own successor would be a
+        # no-op, which reads as the menu item doing nothing.
+        if delta < 0:
+            self._on_reorder(queue_index, neighbour.queue_index)
+        else:
+            self._on_reorder(neighbour.queue_index, queue_index)
 
     def _clear_completed(self) -> None:
         """Remove all cards whose status is 'done'."""

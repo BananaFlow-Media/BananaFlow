@@ -103,6 +103,7 @@ from core.metadata_models import (
 from ui import a11y
 from ui.components.empty_state_icon import EmptyStateIcon
 from ui.i18n import t
+from ui.touch import TOUCH_SPLITTER_HANDLE_PX, is_touch_density
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_NEW,
     COL_ARTIST_NEW, COL_ALBUM_NEW,
@@ -508,8 +509,21 @@ class MetadataEditorPanel(
             _tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+    def _apply_touch_density(self) -> None:
+        """Re-size the geometry a stylesheet cannot reach.
+
+        Rides on the theme signal because the density toggle emits it, which
+        is what lets the setting apply without restarting the application.
+        """
+        dense = is_touch_density()
+        if hasattr(self, "_body_splitter"):
+            self._body_splitter.setHandleWidth(
+                TOUCH_SPLITTER_HANDLE_PX if dense else 6
+            )
+
     def _apply_theme(self) -> None:
         """Re-apply theme-dependent styles for the toolbar, tree, table, buttons."""
+        self._apply_touch_density()
         c = tag_editor_colors()
         accent = c.accent
         accent_dim = dim_hex(accent)
@@ -1681,7 +1695,10 @@ class MetadataEditorPanel(
         splitter = QSplitter(Qt.Horizontal)
         splitter.setLayoutDirection(QApplication.layoutDirection())
         splitter.setChildrenCollapsible(True)
-        splitter.setHandleWidth(6)
+        # A 6 px handle is a mouse-sized target; a finger cannot land on it at
+        # all. handleWidth is a widget property, not a styleable box, so this
+        # cannot come from the density stylesheet.
+        splitter.setHandleWidth(TOUCH_SPLITTER_HANDLE_PX if is_touch_density() else 6)
         self._body_splitter = splitter
 
         # ── Left: folder/file tree ────────────────────────────────────────────

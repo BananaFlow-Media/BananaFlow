@@ -15,6 +15,7 @@ from core.metadata_lookup import (
 )
 from ui.i18n import t
 from ui.dialogs.styled_dialog import add_header, make_footer
+from ui.touch import apply_touch_support
 from .shared import mark_tag_editor_dialog
 
 
@@ -31,6 +32,8 @@ class OnlineMetadataDialog(QDialog):
         self.setWindowTitle(t("meta_online_title")); self.setMinimumSize(880, 650)
         self.setAccessibleName(t("meta_online_title"))
         self._build()
+        # Not a StyledDialog, so the shared touch sweep does not reach it.
+        apply_touch_support(self)
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)

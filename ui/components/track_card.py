@@ -8,7 +8,8 @@ Changelog v3
 * Resume button (▶) visible when status == "paused".
   Emits resume_requested(queue_index).
 * Both buttons replace the single cancel-level control; the remove (×)
-  button is always available on hover.
+  button is available on hover, or always on screen where there is no hover
+  to wait for (see _remove_btn_should_show).
 * Status dot gains a "paused" state (amber/warning colour).
 * All existing public API is unchanged (set_status, set_progress, etc.).
 """
@@ -28,6 +29,12 @@ from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, ToolButton
 from ui.direction import isolate_number
 from ui.i18n import t
 from ui.theme_manager import ThemeManager, get_colors
+from ui.touch import (
+    enable_long_press_context_menu,
+    has_touch_screen,
+    is_touch_density,
+    touch_size,
+)
 from utils.time_format import seconds_to_str
 
 # Action-button icon colours (semantic, theme-independent). Pause follows the
@@ -150,6 +157,11 @@ class TrackCard(QFrame):
     pause_requested   = Signal(int)    # queue_index
     resume_requested  = Signal(int)    # queue_index
     reorder_requested = Signal(int, int)  # (from_index, to_index)
+    #: Reordering by one step, for input that cannot drag. A finger cannot:
+    #: the kinetic scroller owns the touch stream on the queue's scroll area,
+    #: which is the right trade (a list must scroll before it rearranges), so
+    #: the capability is offered through the context menu instead of lost.
+    move_requested    = Signal(int, int)  # (queue_index, delta: -1 | +1)
     status_changed    = Signal(str)   # new status string
     shift_selection_triggered = Signal(int, bool)  # queue_index, checked
 
@@ -364,10 +376,30 @@ class TrackCard(QFrame):
 
         outer.addLayout(btn_col)
 
+        # A card is created long after the window-wide touch sweep has run, so
+        # it wires its own press-and-hold menu.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+        enable_long_press_context_menu(self)
+
+        self._sync_remove_btn()
+        self._refresh_action_sizes()
         self._refresh_action_icons()
         tm = ThemeManager.instance()
         if tm is not None:
             tm.theme_changed.connect(self._refresh_action_icons)
+            # Touch density is applied through the theme manager, so the same
+            # signal that repaints for a theme switch also resizes for a
+            # density switch — the toggle takes effect without a restart.
+            tm.theme_changed.connect(self._refresh_action_sizes)
+
+    def _refresh_action_sizes(self) -> None:
+        """Size the icon-only action buttons for the active input density."""
+        side = touch_size(28)
+        icon_side = 18 if is_touch_density() else 13
+        for button in (self._remove_btn, self._pause_btn, self._resume_btn):
+            button.setFixedSize(side, side)
+            button.setIconSize(QSize(icon_side, icon_side))
 
     def _refresh_action_icons(self) -> None:
         """(Re)tint the action-button icons. Pause follows the live accent."""
@@ -528,6 +560,10 @@ class TrackCard(QFrame):
         # Update button visibility
         self._pause_btn.setVisible(status in _PHASE_CAPTIONS)
         self._resume_btn.setVisible(status == "paused")
+        # Remove is only offered while queued, and on touch it is on screen
+        # without a hover to trigger it, so leaving this status change has to
+        # take it away again.
+        self._sync_remove_btn()
 
         # Hide the caption once the track is no longer in flight.
         if status not in _PHASE_CAPTIONS:
@@ -548,14 +584,58 @@ class TrackCard(QFrame):
 
     # ── Hover events ──────────────────────────────────────────────────────────
 
+    def _remove_btn_should_show(self) -> bool:
+        """Whether the remove button belongs on screen right now.
+
+        A finger produces no hover, so revealing this button on ``enterEvent``
+        alone made it permanently invisible — and therefore the queue entry
+        permanently unremovable — on a touch screen.  Where there is no hover
+        to wait for, the button is simply always shown for a removable entry.
+        """
+        if self._status != "queued":
+            return False
+        return has_touch_screen() or self.underMouse()
+
+    def _sync_remove_btn(self) -> None:
+        self._remove_btn.setVisible(self._remove_btn_should_show())
+
     def enterEvent(self, event) -> None:
-        if self._status == "queued":
-            self._remove_btn.setVisible(True)
+        self._sync_remove_btn()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self._remove_btn.setVisible(False)
+        self._sync_remove_btn()
         super().leaveEvent(event)
+
+    # ── Context menu ──────────────────────────────────────────────────────────
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        """Offer, without a pointer, what the card otherwise needs one for.
+
+        Reordering is drag-only and removal is hover-only; both are reachable
+        here.  Reached by right-click with a mouse and by press-and-hold with
+        a finger, so the two inputs share one menu rather than one growing a
+        private path.
+        """
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        up_action = menu.addAction(t("card_move_up"))
+        down_action = menu.addAction(t("card_move_down"))
+        remove_action = None
+        if self._status == "queued":
+            menu.addSeparator()
+            remove_action = menu.addAction(t("card_remove_tooltip"))
+
+        action = menu.exec(self.mapToGlobal(pos))
+        if action is None:
+            return
+        if action is up_action:
+            self.move_requested.emit(self.queue_index, -1)
+        elif action is down_action:
+            self.move_requested.emit(self.queue_index, 1)
+        elif action is remove_action:
+            self.remove_requested.emit(self.queue_index)
 
     # ── Drag & drop ───────────────────────────────────────────────────────────
 

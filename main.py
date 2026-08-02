@@ -76,6 +76,13 @@ def main() -> int:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(COMPANY_NAME)
 
+    # Touch input policy. Qt claims raw touch for its windows, which opts the
+    # app out of the pan/flick emulation Windows performs for windows that do
+    # not — without this the whole UI stops scrolling under a finger. See
+    # ui/touch.py for the full reasoning.
+    from ui.touch import configure_application as _configure_touch
+    _configure_touch(app)
+
     # 4. Now that QApplication is alive, safely import backend & UI singletons
     from config import AppConfig
     from core.services import ServiceContainer

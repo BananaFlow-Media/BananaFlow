@@ -18,6 +18,7 @@ New fields (Phase 2 & rate-limit handling)
   playlist_index_prefix    – prefix filenames with 01, 02, … track index
   duplicate_action         – "skip" | "warn" | "overwrite" on detected duplicate
   accessibility_mode       – high-contrast / keyboard-nav mode
+  touch_density            – enlarge controls to finger-sized targets
   tray_on_close            – minimise to system tray instead of quitting
   global_hotkeys_enabled   – register OS-level pause/open hotkeys
   queue_state              – serialised queue for smart auto-resume
@@ -100,6 +101,7 @@ _DEFAULTS: dict[str, Any] = {
     "accent_color":         "#10A37F",      # BananaFlow Tag Editor design accent
     "language":             _detect_system_language(),
     "accessibility_mode":   False,          # NEW – high-contrast / keyboard nav
+    "touch_density":        False,          # NEW – finger-sized controls
 
     # ── Window state ──────────────────────────────────────────────────────────
     "window_state":         "",
@@ -629,6 +631,14 @@ class AppConfig:
     @accessibility_mode.setter
     def accessibility_mode(self, value: bool) -> None:
         self._data["accessibility_mode"] = bool(value)
+
+    @property
+    def touch_density(self) -> bool:
+        return bool(self._data.get("touch_density", False))
+
+    @touch_density.setter
+    def touch_density(self, value: bool) -> None:
+        self._data["touch_density"] = bool(value)
 
     @property
     def tray_on_close(self) -> bool:
