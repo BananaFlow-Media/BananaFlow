@@ -1,16 +1,17 @@
 name: PR69 category follow-up
 
 on:
-  push:
+  pull_request:
     branches:
-      - codex/tag-editor-navigation
+      - main
+    types:
+      - synchronize
 
 permissions:
   contents: write
 
 jobs:
   apply-fix:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -64,8 +65,7 @@ def test_all_actions_separates_cleanup_from_tag_organization():
           if "test_all_actions_separates_cleanup_from_tag_organization" not in tests:
               test_path.write_text(tests.replace(marker, addition + marker, 1), encoding="utf-8")
 
-          workflow = Path(".github/workflows/pr69-category-fix.yml")
-          workflow.unlink()
+          Path(".github/workflows/pr69-category-fix.yml").unlink()
 
       - name: Verify focused contract
         shell: python
@@ -77,10 +77,10 @@ def test_all_actions_separates_cleanup_from_tag_organization():
           tests = Path("tests/test_tag_editor_shell.py").read_text(encoding="utf-8")
           ast.parse(panel)
           ast.parse(tests)
-          assert '"meta_action_category_organize"' in panel
           cleanup = panel.split('("meta_section_text_cleanup", (', 1)[1].split(')),', 1)[0]
           assert '"album_artist"' not in cleanup
           assert '"number_tracks"' not in cleanup
+          assert '"meta_action_category_organize"' in panel
 
       - name: Commit focused correction
         shell: bash
