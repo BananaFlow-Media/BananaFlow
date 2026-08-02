@@ -323,39 +323,51 @@ def test_untrustworthy_column_order_falls_back_to_defaults(panel, bad):
 
 
 # --------------------------------------------------------------------------- #
-# Inspector: three modes, sixteen panes
+# Inspector: three modes, twelve panes
 # --------------------------------------------------------------------------- #
 
-def test_inspector_exposes_all_sixteen_panes(panel):
-    assert len(panel._inspector_tool_buttons) == 16
-    assert panel._inspector_pages.count() == 16
+def test_inspector_exposes_the_twelve_consolidated_panes(panel):
+    assert len(panel._inspector_tool_buttons) == 12
+    assert panel._inspector_pages.count() == 12
     counts = {mode: panel._inspector_pane_modes.count(mode)
               for mode in ("edit", "tools", "check")}
-    assert counts == {"edit": 5, "tools": 7, "check": 4}
+    assert counts == {"edit": 5, "tools": 4, "check": 3}
 
 
-def test_duplicate_scan_is_a_tool_and_its_findings_are_a_check(panel):
-    """Starting the scan is an action; its verdict is something to revisit."""
+def test_duplicate_scan_and_findings_share_one_tools_page(panel):
     from ui.i18n import t
 
-    trigger = panel._inspector_tool_titles.index(t("meta_duplicates_tools_title"))
-    findings = panel._inspector_tool_titles.index(t("meta_dupes_results_title"))
-    assert panel._inspector_pane_modes[trigger] == "tools"
-    assert panel._inspector_pane_modes[findings] == "check"
-    assert findings == panel._DUPES_RESULTS_PANE
+    duplicates = panel._inspector_tool_titles.index(t("meta_duplicates_tools_title"))
+    assert panel._inspector_pane_modes[duplicates] == "tools"
+    assert panel._inspector_tool_titles.count(t("meta_duplicates_tools_title")) == 1
+    assert not any(
+        title == t("meta_dupes_results_title") and mode == "check"
+        for title, mode in zip(panel._inspector_tool_titles,
+                               panel._inspector_pane_modes)
+    )
 
 
-def test_legacy_tool_indices_still_mean_what_they_meant(panel):
-    """_select_inspector_tool is API: indices 0..7 are the old rail order."""
+def test_inspector_pages_follow_the_declared_navigation_order(panel):
     from ui.i18n import t
 
-    assert panel._inspector_tool_titles[0] == t("meta_edit_tags_group")
-    assert panel._inspector_tool_titles[1] == t("meta_action_engine_title")
-    assert panel._inspector_tool_titles[7] == t("meta_problems_title")
+    assert panel._inspector_tool_titles == [
+        t("meta_edit_tags_group"),
+        t("meta_inspector_artwork_section"),
+        t("meta_inspector_lyrics_section"),
+        t("meta_inspector_replaygain_section"),
+        t("meta_inspector_file_properties_section"),
+        t("meta_auto_btn").strip(),
+        t("meta_action_engine_title"),
+        t("meta_duplicates_tools_title"),
+        t("meta_online_title"),
+        t("meta_pending_tab"),
+        t("meta_problems_title"),
+        t("meta_external_tab"),
+    ]
 
-    panel._select_inspector_tool(1)
-    assert panel._inspector_pages.currentIndex() == 1
-    assert panel._inspector_tool_buttons[1].isChecked()
+    panel._select_inspector_tool(6)
+    assert panel._inspector_pages.currentIndex() == 6
+    assert panel._inspector_tool_buttons[6].isChecked()
     assert not panel._inspector_tool_buttons[0].isChecked()
 
 
@@ -364,7 +376,7 @@ def test_mode_tabs_track_the_active_pane(panel):
     assert panel._inspector_mode_buttons["edit"].isChecked()
     assert not panel._inspector_mode_buttons["tools"].isChecked()
 
-    panel._select_inspector_tool(1)                      # tools / actions
+    panel._select_inspector_tool(5)                      # tools / auto arrange
     assert panel._inspector_mode_buttons["tools"].isChecked()
     assert not panel._inspector_mode_buttons["edit"].isChecked()
 
@@ -465,18 +477,18 @@ def test_auto_arrange_page_lists_what_it_will_run(panel):
     """The button is otherwise a black box that edits files by unseen rules."""
     from ui.i18n import t
 
-    panel._auto_ops = {"title_strip", "track_num"}
+    panel._auto_ops = {"title_strip", "track_num", "normalize_spaces"}
     panel._refresh_auto_enabled_list()
     text = panel._auto_enabled_list.text()
-    assert t("meta_op_title_strip_label") in text
-    assert t("meta_op_track_num_label") in text
+    assert t("meta_auto_always_core") in text
+    assert t("meta_op_normalize_spaces_label") in text
+    assert t("meta_op_title_strip_label") not in text
+    assert t("meta_op_track_num_label") not in text
 
-    # Album-from-folder is not one of the configurable ops: Auto-Order always
-    # runs it.  Listing it is the point of the list, so it survives an
-    # otherwise empty selection rather than the page claiming nothing runs.
+    # Core title/track extraction and album-from-folder are not configurable.
     panel._auto_ops = set()
     panel._refresh_auto_enabled_list()
-    assert panel._auto_enabled_list.text() == f"•  {t('meta_auto_always_album')}"
+    assert panel._auto_enabled_list.text() == f"•  {t('meta_auto_always_core')}"
 
 
 def test_auto_arrange_settings_button_survives_the_move(panel):
@@ -484,6 +496,19 @@ def test_auto_arrange_settings_button_survives_the_move(panel):
     assert hasattr(panel, "_auto_btn")
     assert hasattr(panel, "_auto_cfg_btn")
     assert hasattr(panel, "_auto_container")
+
+
+def test_auto_arrange_settings_do_not_offer_core_title_or_track_twice(panel):
+    from ui.panels.metadata_editor.dialogs import AutoArrangeSettingsDialog
+
+    dialog = AutoArrangeSettingsDialog(
+        {"title_strip", "track_num", "normalize_spaces"}, panel)
+    try:
+        assert "title_strip" not in dialog._cbs
+        assert "track_num" not in dialog._cbs
+        assert "normalize_spaces" in dialog._cbs
+    finally:
+        dialog.deleteLater()
 
 
 def test_check_pending_page_reports_apply_scope(panel, tmp_path):
@@ -699,7 +724,10 @@ def test_a_long_file_name_does_not_widen_the_check_pages(panel, tmp_path):
         QApplication.processEvents()
 
         budget = panel._INSPECTOR_OPEN_MIN - panel._INSPECTOR_RAIL_WIDTH
-        for index in (13, 14):
+        from ui.i18n import t
+
+        for title_key in ("meta_pending_tab", "meta_external_tab"):
+            index = panel._inspector_tool_titles.index(t(title_key))
             _viewport, content = _inspector_page_content(panel, index)
             demanded = max(content.minimumSizeHint().width(), content.minimumWidth())
             assert demanded <= budget, (panel._inspector_tool_titles[index], demanded)
@@ -763,7 +791,11 @@ def test_every_shell_string_is_translated(language):
             "meta_inspector_mode_edit", "meta_inspector_mode_tools",
             "meta_inspector_mode_check", "meta_auto_enabled_heading",
             "meta_pending_tab", "meta_pending_none", "meta_external_tab",
-            "meta_external_none", "meta_auto_always_album",
+            "meta_external_none", "meta_auto_always_core",
+            "meta_all_actions_page_body", "meta_all_actions_common_heading",
+            "meta_all_actions_engine_heading", "meta_all_actions_engine_open",
+            "meta_all_actions_templates_heading", "meta_all_actions_templates_open",
+            "meta_all_actions_workflows_heading", "meta_all_actions_workflows_open",
             "meta_cleanup_warn_note", "meta_rename_ops_note",
             "meta_clean_settings_open", "meta_dupes_never_scanned",
             "meta_copy_tags", "meta_paste_tags",
@@ -909,24 +941,44 @@ def test_parameterised_actions_are_offered_in_the_tools_pages(panel, tmp_path):
         assert t(key) in labels
 
 
-def test_actions_page_lists_the_registry(panel, tmp_path):
-    """The page was a paragraph and one button."""
+def test_all_actions_keeps_every_quick_action_and_the_complete_registry(panel, tmp_path):
     from core.tag_actions import builtin_registry
+    from ui.i18n import t
+    from ui.panels.metadata_editor.shared import MAGIC_OP_DEFS
 
     _load(panel, tmp_path)
-    listed = {row.text() for row in panel._action_catalog_rows}
-    assert len(listed) >= 15
-    from ui.i18n import t
-    for action in builtin_registry().actions():
-        if action.category != "clear":
-            assert t(action.name_key) in listed, f"{action.id} is not offered anywhere"
+    listed = {row.text() for row in panel._op_rows}
+    for op_id, label_key, _description_key in MAGIC_OP_DEFS:
+        assert t(label_key) in listed, f"{op_id} was lost during consolidation"
+
+    dialog = panel._create_action_engine_dialog(initial_tab="actions")
+    try:
+        offered = {
+            dialog._action_combo.itemData(index)
+            for index in range(dialog._action_combo.count())
+        } | {
+            dialog._template_combo.itemData(index)
+            for index in range(dialog._template_combo.count())
+        }
+        assert offered == {action.id for action in builtin_registry().actions()}
+    finally:
+        dialog.deleteLater()
 
 
 def test_action_engine_opens_on_a_named_action(panel, tmp_path):
+    from ui.i18n import t
+
     _load(panel, tmp_path)
     dialog = panel._create_action_engine_dialog("tag.replace_text.v1")
     try:
         assert dialog._action_combo.currentData() == "tag.replace_text.v1"
+    finally:
+        dialog.deleteLater()
+
+    dialog = panel._create_action_engine_dialog(initial_tab="workflows")
+    try:
+        assert dialog._tabs.currentIndex() == 2
+        assert dialog._tabs.tabText(2) == t("meta_presets_tab")
     finally:
         dialog.deleteLater()
     dialog = panel._create_action_engine_dialog("template.tags_to_filename.v1")
@@ -941,16 +993,13 @@ def test_duplicates_page_reports_the_last_scan(panel, tmp_path):
     from ui.i18n import t
 
     _load(panel, tmp_path)
+    _open_dupes_tools_pane(panel)
+    duplicates_index = panel._inspector_pages.currentIndex()
     assert panel._dupes_summary.text() == t("meta_dupes_never_scanned")
-    assert panel._dupes_results_btn.isHidden()
     panel.on_duplicate_scan_complete([], 0.5, "hash")
     assert panel._dupes_summary.text() == t("meta_dupes_none_found")
     assert panel._dupes_reopen_btn.isHidden()
-    # "Nothing found" is still a result, and the Tools pane has to offer the
-    # way back to it.
-    assert not panel._dupes_results_btn.isHidden()
-    panel._dupes_results_btn.click()
-    assert panel._inspector_pages.currentIndex() == panel._DUPES_RESULTS_PANE
+    assert panel._inspector_pages.currentIndex() == duplicates_index
 
 
 def _dupe_result(tmp_path, *, n_groups=1):
@@ -1054,7 +1103,6 @@ def test_loading_another_folder_drops_the_previous_findings(panel, tmp_path):
     panel.on_workspace_replacement_started(tmp_path)
     assert panel._last_duplicate_scan is None
     assert panel._dupes_summary.text() == t("meta_dupes_never_scanned")
-    assert panel._dupes_results_btn.isHidden()
 
 
 def test_copy_tags_needs_one_file_and_never_copies_track_number(panel, tmp_path):

@@ -14,6 +14,7 @@ from PySide6.QtCore import QByteArray, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
+from core.tag_actions import AUTO_ARRANGE_INCLUDED_LEGACY_OPS
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_CUR, COL_TITLE_NEW,
     COL_ARTIST_CUR, COL_ARTIST_NEW, COL_ALBUM_CUR, COL_ALBUM_NEW,
@@ -130,7 +131,7 @@ MAGIC_OP_DEFS: list[tuple[str, str, str]] = [
 
 # Which ops the auto-arrange button runs by default
 DEFAULT_AUTO_OPS: frozenset[str] = frozenset({
-    "title_strip", "track_num", "normalize_spaces",
+    "normalize_spaces",
 })
 
 DEFAULT_COL_WIDTHS: dict[int, int] = {

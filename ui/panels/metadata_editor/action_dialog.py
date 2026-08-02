@@ -1,4 +1,4 @@
-"""Phase 9 Actions, Templates and Presets production dialog.
+"""All Actions dialog: actions, templates, and saved workflows.
 
 The dialog evaluates immutable previews and only adds accepted results to the
 Phase 8 Change Set.  It never writes tags or renames files.
@@ -96,7 +96,8 @@ class TagActionDialog(StyledDialog):
 
     def __init__(self, workspace, *, active_folder: Path | None = None, parent=None,
                  preset_path: Path | None = None, accept_preview=None,
-                 open_preset_transfer=None, initial_action_id: str = "") -> None:
+                 open_preset_transfer=None, initial_action_id: str = "",
+                 initial_tab: str = "") -> None:
         super().__init__(parent, minimum_size=(860, 620), resize_to=(1040, 720))
         mark_tag_editor_dialog(self)
         self.setWindowTitle(t("meta_action_engine_title"))
@@ -210,6 +211,8 @@ class TagActionDialog(StyledDialog):
         root.addWidget(make_footer(cancel_btn, self._edit_btn, self._accept_btn, leading=(self._preview_btn,)))
 
         self._select_initial_action(initial_action_id)
+        if not initial_action_id:
+            self._select_initial_tab(initial_tab)
         self._source_changed()
         if self._store_diagnostic:
             self._store_status.setText(t(_STORE_DIAGNOSTIC_KEYS[self._store_diagnostic]))
@@ -229,6 +232,12 @@ class TagActionDialog(StyledDialog):
                 self._tabs.setCurrentIndex(tab_index)
                 combo.setCurrentIndex(index)
                 return
+
+    def _select_initial_tab(self, tab: str) -> None:
+        """Open the requested top-level source from the All Actions page."""
+        index = {"actions": 0, "templates": 1, "workflows": 2}.get(tab)
+        if index is not None:
+            self._tabs.setCurrentIndex(index)
 
     def _make_definition_tab(self, kind: str) -> QComboBox:
         page = QWidget()

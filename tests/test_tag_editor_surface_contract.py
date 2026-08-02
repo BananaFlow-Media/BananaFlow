@@ -2,7 +2,7 @@
 
 The Tag Editor redesign (docs/design/tag-editor/) moves nearly every widget to a
 new home: the toolbar splits between a slim bar and a footer, the eight-tool
-inspector rail becomes three modes with fifteen sub-tabs, and panel.py is broken
+inspector rail becomes three modes with twelve sub-tabs, and panel.py is broken
 into modules.  None of that is allowed to *lose* anything.
 
 This file is deliberately written against the surface a user (or an existing
@@ -761,10 +761,8 @@ def test_lyrics_keeps_editable_language_and_description(panel):
 
 
 def test_inspector_exposes_every_tool_page(panel):
-    # Eight today; the redesign regroups them but must not reduce the count of
-    # reachable pages.
-    assert len(panel._inspector_tool_buttons) >= 8
-    assert panel._inspector_pages.count() >= 8
+    assert len(panel._inspector_tool_buttons) == 12
+    assert panel._inspector_pages.count() == 12
 
 
 # --------------------------------------------------------------------------- #

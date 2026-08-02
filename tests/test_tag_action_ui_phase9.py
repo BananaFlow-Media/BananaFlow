@@ -155,7 +155,9 @@ def test_panel_exposes_production_action_engine_page(app, tmp_path, monkeypatch)
         panel._root_folder = tmp_path
         panel.on_scan_complete(ScanResult(root=tmp_path, tracks=[item], folder_set={tmp_path}))
         assert panel._action_engine_btn.isEnabled()
-        assert panel._action_engine_btn.accessibleName() == t("meta_action_engine_open")
+        assert panel._templates_btn.isEnabled()
+        assert panel._saved_workflows_btn.isEnabled()
+        assert panel._action_engine_btn.accessibleName() == t("meta_all_actions_engine_open")
         assert any(button.toolTip() == t("meta_action_engine_title") for button in panel._inspector_tool_buttons)
     finally:
         panel.deleteLater()

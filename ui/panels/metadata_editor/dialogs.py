@@ -172,7 +172,7 @@ class AutoArrangeSettingsDialog(StyledDialog):
         # rather than a flat, unordered wall of checkboxes.
         op_defs_by_key = {key: (label_key, desc_key) for key, label_key, desc_key in MAGIC_OP_DEFS}
         op_sections = (
-            ("meta_group_from_filename", ("title_strip", "title_full", "track_num", "split_at")),
+            ("meta_group_from_filename", ("title_full", "split_at")),
             ("meta_section_text_cleanup", ("normalize_spaces", "strip_junk", "album_artist")),
             ("meta_section_clear_fields", (
                 "clear_title", "clear_artist", "clear_album", "clear_album_artist",
@@ -181,7 +181,7 @@ class AutoArrangeSettingsDialog(StyledDialog):
             ("meta_rename_group", (
                 "clean_filename", "strip_filename_numbering", "rename_from_title")),
         )
-        # Parameterised operations are deliberately absent: Auto-Order runs
+        # Parameterised operations are deliberately absent: Auto Arrange runs
         # unattended, and there is nowhere here to supply the find text, the
         # case mode or the starting number they each require.
 

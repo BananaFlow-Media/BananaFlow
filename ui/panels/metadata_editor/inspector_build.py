@@ -77,6 +77,7 @@ from ui import a11y
 from ui.i18n import t
 from .dialogs import AutoArrangeSettingsDialog, CleanSettingsDialog, MoreColumnsDialog
 from .shared import (
+    AUTO_ARRANGE_INCLUDED_LEGACY_OPS,
     DEFAULT_AUTO_OPS,
     DEFAULT_COL_WIDTHS,
     MAGIC_OP_DEFS,
@@ -714,16 +715,17 @@ class InspectorBuildMixin:
         """Mirror the auto-arrange settings into the page that runs them.
 
         The album-from-folder step is listed first and marked as always on.
-        It runs on every Auto-Order regardless of the settings, so leaving it
+        It runs on every Auto Arrange regardless of the settings, so leaving it
         out made the list of "operations this runs" quietly incomplete.
         """
         if not hasattr(self, "_auto_enabled_list"):
             return
-        labels = [t("meta_auto_always_album")]
+        labels = [t("meta_auto_always_core")]
         labels += [
             t(label_key)
             for op_id, label_key, _desc in MAGIC_OP_DEFS
-            if op_id in self._auto_ops
+            if (op_id in self._auto_ops
+                and op_id not in AUTO_ARRANGE_INCLUDED_LEGACY_OPS)
         ]
         self._auto_enabled_list.setText("\n".join(f"•  {label}" for label in labels))
 
