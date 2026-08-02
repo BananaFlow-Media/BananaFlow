@@ -103,7 +103,7 @@ from core.metadata_models import (
 from ui import a11y
 from ui.components.empty_state_icon import EmptyStateIcon
 from ui.i18n import t
-from ui.touch import TOUCH_SPLITTER_HANDLE_PX, is_touch_density
+from ui.touch import TOUCH_SPLITTER_HANDLE_PX, enable_pinch_zoom, is_touch_density
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_NEW,
     COL_ARTIST_NEW, COL_ALBUM_NEW,
@@ -1917,6 +1917,13 @@ class MetadataEditorPanel(
         self._table.setModel(self._proxy)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # Pinch to zoom the list — on a touch screen, on a touchpad (which
+        # Windows delivers as Ctrl+wheel), and with Ctrl+wheel on a mouse.
+        # The +/- buttons stay; this is the direct-manipulation equivalent.
+        self._zoom_persist_timer = QTimer(self)
+        self._zoom_persist_timer.setSingleShot(True)
+        self._zoom_persist_timer.timeout.connect(self._persist_zoom)
+        enable_pinch_zoom(self._table, self._on_pinch_zoom)
         # EditKeyPressed = F2 on Windows (Qt platform edit key) — matches
         # Win11 Explorer rename behavior.
         self._table.setEditTriggers(
@@ -5391,14 +5398,40 @@ class MetadataEditorPanel(
         new_val = max(50, min(200, self._zoom_level + delta))
         self._set_zoom(new_val)
 
-    def _set_zoom(self, pct: int) -> None:
-        self._zoom_level = pct
-        self._zoom_val_lbl.setText(f"{pct}%")
-        
+    def _on_pinch_zoom(self, factor: float) -> None:
+        """Apply one increment of a pinch (or Ctrl+wheel) to the list zoom.
+
+        A pinch arrives as a stream of small factors, so the fractional level
+        is carried separately: rounding each step to the integer percent the
+        control uses would quantise every increment to zero and the gesture
+        would do nothing at all.
+        """
+        current = getattr(self, "_zoom_fractional", None)
+        if current is None:
+            current = float(self._zoom_level)
+        current = max(50.0, min(200.0, current * factor))
+        self._zoom_fractional = current
+
+        target = int(round(current))
+        if target != self._zoom_level:
+            # Defer the config write: a pinch crosses many integer steps and
+            # each _set_zoom would otherwise be a separate disk write.
+            self._set_zoom(target, persist=False)
+            self._zoom_persist_timer.start(400)
+
+    def _persist_zoom(self) -> None:
         if self._cfg:
-            self._cfg.tag_editor_zoom = pct
+            self._cfg.tag_editor_zoom = self._zoom_level
             self._cfg.save()
-            
+
+    def _set_zoom(self, pct: int, *, persist: bool = True) -> None:
+        self._zoom_level = pct
+        self._zoom_fractional = float(pct)
+        self._zoom_val_lbl.setText(f"{pct}%")
+
+        if persist:
+            self._persist_zoom()
+
         font_size = max(6, int(10 * (pct / 100.0)))
         factor = pct / 100.0
         

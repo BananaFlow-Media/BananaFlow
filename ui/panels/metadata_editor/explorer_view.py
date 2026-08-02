@@ -46,6 +46,11 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
+from ui.touch import (
+    is_touch_pointer,
+    resume_touch_scroll,
+    suspend_touch_scroll,
+)
 from ui.models.metadata_table_model import (
     COL_CHECK,
     COL_END_GUTTER,
@@ -557,6 +562,9 @@ class ExplorerDetailsView(QTableView):
         self._rubber_base_selection = QItemSelection()
         self._pending_cb_row = -1   # row whose checkbox toggle is deferred to mouse-release
         self._hovered_row = -1
+        #: Set while a press-and-hold has handed this view the touch stream so
+        #: the drag that follows draws a marquee instead of scrolling.
+        self._touch_marquee_armed = False
         # Rubber-band geometry tracked as a plain QRect; drawn directly in
         # paintEvent so SourceOver alpha works without WA_TranslucentBackground.
         self._rubber_rect = QRect()
@@ -643,6 +651,46 @@ class ExplorerDetailsView(QTableView):
             painter.drawRect(self._rubber_rect.adjusted(0, 0, -1, -1))
             painter.end()
 
+    def touch_hold(self, pos: QPoint) -> bool:
+        """Start a marquee selection when a finger rests on empty space.
+
+        Called by :mod:`ui.touch` when a press-and-hold matures.  Returning
+        ``True`` consumes the gesture; ``False`` lets it become the context
+        menu, which is what a hold on an actual row should do.
+
+        Empty space is the right trigger: it is where a marquee would begin
+        with a mouse anyway, and the row menu needs a row to act on, so
+        nothing is taken away from either.
+        """
+        if not self._is_empty_viewport_area(pos):
+            return False
+
+        # The scroller owns the touch stream by default. Take it for the rest
+        # of this gesture, or the drag would scroll and draw a marquee at once.
+        suspend_touch_scroll(self)
+        self._touch_marquee_armed = True
+
+        self._rubber_origin = pos
+        self._rubber_active = True
+        self._rubber_dragging = False
+        self._rubber_modifiers = Qt.NoModifier
+        self._rubber_rect = QRect()
+        selection_model = self.selectionModel()
+        self._rubber_base_selection = (
+            selection_model.selection() if selection_model is not None else QItemSelection()
+        )
+        self.clearSelection()
+        self.setCurrentIndex(QModelIndex())
+        self._empty_area_pressed = True
+        return True
+
+    def _release_touch_marquee(self) -> None:
+        """Give the touch stream back. Must run on every path out of a hold."""
+        if not self._touch_marquee_armed:
+            return
+        self._touch_marquee_armed = False
+        resume_touch_scroll(self)
+
     def mousePressEvent(self, event) -> None:
         pos = self._event_pos(event)
 
@@ -699,6 +747,19 @@ class ExplorerDetailsView(QTableView):
             )
 
     def mouseMoveEvent(self, event) -> None:
+        # A finger's drag belongs to the kinetic scroller, and both of the
+        # paths below would steal it: ours draws a marquee, and Qt's own
+        # drag-selection in super() does the same thing by another route.
+        # That is the bug this guards — dragging the table selected rows and
+        # left no way to scroll it at all. Only a deliberate press-and-hold
+        # (touch_hold) hands the drag to this view.
+        #
+        # Deliberately here rather than at the press: the press still has to
+        # run normally so that a plain tap selects a row and a tap on the
+        # checkbox column still toggles it.
+        if is_touch_pointer(event) and not self._touch_marquee_armed:
+            return
+
         if self._rubber_active and event.buttons() & Qt.LeftButton:
             self._update_empty_area_drag(self._event_pos(event))
             event.accept()
@@ -708,6 +769,10 @@ class ExplorerDetailsView(QTableView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        # Unconditional, and first: whatever this release turns out to mean,
+        # a suspended scroller that is never resumed leaves the table
+        # permanently unscrollable.
+        self._release_touch_marquee()
         if event.button() == Qt.LeftButton and self._rubber_active:
             was_dragging = self._rubber_dragging
             pending_row = self._pending_cb_row
@@ -922,6 +987,9 @@ class ExplorerDetailsView(QTableView):
         return range(first, last + 1)
 
     def _cancel_rubber_band(self) -> None:
+        # Every abandonment path routes through here, so it is also where a
+        # suspended scroller is guaranteed to be handed back.
+        self._release_touch_marquee()
         self._rubber_active = False
         self._rubber_dragging = False
         self._pending_cb_row = -1

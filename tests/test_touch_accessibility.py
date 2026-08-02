@@ -535,3 +535,293 @@ class TestDensityStylesheet:
         assert "background" not in qss
         assert f"min-height: {touch.TOUCH_TARGET_PX}px" in qss
         assert f"width: {touch.TOUCH_SCROLLBAR_PX}px" in qss
+
+
+# ── drag must scroll, not select ──────────────────────────────────────────────
+
+class TestTableDragScrolls:
+    """The Tag Editor table draws its own marquee on left-press.
+
+    On a touch screen that won the race against the kinetic scroller: dragging
+    the table selected rows and there was no way to scroll it at all. Reported
+    from real hardware, so these pin the resolution.
+    """
+
+    def _table(self):
+        from ui.panels.metadata_editor.explorer_view import ExplorerDetailsView
+
+        table = ExplorerDetailsView()
+        table.resize(400, 300)
+        touch.enable_touch_scroll(table)
+        touch.enable_hold_gesture(table)
+        return table
+
+    def test_a_finger_drag_draws_no_marquee(self, app):
+        table = self._table()
+        try:
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), QPoint(50, 50)))
+            QApplication.sendEvent(table.viewport(), _move(table.viewport(), QPoint(50, 200)))
+            # This is the reported bug: the drag selected rows and the table
+            # could not be scrolled at all.
+            assert table._rubber_dragging is False
+            assert table._rubber_rect.isEmpty()
+        finally:
+            table.deleteLater()
+
+    def test_a_finger_drag_from_the_checkbox_column_also_scrolls(self, app):
+        table = self._table()
+        try:
+            # The checkbox strip is a separate press path, and it is exactly
+            # where a thumb lands on the leading edge while scrolling.
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), QPoint(6, 50)))
+            QApplication.sendEvent(table.viewport(), _move(table.viewport(), QPoint(6, 200)))
+            assert table._rubber_dragging is False
+            assert table._rubber_rect.isEmpty()
+        finally:
+            table.deleteLater()
+
+    def test_a_mouse_drag_still_draws_a_marquee(self, app):
+        table = self._table()
+        try:
+            table._is_empty_viewport_area = lambda pos: True
+            QApplication.sendEvent(
+                table.viewport(), _press(table.viewport(), QPoint(50, 50), finger=False)
+            )
+            assert table._rubber_active is True
+            QApplication.sendEvent(
+                table.viewport(),
+                QMouseEvent(
+                    QEvent.Type.MouseMove,
+                    QPointF(QPoint(50, 200)),
+                    QPointF(table.viewport().mapToGlobal(QPoint(50, 200))),
+                    Qt.MouseButton.NoButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    _mouse(),
+                ),
+            )
+            # The mouse behaviour must be untouched.
+            assert table._rubber_dragging is True
+        finally:
+            table.deleteLater()
+
+    def test_hold_on_empty_space_starts_a_marquee(self, app):
+        table = self._table()
+        try:
+            table._is_empty_viewport_area = lambda pos: True
+            assert table.touch_hold(QPoint(50, 50)) is True
+            assert table._rubber_active is True
+            assert table._touch_marquee_armed is True
+            # The scroller must let go, or the drag would scroll and draw at once.
+            assert touch.is_touch_scroll_suspended(table)
+        finally:
+            table.deleteLater()
+
+    def test_hold_on_a_row_falls_through_to_the_menu(self, app):
+        table = self._table()
+        try:
+            table._is_empty_viewport_area = lambda pos: False
+            assert table.touch_hold(QPoint(50, 50)) is False
+            assert table._touch_marquee_armed is False
+            # Still scrollable: nothing was claimed.
+            assert not touch.is_touch_scroll_suspended(table)
+        finally:
+            table.deleteLater()
+
+    def test_release_hands_the_scroller_back(self, app):
+        table = self._table()
+        try:
+            table._is_empty_viewport_area = lambda pos: True
+            table.touch_hold(QPoint(50, 50))
+            QApplication.sendEvent(table.viewport(), _release(table.viewport(), QPoint(50, 90)))
+            # A scroller suspended and never resumed leaves the table
+            # permanently unscrollable — worse than the bug being fixed.
+            assert not touch.is_touch_scroll_suspended(table)
+            assert table._touch_marquee_armed is False
+        finally:
+            table.deleteLater()
+
+    def test_cancelling_also_hands_the_scroller_back(self, app):
+        table = self._table()
+        try:
+            table._is_empty_viewport_area = lambda pos: True
+            table.touch_hold(QPoint(50, 50))
+            table._cancel_rubber_band()
+            assert not touch.is_touch_scroll_suspended(table)
+        finally:
+            table.deleteLater()
+
+    def test_an_armed_marquee_lets_the_drag_through(self, app):
+        table = self._table()
+        try:
+            table._is_empty_viewport_area = lambda pos: True
+            table.touch_hold(QPoint(50, 50))
+            # Once the hold has claimed the gesture, the finger's own drag
+            # must be allowed to drive the marquee.
+            QApplication.sendEvent(table.viewport(), _move(table.viewport(), QPoint(50, 200)))
+            assert table._rubber_dragging is True
+        finally:
+            table.deleteLater()
+
+
+class TestHoldHook:
+    def test_a_widget_hook_pre_empts_the_context_menu(self, app):
+        tree, received = _tree_with_menu()
+        calls: list = []
+        tree.touch_hold = lambda pos: (calls.append(pos), True)[1]
+        _hold(tree, tree.viewport(), QPoint(30, 30))
+        assert calls and received == [], "the hook claimed it; no menu should open"
+
+    def test_a_declining_hook_still_gets_the_menu(self, app):
+        tree, received = _tree_with_menu()
+        tree.touch_hold = lambda pos: False
+        _hold(tree, tree.viewport(), QPoint(30, 30))
+        assert received == [QPoint(30, 30)]
+
+    def test_a_raising_hook_does_not_break_input(self, app):
+        tree, received = _tree_with_menu()
+
+        def boom(pos):
+            raise RuntimeError("hook is broken")
+
+        tree.touch_hold = boom
+        _hold(tree, tree.viewport(), QPoint(30, 30))
+        # A broken hook must degrade to the default, not kill the gesture.
+        assert received == [QPoint(30, 30)]
+
+
+# ── pinch to zoom ─────────────────────────────────────────────────────────────
+
+def _ctrl_wheel(widget, notches: int):
+    from PySide6.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(QPoint(20, 20)),
+        QPointF(widget.mapToGlobal(QPoint(20, 20))),
+        QPoint(0, 0),
+        QPoint(0, 120 * notches),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+def _plain_wheel(widget, notches: int):
+    from PySide6.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(QPoint(20, 20)),
+        QPointF(widget.mapToGlobal(QPoint(20, 20))),
+        QPoint(0, 0),
+        QPoint(0, 120 * notches),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+class TestPinchZoom:
+    def _zoomable(self):
+        from PySide6.QtWidgets import QTableView
+
+        view = QTableView()
+        view.resize(300, 300)
+        factors: list = []
+        touch.enable_pinch_zoom(view, factors.append)
+        return view, factors
+
+    def test_ctrl_wheel_up_zooms_in(self, app):
+        view, factors = self._zoomable()
+        # On Windows a precision-touchpad pinch reaches the app as Ctrl+wheel,
+        # so this *is* the touchpad path, not a mouse-only convenience.
+        QApplication.sendEvent(view.viewport(), _ctrl_wheel(view.viewport(), 1))
+        assert factors and factors[0] > 1.0
+
+    def test_ctrl_wheel_down_zooms_out(self, app):
+        view, factors = self._zoomable()
+        QApplication.sendEvent(view.viewport(), _ctrl_wheel(view.viewport(), -1))
+        assert factors and 0.0 < factors[0] < 1.0
+
+    def test_a_plain_wheel_still_scrolls(self, app):
+        view, factors = self._zoomable()
+        event = _plain_wheel(view.viewport(), 1)
+        QApplication.sendEvent(view.viewport(), event)
+        # Without Ctrl the wheel must reach the list unchanged.
+        assert factors == []
+
+    def test_native_zoom_gesture_is_honoured(self, app):
+        from PySide6.QtGui import QNativeGestureEvent
+
+        view, factors = self._zoomable()
+        event = QNativeGestureEvent(
+            Qt.NativeGestureType.ZoomNativeGesture,
+            _finger(),
+            2,
+            QPointF(QPoint(20, 20)),
+            QPointF(QPoint(20, 20)),
+            QPointF(view.viewport().mapToGlobal(QPoint(20, 20))),
+            0.25,
+            QPointF(0, 0),
+        )
+        QApplication.sendEvent(view.viewport(), event)
+        # value() is a delta around zero, not a scale factor.
+        assert factors and abs(factors[0] - 1.25) < 1e-6
+
+    def test_a_degenerate_factor_is_dropped(self, app):
+        view, factors = self._zoomable()
+        zoom_filter = view.findChild(touch._PinchZoomFilter)
+        zoom_filter._emit(1.0)
+        zoom_filter._emit(0.0)
+        zoom_filter._emit(-2.0)
+        # A zero or negative multiplier would collapse the caller's value.
+        assert factors == []
+
+
+class TestTagEditorPinchZoom:
+    def _panel(self):
+        from config import AppConfig
+        from ui.theme_manager import ThemeManager
+        from ui.panels.metadata_editor.panel import MetadataEditorPanel
+
+        cfg = AppConfig()
+        ThemeManager(cfg)
+        return MetadataEditorPanel(config=cfg)
+
+    def test_small_increments_accumulate(self, app):
+        panel = self._panel()
+        try:
+            panel._set_zoom(100)
+            # Rounding each step to the integer percent the control uses
+            # would quantise every increment to zero, and the whole gesture
+            # would do nothing at all.
+            for _ in range(6):
+                panel._on_pinch_zoom(1.02)
+            assert panel._zoom_level > 100
+        finally:
+            panel.deleteLater()
+
+    def test_clamped_to_the_control_range(self, app):
+        panel = self._panel()
+        try:
+            panel._set_zoom(100)
+            for _ in range(200):
+                panel._on_pinch_zoom(1.05)
+            assert panel._zoom_level == 200
+            for _ in range(400):
+                panel._on_pinch_zoom(1 / 1.05)
+            assert panel._zoom_level == 50
+        finally:
+            panel.deleteLater()
+
+    def test_the_config_write_is_deferred(self, app):
+        panel = self._panel()
+        try:
+            panel._set_zoom(100)
+            panel._on_pinch_zoom(1.3)
+            # A pinch crosses many integer steps; each one writing config.json
+            # would be a separate disk write mid-gesture.
+            assert panel._zoom_persist_timer.isActive()
+        finally:
+            panel.deleteLater()

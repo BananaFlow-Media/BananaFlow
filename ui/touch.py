@@ -39,6 +39,7 @@ mirrors the same warning in :mod:`ui.a11y`.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Callable, Optional
@@ -57,11 +58,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "TOUCH_TARGET_PX",
     "TOUCH_SCROLLBAR_PX",
     "TOUCH_SPLITTER_HANDLE_PX",
     "has_touch_screen",
+    "is_touch_pointer",
+    "suspend_touch_scroll",
+    "resume_touch_scroll",
+    "is_touch_scroll_suspended",
     "set_touch_density",
     "is_touch_density",
     "touch_size",
@@ -69,6 +76,7 @@ __all__ = [
     "apply_touch_support",
     "apply_touch_density_sizes",
     "enable_touch_scroll",
+    "enable_pinch_zoom",
     "enable_hold_gesture",
     "enable_long_press_context_menu",
     "enable_long_press_tooltip",
@@ -213,6 +221,68 @@ def _touch_scroller_properties() -> QScrollerProperties:
     return props
 
 
+def is_touch_pointer(event) -> bool:
+    """True when ``event`` came from a finger rather than a real mouse.
+
+    Exposed because a widget with its own press-drag behaviour — a rubber-band
+    selection, say — has to tell the two apart itself.  On a touch screen a
+    drag belongs to the scroller, and a view that claims it on press wins the
+    race and leaves the surface unscrollable.
+    """
+    return _HoldGestureWatcher._is_touch(event)
+
+
+#: Tracks whether this module has ungrabbed a target's scroll gesture.
+#:
+#: ``QScroller.hasScroller()`` cannot answer this: it reports whether a
+#: QScroller *object* exists, and that object outlives ``ungrabGesture`` — so
+#: using it as the guard made resume a no-op and left the surface permanently
+#: unscrollable, which is worse than the bug suspension exists to fix.
+_SUSPENDED_PROPERTY = "_bananaflow_scroll_suspended"
+
+
+def suspend_touch_scroll(widget: Optional[QWidget]) -> None:
+    """Hand the touch stream back to ``widget`` for the current gesture.
+
+    For the case where a deliberate gesture (a hold) means the user wants to
+    drag *within* the widget rather than scroll it.  Always pair with
+    :func:`resume_touch_scroll` on release — including on the paths where the
+    gesture is abandoned.
+    """
+    if widget is None:
+        return
+    target = _scroll_target(widget)
+    if target is None or bool(target.property(_SUSPENDED_PROPERTY)):
+        return
+    scroller = QScroller.scroller(target)
+    if scroller is not None:
+        scroller.stop()
+    QScroller.ungrabGesture(target)
+    target.setProperty(_SUSPENDED_PROPERTY, True)
+
+
+def resume_touch_scroll(widget: Optional[QWidget]) -> None:
+    """Give the touch stream back to the scroller after a suspension."""
+    if widget is None:
+        return
+    target = _scroll_target(widget)
+    if target is None or not bool(target.property(_SUSPENDED_PROPERTY)):
+        return
+    QScroller.grabGesture(target, QScroller.ScrollerGestureType.TouchGesture)
+    scroller = QScroller.scroller(target)
+    if scroller is not None:
+        scroller.setScrollerProperties(_touch_scroller_properties())
+    target.setProperty(_SUSPENDED_PROPERTY, False)
+
+
+def is_touch_scroll_suspended(widget: Optional[QWidget]) -> bool:
+    """Whether :func:`suspend_touch_scroll` currently holds ``widget``'s gesture."""
+    if widget is None:
+        return False
+    target = _scroll_target(widget)
+    return target is not None and bool(target.property(_SUSPENDED_PROPERTY))
+
+
 def enable_touch_scroll(widget: Optional[QWidget]) -> Optional[QWidget]:
     """Make ``widget`` scroll under a finger.  Returns ``widget`` for chaining.
 
@@ -243,6 +313,97 @@ def enable_touch_scroll(widget: Optional[QWidget]) -> Optional[QWidget]:
     scroller = QScroller.scroller(target)
     if scroller is not None:
         scroller.setScrollerProperties(_touch_scroller_properties())
+    return widget
+
+
+# ── Pinch to zoom ─────────────────────────────────────────────────────────────
+
+class _PinchZoomFilter(QObject):
+    """Routes every way a "zoom" gesture can arrive into one callback.
+
+    There are three, and a surface that handles only one is broken on some
+    hardware the user actually has:
+
+    * **Touch screen** — a real two-finger pinch, delivered through Qt's
+      gesture framework as ``QPinchGesture`` once the widget grabs it.
+    * **Precision touchpad on Windows** — the OS does *not* generally hand Qt
+      a pinch here.  It converts the gesture to **Ctrl + wheel** before the
+      application sees it, which is the same thing every desktop app has
+      always treated as zoom.  Handling Ctrl+wheel is therefore not a mouse
+      convenience bolted on: it *is* the touchpad path.
+    * **Platform native gesture** — ``ZoomNativeGesture``, which some
+      platform plugins send instead.  Cheap to accept, and it is what makes
+      this correct on a stack that does deliver it.
+
+    The callback receives an incremental *multiplier* (1.05 = 5% larger), so
+    the caller keeps ownership of its own range, rounding and clamping.
+    """
+
+    #: One wheel notch. Matches the ±10% the zoom buttons already step by, so
+    #: the two ways of zooming do not disagree about how big a step is.
+    _WHEEL_FACTOR = 1.1
+
+    def __init__(self, widget: QWidget, on_zoom: Callable[[float], None]) -> None:
+        super().__init__(widget)
+        self._on_zoom = on_zoom
+
+    def _emit(self, factor: float) -> None:
+        # A degenerate factor would collapse or explode the caller's value.
+        if factor > 0.0 and abs(factor - 1.0) > 1e-6:
+            self._on_zoom(factor)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        kind = event.type()
+
+        if kind == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                steps = event.angleDelta().y()
+                if steps:
+                    self._emit(
+                        self._WHEEL_FACTOR if steps > 0 else 1.0 / self._WHEEL_FACTOR
+                    )
+                # Consumed, or the list would zoom and scroll at the same time.
+                return True
+            return False
+
+        if kind == QEvent.Type.NativeGesture:
+            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                # value() is an incremental delta around zero, not a scale.
+                self._emit(1.0 + float(event.value()))
+                return True
+            return False
+
+        if kind == QEvent.Type.Gesture:
+            pinch = event.gesture(Qt.GestureType.PinchGesture)
+            if pinch is not None:
+                self._emit(float(pinch.scaleFactor()))
+                event.accept()
+                return True
+
+        return False
+
+
+def enable_pinch_zoom(
+    widget: Optional[QWidget], on_zoom: Callable[[float], None]
+) -> Optional[QWidget]:
+    """Let ``widget`` be zoomed by pinching, on a touch screen or a touchpad.
+
+    ``on_zoom`` is called with an incremental multiplier.  Attach it to the
+    widget that *owns* the zoom, not to whatever is nested inside it.
+    """
+    if widget is None:
+        return None
+
+    zoom_filter = _PinchZoomFilter(widget, on_zoom)
+    widget.grabGesture(Qt.GestureType.PinchGesture)
+    widget.installEventFilter(zoom_filter)
+    # Wheel and native gestures land on the viewport of a scroll area, while
+    # the grabbed QPinchGesture is delivered to the widget itself, so both
+    # have to be watched.
+    viewport = _scroll_target(widget)
+    if viewport is not None and viewport is not widget:
+        viewport.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        viewport.installEventFilter(zoom_filter)
     return widget
 
 
@@ -351,7 +512,20 @@ class _HoldGestureWatcher(QObject):
         if pos is None or not self._alive(target):
             return
 
-        if self._menu_owner(target) is not None:
+        owner = self._menu_owner(target)
+        # A widget may claim the hold for itself. The Tag Editor's table uses
+        # this to start a marquee selection from empty space, which on a touch
+        # screen has no other gesture available — a plain drag has to scroll.
+        # Returning False (or having no hook) falls through to the menu.
+        hook = getattr(owner or target, "touch_hold", None)
+        if callable(hook):
+            try:
+                if hook(pos):
+                    return
+            except Exception:  # pragma: no cover - a hook must never break input
+                logger.warning("[touch] touch_hold hook raised; falling back", exc_info=True)
+
+        if owner is not None:
             self._open_context_menu(target, pos)
             return
         self._show_tooltip(target, pos)

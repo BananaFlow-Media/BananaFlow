@@ -42,7 +42,11 @@ First public BananaFlow release.
   menus, and in place of a hover to read a control's tooltip without
   activating it. The download queue's remove button no longer requires a
   hover to appear, and queue reordering — previously drag-only — is
-  available from a card's menu. An optional **Touch-Friendly Sizing**
+  available from a card's menu. In the Tag Editor's file table a drag
+  scrolls rather than selecting; press and hold on empty space beside the
+  rows to draw a selection box. The Tag Editor's file list zooms by
+  pinching — on a touch screen, on a precision touchpad, or with Ctrl +
+  mouse wheel. An optional **Touch-Friendly Sizing**
   setting enlarges controls, scrollbars and menu rows to finger-sized
   targets.
 
