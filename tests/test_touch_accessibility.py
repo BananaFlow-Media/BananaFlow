@@ -925,21 +925,17 @@ class TestAxisLock:
 
 # ── selecting several rows with a finger ──────────────────────────────────────
 
-class TestCrossSlideSelection:
-    """Windows' own gesture for picking several items with a finger.
+class TestExplorerTouchMarquee:
+    """File Explorer's own touch selection: press, hold *briefly*, then drag.
 
-    Three earlier attempts here invented a gesture and hung it on a small
-    target — a 24 px checkbox column, a 17 px gutter — so missing by a
-    millimetre silently did something else. Microsoft's guidance for a list
-    that pans in one direction is a short sideways flick, with the whole row
-    as the target:
+        "Windows File Explorer already supports finger drag selection
+         (press, hold briefly, then drag to create a selection box)."
 
-        "A vertically panning one-dimensional list. Drag horizontally to
-         select or move an item."
-        "a small threshold of 2.7mm (approximately 10 pixels at target
-         resolution) must be crossed before either a select or drag
-         interaction is activated."
-        "cross-slide selection is constrained to a 90 degree threshold area"
+    "briefly" is the design. Three earlier attempts made the user hold for the
+    full press-and-hold interval before a drag would select — long enough that
+    the finger has almost always moved first, and a finger that moves first is
+    scrolling. The gesture appeared to do nothing, or, held to the end and
+    lifted, opened the context menu. Two clocks fix that, and these pin both.
     """
 
     def _table(self):
@@ -957,100 +953,155 @@ class TestCrossSlideSelection:
     def _row_pos(self, table, row, x=200):
         return QPoint(x, table.rowViewportPosition(row) + 4)
 
-    def _flick(self, table, row, dx, dy=0):
-        start = self._row_pos(table, row)
-        end = QPoint(start.x() + dx, start.y() + dy)
-        QApplication.sendEvent(table.viewport(), _press(table.viewport(), start))
-        QApplication.sendEvent(table.viewport(), _release(table.viewport(), end))
-
     def _rows(self, table):
         return sorted(i.row() for i in table.selectionModel().selectedRows())
 
-    def test_a_sideways_flick_selects_the_row(self, app):
+    def _press(self, table, row):
+        QApplication.sendEvent(
+            table.viewport(), _press(table.viewport(), self._row_pos(table, row))
+        )
+
+    def _rest(self, table):
+        """Let the short arm clock elapse, as a finger held still would."""
+        table._touch_arm_timer.stop()
+        table._arm_touch_marquee()
+
+    def _drag_to(self, table, row):
+        QApplication.sendEvent(
+            table.viewport(), _move(table.viewport(), self._row_pos(table, row))
+        )
+
+    def _lift(self, table, row):
+        QApplication.sendEvent(
+            table.viewport(), _release(table.viewport(), self._row_pos(table, row))
+        )
+
+    def test_press_rest_drag_selects_the_rows_crossed(self, app):
         table = self._table()
         try:
-            self._flick(table, 3, dx=40)
+            self._press(table, 2)
+            self._rest(table)
+            self._drag_to(table, 6)
+            self._lift(table, 6)
+            assert self._rows(table) == [2, 3, 4, 5, 6]
+        finally:
+            table.deleteLater()
+
+    def test_the_arm_clock_starts_on_a_finger_press(self, app):
+        table = self._table()
+        try:
+            self._press(table, 3)
+            assert table._touch_arm_timer.isActive()
+            assert table._touch_arm_timer.interval() == table._TOUCH_ARM_MS
+        finally:
+            table.deleteLater()
+
+    def test_moving_before_it_elapses_leaves_the_gesture_a_scroll(self, app):
+        table = self._table()
+        try:
+            self._press(table, 2)
+            self._drag_to(table, 7)          # off before resting
+            # The clock is stopped, so it never fires and the marquee never
+            # arms — no _rest() here, because in life there is nothing to
+            # fire it.
+            assert not table._touch_arm_timer.isActive()
+            assert table._touch_marquee_armed is False
+            self._drag_to(table, 9)
+            self._lift(table, 9)
+            # A finger that moves first is scrolling, and a scroll selects
+            # nothing it passed over.
+            assert self._rows(table) == []
+        finally:
+            table.deleteLater()
+
+    def test_resting_hands_the_scroller_over(self, app):
+        table = self._table()
+        try:
+            self._press(table, 2)
+            self._rest(table)
+            assert table._touch_marquee_armed is True
+            # Or the drag would scroll and draw a box at the same time.
+            assert touch.is_touch_scroll_suspended(table)
+        finally:
+            table.deleteLater()
+
+    def test_the_scroller_always_comes_back(self, app):
+        table = self._table()
+        try:
+            self._press(table, 2)
+            self._rest(table)
+            self._drag_to(table, 5)
+            self._lift(table, 5)
+            # Suspended and never resumed would leave the table unscrollable
+            # for good — worse than the bug the suspension exists to fix.
+            assert not touch.is_touch_scroll_suspended(table)
+            assert table._touch_marquee_armed is False
+        finally:
+            table.deleteLater()
+
+    def test_resting_then_lifting_without_moving_is_a_tap(self, app):
+        table = self._table()
+        try:
+            self._press(table, 3)
+            self._rest(table)
+            self._lift(table, 3)
             assert self._rows(table) == [3]
         finally:
             table.deleteLater()
 
-    def test_flicking_several_rows_selects_all_of_them(self, app):
+    def test_the_marquee_adds_to_what_is_already_selected(self, app):
         table = self._table()
         try:
-            # The whole point: no mode to enter, no strip to find. Flick each
-            # row you want.
-            for row in (2, 5, 9):
-                self._flick(table, row, dx=40)
-            assert self._rows(table) == [2, 5, 9]
-        finally:
-            table.deleteLater()
-
-    def test_it_works_in_either_direction(self, app):
-        table = self._table()
-        try:
-            self._flick(table, 4, dx=-40)
-            assert self._rows(table) == [4]
-        finally:
-            table.deleteLater()
-
-    def test_flicking_a_selected_row_again_deselects_it(self, app):
-        table = self._table()
-        try:
-            self._flick(table, 3, dx=40)
-            self._flick(table, 3, dx=40)
-            assert self._rows(table) == []
-        finally:
-            table.deleteLater()
-
-    def test_below_the_activation_threshold_it_is_a_tap(self, app):
-        table = self._table()
-        try:
-            # Under Microsoft's 10 px the gesture must stay a tap, or the
-            # list could not be tapped at all without wobble selecting rows.
-            self._flick(table, 3, dx=6)
-            assert self._rows(table) == [3]  # tap selects, it does not toggle
-            self._flick(table, 3, dx=6)
-            assert self._rows(table) == [3]  # ...and taps do not deselect
-        finally:
-            table.deleteLater()
-
-    def test_a_vertical_drag_selects_nothing(self, app):
-        table = self._table()
-        try:
-            # Outside the 90 degree cone: this is a scroll.
-            self._flick(table, 3, dx=0, dy=120)
-            assert self._rows(table) == []
-        finally:
-            table.deleteLater()
-
-    def test_a_diagonal_drag_that_is_mostly_vertical_selects_nothing(self, app):
-        table = self._table()
-        try:
-            self._flick(table, 3, dx=30, dy=90)
-            assert self._rows(table) == []
-        finally:
-            table.deleteLater()
-
-    def test_a_long_sideways_drag_is_horizontal_panning(self, app):
-        table = self._table()
-        try:
-            # Microsoft assumes a list that pans one way only; this table
-            # also pans sideways, so distance separates the two.
-            self._flick(table, 3, dx=300)
-            assert self._rows(table) == []
-        finally:
-            table.deleteLater()
-
-    def test_a_mouse_drag_is_not_a_cross_slide(self, app):
-        table = self._table()
-        try:
-            start = self._row_pos(table, 3)
-            QApplication.sendEvent(
-                table.viewport(), _press(table.viewport(), start, finger=False)
+            model = table.model()
+            table.selectionModel().select(
+                model.index(20, 0),
+                QItemSelectionModel.Select | QItemSelectionModel.Rows,
             )
-            assert table._apply_cross_slide(
-                _release(table.viewport(), QPoint(start.x() + 40, start.y()))
-            ) is False
+            self._press(table, 2)
+            self._rest(table)
+            self._drag_to(table, 4)
+            self._lift(table, 4)
+            rows = self._rows(table)
+            # Every row already chosen was a deliberate tap; a desktop
+            # marquee replaces, but replacing here loses work that can only
+            # be redone one tap at a time.
+            assert 20 in rows and {2, 3, 4}.issubset(set(rows))
+        finally:
+            table.deleteLater()
+
+    def test_a_marquee_in_progress_suppresses_the_context_menu(self, app):
+        table = self._table()
+        try:
+            self._press(table, 2)
+            self._rest(table)
+            self._drag_to(table, 5)
+            # The hold interval elapses mid-drag; the menu must not open on
+            # top of a selection the user is still drawing.
+            assert table.touch_hold(self._row_pos(table, 5)) is True
+        finally:
+            table.deleteLater()
+
+    def test_a_hold_that_never_moved_still_gets_the_menu(self, app):
+        table = self._table()
+        try:
+            self._press(table, 2)
+            self._rest(table)
+            # Rested but never dragged: this is a right-click, and the view
+            # declines the hold so ui.touch opens the menu.
+            assert table.touch_hold(self._row_pos(table, 2)) is False
+        finally:
+            table.deleteLater()
+
+    def test_a_mouse_press_starts_no_arm_clock(self, app):
+        table = self._table()
+        try:
+            QApplication.sendEvent(
+                table.viewport(),
+                _press(table.viewport(), self._row_pos(table, 3), finger=False),
+            )
+            # A mouse marquees from the press itself; it has no ambiguity to
+            # resolve and must not wait 250 ms for anything.
+            assert not table._touch_arm_timer.isActive()
         finally:
             table.deleteLater()
 

@@ -66,6 +66,9 @@ __all__ = [
     "TOUCH_SPLITTER_HANDLE_PX",
     "has_touch_screen",
     "is_touch_pointer",
+    "suspend_touch_scroll",
+    "resume_touch_scroll",
+    "is_touch_scroll_suspended",
     "set_touch_density",
     "is_touch_density",
     "touch_size",
@@ -319,6 +322,57 @@ def is_touch_pointer(event) -> bool:
     return _HoldGestureWatcher._is_touch(event)
 
 
+#: Tracks whether this module has ungrabbed a target's scroll gesture.
+#:
+#: ``QScroller.hasScroller()`` cannot answer this: it reports whether a
+#: QScroller *object* exists, and that object outlives ``ungrabGesture`` — so
+#: using it as the guard made resume a no-op and left the surface permanently
+#: unscrollable, which is worse than the bug suspension exists to fix.
+_SUSPENDED_PROPERTY = "_bananaflow_scroll_suspended"
+
+
+def suspend_touch_scroll(widget: Optional[QWidget]) -> None:
+    """Hand the touch stream back to ``widget`` for the current gesture.
+
+    For the case where a deliberate gesture means the user wants to drag
+    *within* the widget rather than scroll it.  Always pair with
+    :func:`resume_touch_scroll` on release — including on the paths where the
+    gesture is abandoned.
+    """
+    if widget is None:
+        return
+    target = _scroll_target(widget)
+    if target is None or bool(target.property(_SUSPENDED_PROPERTY)):
+        return
+    scroller = QScroller.scroller(target)
+    if scroller is not None:
+        scroller.stop()
+    QScroller.ungrabGesture(target)
+    target.setProperty(_SUSPENDED_PROPERTY, True)
+
+
+def resume_touch_scroll(widget: Optional[QWidget]) -> None:
+    """Give the touch stream back to the scroller after a suspension."""
+    if widget is None:
+        return
+    target = _scroll_target(widget)
+    if target is None or not bool(target.property(_SUSPENDED_PROPERTY)):
+        return
+    QScroller.grabGesture(target, QScroller.ScrollerGestureType.TouchGesture)
+    scroller = QScroller.scroller(target)
+    if scroller is not None:
+        scroller.setScrollerProperties(_touch_scroller_properties())
+    target.setProperty(_SUSPENDED_PROPERTY, False)
+
+
+def is_touch_scroll_suspended(widget: Optional[QWidget]) -> bool:
+    """Whether :func:`suspend_touch_scroll` currently holds ``widget``'s gesture."""
+    if widget is None:
+        return False
+    target = _scroll_target(widget)
+    return target is not None and bool(target.property(_SUSPENDED_PROPERTY))
+
+
 def enable_touch_scroll(widget: Optional[QWidget]) -> Optional[QWidget]:
     """Make ``widget`` scroll under a finger.  Returns ``widget`` for chaining.
 
@@ -545,12 +599,44 @@ class _HoldGestureWatcher(QObject):
                 return parent
         return None
 
+    @staticmethod
+    def _hook_owner(target: QWidget) -> QWidget:
+        """The widget that may define ``touch_hold`` for ``target``.
+
+        The filter sits on a scroll area's viewport, but the behaviour is
+        implemented on the view, so a viewport defers to its scroll area.
+        Resolved on its own rather than through the context-menu policy: tying
+        the two together meant a widget without a declared menu silently never
+        got asked.
+        """
+        if hasattr(target, "touch_hold"):
+            return target
+        parent = target.parentWidget()
+        if (
+            isinstance(parent, QAbstractScrollArea)
+            and parent.viewport() is target
+            and hasattr(parent, "touch_hold")
+        ):
+            return parent
+        return target
+
     def _fire(self) -> None:
         target, pos = self._target, self._press_pos
         self._target = None
         self._press_pos = None
         if pos is None or not self._alive(target):
             return
+
+        # A widget may claim the hold for itself. The Tag Editor's table does
+        # while a marquee it already started is in progress, so the menu
+        # cannot open on top of a selection the user is still drawing.
+        hook = getattr(self._hook_owner(target), "touch_hold", None)
+        if callable(hook):
+            try:
+                if hook(pos):
+                    return
+            except Exception:  # pragma: no cover - a hook must never break input
+                logger.warning("[touch] touch_hold hook raised; ignoring", exc_info=True)
 
         if self._menu_owner(target) is not None:
             self._open_context_menu(target, pos)
