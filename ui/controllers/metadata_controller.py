@@ -2008,10 +2008,24 @@ class MetadataController(QObject):
 
     def forget_recovery(self, summary: dict) -> None:
         """'Forget recovery': permanently delete the journal (explicit, confirmed
-        destructive action). The panel must confirm before calling this."""
-        if summary.get("discard_allowed") is False:
+        destructive action). The panel must confirm before calling this.
+
+        ``discard_allowed`` is only a recommendation from
+        ``inspect_recovery_journal`` (safe to discard, nothing to lose). When
+        it is False the panel still allows Forget, but only after showing an
+        extra warning and marking the request ``user_forced_discard`` — the
+        user is the one who decided the record is fine to lose, not the
+        heuristic. Without this override a file stuck in an unverified state
+        left the user with no way out of the prompt short of editing files
+        under the app-data directory by hand.
+        """
+        if summary.get("discard_allowed") is False and not summary.get("user_forced_discard"):
             self.status_update.emit(t("md_recovery_unresolved_cannot_discard"))
             return
+        if summary.get("user_forced_discard"):
+            logger.warning(
+                "[MetadataController] Forgetting unverified recovery journal on explicit "
+                "user override: %s", summary.get("journal_path"))
         self._retire_journal(summary.get("journal_path"))
         self.status_update.emit(t("md_recovery_forgotten"))
 

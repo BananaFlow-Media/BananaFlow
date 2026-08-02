@@ -4536,7 +4536,10 @@ class MetadataEditorPanel(
                                    QMessageBox.ButtonRole.DestructiveRole)
         restore_btn.setEnabled(not summary.get("malformed", False)
                                and summary.get("backup_status") == "verified")
-        forget_btn.setEnabled(bool(summary.get("discard_allowed", False)))
+        # Forget stays clickable even when the state is unverified (defect: a
+        # file stuck in "conflict" left restore AND forget both disabled, so
+        # only "Not now" ever worked and the prompt returned on every launch
+        # forever). The safety net moves into the confirmation text instead.
         box.setDefaultButton(keep_btn)
         box.exec()
         clicked = box.clickedButton()
@@ -4544,12 +4547,22 @@ class MetadataEditorPanel(
         if clicked is restore_btn:
             self.recover_requested.emit(summary)
         elif clicked is forget_btn:
+            discard_allowed = bool(summary.get("discard_allowed", False))
+            forget_msg = t("md_recovery_forget_msg")
+            if not discard_allowed:
+                forget_msg = "\n\n".join([
+                    forget_msg,
+                    t("md_recovery_forget_unresolved_warning", n=incomplete),
+                ])
             # Destructive: require an explicit second confirmation.
             if prompts.confirm(
-                self, t("md_recovery_forget_title"), t("md_recovery_forget_msg"),
+                self, t("md_recovery_forget_title"), forget_msg,
                 accept_text=t("md_recovery_forget_btn"), danger=True,
             ):
-                self.forget_recovery_requested.emit(summary)
+                forced = dict(summary)
+                if not discard_allowed:
+                    forced["user_forced_discard"] = True
+                self.forget_recovery_requested.emit(forced)
             else:
                 self.keep_recovery_requested.emit(summary)
         else:
@@ -5464,13 +5477,13 @@ class MetadataEditorPanel(
             f"  selection-background-color: transparent; selection-color: {table_colors.text_primary};"
             f"  font-size: {font_size}pt; }}"
             "QTableView::item { background: transparent; border: none; }"
-            f"QHeaderView::section {{ background: {table_colors.surface3};"
+            f"QHeaderView::section {{ background: {table_colors.surface};"
             f"  color: {table_colors.text_secondary};"
             f"  border: none;"
             f"  padding: 0 8px; height: 36px;"
             f"  font-size: {font_size}pt; font-weight: 800; }}"
             f"QHeaderView::section:hover {{ color: {table_colors.text_primary}; }}"
-            f"QTableCornerButton::section {{ background: {table_colors.surface3};"
+            f"QTableCornerButton::section {{ background: {table_colors.surface};"
             f"  border: none; }}"
         )
 

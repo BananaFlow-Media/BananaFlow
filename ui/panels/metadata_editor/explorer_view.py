@@ -431,7 +431,7 @@ class MetadataHeaderView(QHeaderView):
             colors = tag_editor_colors()
             painter.save()
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(colors.bg))
+            painter.setBrush(QColor(colors.surface))
             painter.drawRect(rect)
             line = QColor(colors.border)
             line.setAlpha(185)
@@ -1040,10 +1040,10 @@ class ExplorerDetailsView(QTableView):
             return
 
         if is_selected:
-            fill_key   = "selected"       if self.hasFocus() else "selected_inactive"
+            fill_key = "selected" if self.hasFocus() else "selected_inactive"
             border_key = "selected_border" if self.hasFocus() else "selected_inactive_border"
         else:
-            fill_key   = "hover"
+            fill_key = "hover"
             border_key = "hover_border"
 
         capsule = self._content_row_rect(row_rect, row).adjusted(
@@ -1066,13 +1066,6 @@ class ExplorerDetailsView(QTableView):
             painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(colors[fill_key]))
         painter.drawRect(capsule)
-        if is_selected:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(_accent_color())
-            if QApplication.layoutDirection() == Qt.RightToLeft:
-                painter.drawRect(capsule.right() - 3, capsule.top(), 4, capsule.height())
-            else:
-                painter.drawRect(capsule.left(), capsule.top(), 4, capsule.height())
         painter.restore()
 
     def _paint_explorer_row_separator(self, painter: QPainter, row_rect: QRect) -> None:
