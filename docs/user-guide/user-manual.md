@@ -507,19 +507,26 @@ BananaFlow is usable with a finger, without a mouse or a stylus.
 | Drag | Scrolls any list, table or panel, with flick-to-coast |
 | Tap | Activates a button, row or tab |
 | Press and hold | Opens the same menu a right-click opens; on a control that only has a tooltip, shows the tooltip instead of activating the control |
-| Press and hold on empty space in the Tag Editor's file table, then drag | Draws a selection box across rows |
+| Flick a row sideways in the Tag Editor's file table | Selects that row (flick it again to deselect) |
+| Tap a row's checkbox in the Tag Editor | Adds that one row to the selection |
 | Pinch (two fingers) on the Tag Editor's file table | Zooms the list between 50% and 200% |
 
 Notes:
 
 - **Press and hold never activates what you were holding.** Holding a button
   to find out what it does shows its tooltip and stops there. Tap to activate.
-- **Dragging always scrolls.** In the Tag Editor's file table, dragging scrolls
-  the list; to select a range of rows, press and hold on empty space beside
-  the rows first, then drag. In the Tag Editor's folder tree, dragging a
-  file onto a folder to move it is a mouse gesture; with a finger, press and
-  hold the item and choose **Move…**. In the download queue, press and hold a
-  card and choose **Move Up** / **Move Down** to reorder it.
+- **Dragging always scrolls**, unless a press-and-hold came first. In the Tag
+  Editor's folder tree, dragging a file onto a folder to move it is a mouse
+  gesture; with a finger, press and hold the item and choose **Move…**. In the
+  download queue, press and hold a card and choose **Move Up** / **Move Down**
+  to reorder it.
+- **Selecting several files** uses the same gesture Windows does, called a
+  *cross-slide*: **flick a row sideways** — left or right, a short distance —
+  and it is selected. Flick each row you want; flick a selected row again to
+  deselect it. The whole width of the row is the target, so there is nothing
+  to aim for, and it does not collide with tapping a row or dragging the list
+  to scroll it. You can also tap the checkboxes one at a time, or use the
+  checkbox in the column header to select everything.
 - **Zooming the file list** works by pinching on a touch screen, by pinching
   on a precision touchpad, and with **Ctrl + mouse wheel**. It is the same
   zoom the **–** / **+** buttons above the list apply, and the level is

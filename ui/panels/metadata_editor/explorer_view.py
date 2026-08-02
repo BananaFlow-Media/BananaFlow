@@ -20,6 +20,7 @@ from PySide6.QtCore import (
     QItemSelection,
     QItemSelectionModel,
     QModelIndex,
+    QPersistentModelIndex,
     QPoint,
     QRect,
     Qt,
@@ -46,11 +47,7 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
-from ui.touch import (
-    is_touch_pointer,
-    resume_touch_scroll,
-    suspend_touch_scroll,
-)
+from ui.touch import is_touch_pointer
 from ui.models.metadata_table_model import (
     COL_CHECK,
     COL_END_GUTTER,
@@ -562,9 +559,11 @@ class ExplorerDetailsView(QTableView):
         self._rubber_base_selection = QItemSelection()
         self._pending_cb_row = -1   # row whose checkbox toggle is deferred to mouse-release
         self._hovered_row = -1
-        #: Set while a press-and-hold has handed this view the touch stream so
-        #: the drag that follows draws a marquee instead of scrolling.
-        self._touch_marquee_armed = False
+        #: Where a finger landed, and what it would select — both held until
+        #: the release says whether the gesture was a tap or a scroll.
+        self._touch_press_pos: QPoint | None = None
+        self._touch_tap_index = None
+        self._touch_tap_pending = False
         # Rubber-band geometry tracked as a plain QRect; drawn directly in
         # paintEvent so SourceOver alpha works without WA_TranslucentBackground.
         self._rubber_rect = QRect()
@@ -651,50 +650,117 @@ class ExplorerDetailsView(QTableView):
             painter.drawRect(self._rubber_rect.adjusted(0, 0, -1, -1))
             painter.end()
 
-    def touch_hold(self, pos: QPoint) -> bool:
-        """Start a marquee selection when a finger rests on empty space.
+    #: How far a finger may travel and still count as a tap rather than the
+    #: start of a scroll.  Larger than the mouse drag distance (4 px) because
+    #: no finger presses and lifts on the exact same pixel.
+    _TAP_SLOP_PX = 16
 
-        Called by :mod:`ui.touch` when a press-and-hold matures.  Returning
-        ``True`` consumes the gesture; ``False`` lets it become the context
-        menu, which is what a hold on an actual row should do.
+    def _finger_travelled(self, event) -> bool:
+        """Whether this gesture moved far enough to have been a scroll."""
+        if self._touch_press_pos is None:
+            return False
+        moved = self._event_pos(event) - self._touch_press_pos
+        return moved.manhattanLength() > self._TAP_SLOP_PX
 
-        Empty space is the right trigger: it is where a marquee would begin
-        with a mouse anyway, and the row menu needs a row to act on, so
-        nothing is taken away from either.
+    # ── Cross-slide ───────────────────────────────────────────────────────────
+    # Windows' own answer to "select several items with a finger", and the
+    # reason three earlier attempts here failed: they all invented a gesture
+    # of their own and hung it on a small target (a 24 px column, a 17 px
+    # gutter), so missing by a millimetre did something else entirely.
+    #
+    # Microsoft's guidance for a list that pans in one direction:
+    #
+    #   "A vertically panning one-dimensional list. Drag horizontally to
+    #    select or move an item."
+    #   "a small threshold of 2.7mm (approximately 10 pixels at target
+    #    resolution) must be crossed before either a select or drag
+    #    interaction is activated."
+    #   "cross-slide selection is constrained to a 90° threshold area ...
+    #    If the object is dragged outside of this area, it is not selected."
+    #
+    # So: a short sideways flick anywhere along a row selects that row. The
+    # whole row is the target, there is no mode to enter, and it does not
+    # collide with tap (activate) or with a vertical drag (scroll).
+
+    #: Microsoft's 2.7 mm / ~10 px activation threshold.
+    _CROSS_SLIDE_MIN_PX = 10
+
+    #: Beyond this the gesture was horizontal panning, not a flick at a row.
+    #: Microsoft assumes a list that pans in only one direction; this table
+    #: also pans sideways, so the two are separated by distance.
+    _CROSS_SLIDE_MAX_PX = 140
+
+    def _apply_cross_slide(self, event) -> bool:
+        """Select the row a short sideways flick landed on.
+
+        Returns True when the gesture was a cross-slide and a row was
+        selected.  Adds to the selection rather than replacing it, so several
+        rows are picked by flicking each in turn.
         """
-        if not self._is_empty_viewport_area(pos):
+        if self._touch_press_pos is None:
             return False
 
-        # The scroller owns the touch stream by default. Take it for the rest
-        # of this gesture, or the drag would scroll and draw a marquee at once.
-        suspend_touch_scroll(self)
-        self._touch_marquee_armed = True
+        delta = self._event_pos(event) - self._touch_press_pos
+        dx, dy = abs(delta.x()), abs(delta.y())
 
-        self._rubber_origin = pos
-        self._rubber_active = True
-        self._rubber_dragging = False
-        self._rubber_modifiers = Qt.NoModifier
-        self._rubber_rect = QRect()
+        # The 90° cone: mostly sideways, or it was a scroll.
+        if dx < self._CROSS_SLIDE_MIN_PX or dx > self._CROSS_SLIDE_MAX_PX or dy >= dx:
+            return False
+
+        index = self.indexAt(self._touch_press_pos)
+        model = self.model()
         selection_model = self.selectionModel()
-        self._rubber_base_selection = (
-            selection_model.selection() if selection_model is not None else QItemSelection()
+        if not index.isValid() or model is None or selection_model is None:
+            return False
+
+        selection = QItemSelection(
+            model.index(index.row(), 0),
+            model.index(index.row(), model.columnCount() - 1),
         )
-        self.clearSelection()
-        self.setCurrentIndex(QModelIndex())
-        self._empty_area_pressed = True
+        selection_model.select(
+            selection, QItemSelectionModel.Toggle | QItemSelectionModel.Rows
+        )
+        # NoUpdate: the view's own setCurrentIndex re-selects with
+        # ClearAndSelect and would wipe every row flicked before this one.
+        selection_model.setCurrentIndex(
+            model.index(index.row(), COL_CHECK), QItemSelectionModel.NoUpdate
+        )
+        self.viewport().update()
         return True
 
-    def _release_touch_marquee(self) -> None:
-        """Give the touch stream back. Must run on every path out of a hold."""
-        if not self._touch_marquee_armed:
+    def _apply_touch_tap(self) -> None:
+        """Select what a tap landed on, now that it is known to be a tap."""
+        selection_model = self.selectionModel()
+        if selection_model is None:
             return
-        self._touch_marquee_armed = False
-        resume_touch_scroll(self)
+        index = self._touch_tap_index
+        self._touch_tap_index = None
+
+        if index is None or not index.isValid():
+            # Tapped empty space: Explorer clears the selection there.
+            self.clearSelection()
+            self.setCurrentIndex(QModelIndex())
+            self.viewport().update()
+            return
+
+        model = self.model()
+        target = model.index(index.row(), index.column())
+        self.setCurrentIndex(target)
+        selection_model.select(
+            target,
+            QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
+        )
+        self.viewport().update()
 
     def mousePressEvent(self, event) -> None:
         pos = self._event_pos(event)
 
         if event.button() == Qt.LeftButton:
+            # Where a finger landed, so the release can tell a tap from the
+            # start of a scroll. Cleared for a mouse, which has no such
+            # ambiguity.
+            self._touch_press_pos = pos if is_touch_pointer(event) else None
+
             # ── Checkbox hit-test in its dedicated fixed column ──────────────
             # Toggle is DEFERRED to mouseReleaseEvent so that dragging from the
             # checkbox zone can still start a rubber-band selection.
@@ -711,6 +777,22 @@ class ExplorerDetailsView(QTableView):
                     selection_model.selection()
                     if selection_model is not None else QItemSelection()
                 )
+                self._empty_area_pressed = False
+                event.accept()
+                return
+
+            # ── A finger's press must not select anything yet ────────────────
+            # The press that begins a scroll lands on a row like any other,
+            # and selecting there marked whichever row the gesture started
+            # from and left it marked for the whole scroll. Nothing is
+            # decided until the release proves the finger stayed put.
+            if is_touch_pointer(event):
+                self._touch_tap_index = (
+                    QPersistentModelIndex(idx)
+                    if idx.isValid() and not self._is_empty_viewport_area(pos)
+                    else None
+                )
+                self._touch_tap_pending = True
                 self._empty_area_pressed = False
                 event.accept()
                 return
@@ -751,13 +833,12 @@ class ExplorerDetailsView(QTableView):
         # paths below would steal it: ours draws a marquee, and Qt's own
         # drag-selection in super() does the same thing by another route.
         # That is the bug this guards — dragging the table selected rows and
-        # left no way to scroll it at all. Only a deliberate press-and-hold
-        # (touch_hold) hands the drag to this view.
+        # left no way to scroll it at all.
         #
         # Deliberately here rather than at the press: the press still has to
         # run normally so that a plain tap selects a row and a tap on the
         # checkbox column still toggles it.
-        if is_touch_pointer(event) and not self._touch_marquee_armed:
+        if is_touch_pointer(event):
             return
 
         if self._rubber_active and event.buttons() & Qt.LeftButton:
@@ -769,10 +850,41 @@ class ExplorerDetailsView(QTableView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        # Unconditional, and first: whatever this release turns out to mean,
-        # a suspended scroller that is never resumed leaves the table
-        # permanently unscrollable.
-        self._release_touch_marquee()
+        # Cross-slide is tested first, and before the tap threshold: its own
+        # activation distance is 10 px, shorter than the 16 px a tap is
+        # allowed to wander, so checking taps first would swallow the
+        # shortest legitimate flicks.
+        if event.button() == Qt.LeftButton and self._apply_cross_slide(event):
+            self._touch_tap_pending = False
+            self._touch_tap_index = None
+            self._pending_cb_row = -1
+            self._cancel_rubber_band()
+            self._empty_area_pressed = False
+            self._touch_press_pos = None
+            event.accept()
+            return
+
+        if event.button() == Qt.LeftButton and self._finger_travelled(event):
+            # A scroll chooses nothing it passed over, which also drops the
+            # deferred checkbox toggle — otherwise scrolling from the
+            # checkbox strip would tick a box.
+            self._touch_tap_pending = False
+            self._touch_tap_index = None
+            self._pending_cb_row = -1
+            self._cancel_rubber_band()
+            self._empty_area_pressed = False
+            self._touch_press_pos = None
+            event.accept()
+            return
+
+        if self._touch_tap_pending:
+            self._touch_tap_pending = False
+            self._touch_press_pos = None
+            self._apply_touch_tap()
+            event.accept()
+            return
+
+        self._touch_press_pos = None
         if event.button() == Qt.LeftButton and self._rubber_active:
             was_dragging = self._rubber_dragging
             pending_row = self._pending_cb_row
@@ -987,9 +1099,6 @@ class ExplorerDetailsView(QTableView):
         return range(first, last + 1)
 
     def _cancel_rubber_band(self) -> None:
-        # Every abandonment path routes through here, so it is also where a
-        # suspended scroller is guaranteed to be handed back.
-        self._release_touch_marquee()
         self._rubber_active = False
         self._rubber_dragging = False
         self._pending_cb_row = -1

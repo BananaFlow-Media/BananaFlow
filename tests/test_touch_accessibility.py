@@ -25,7 +25,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, Qt
     from PySide6.QtGui import QContextMenuEvent, QInputDevice, QMouseEvent, QPointingDevice
     from PySide6.QtWidgets import (
         QAbstractItemView,
@@ -551,6 +551,9 @@ class TestTableDragScrolls:
         from ui.panels.metadata_editor.explorer_view import ExplorerDetailsView
 
         table = ExplorerDetailsView()
+        model = _Grid()
+        table.setModel(model)
+        table._grid_model = model
         table.resize(400, 300)
         touch.enable_touch_scroll(table)
         touch.enable_hold_gesture(table)
@@ -604,93 +607,6 @@ class TestTableDragScrolls:
             assert table._rubber_dragging is True
         finally:
             table.deleteLater()
-
-    def test_hold_on_empty_space_starts_a_marquee(self, app):
-        table = self._table()
-        try:
-            table._is_empty_viewport_area = lambda pos: True
-            assert table.touch_hold(QPoint(50, 50)) is True
-            assert table._rubber_active is True
-            assert table._touch_marquee_armed is True
-            # The scroller must let go, or the drag would scroll and draw at once.
-            assert touch.is_touch_scroll_suspended(table)
-        finally:
-            table.deleteLater()
-
-    def test_hold_on_a_row_falls_through_to_the_menu(self, app):
-        table = self._table()
-        try:
-            table._is_empty_viewport_area = lambda pos: False
-            assert table.touch_hold(QPoint(50, 50)) is False
-            assert table._touch_marquee_armed is False
-            # Still scrollable: nothing was claimed.
-            assert not touch.is_touch_scroll_suspended(table)
-        finally:
-            table.deleteLater()
-
-    def test_release_hands_the_scroller_back(self, app):
-        table = self._table()
-        try:
-            table._is_empty_viewport_area = lambda pos: True
-            table.touch_hold(QPoint(50, 50))
-            QApplication.sendEvent(table.viewport(), _release(table.viewport(), QPoint(50, 90)))
-            # A scroller suspended and never resumed leaves the table
-            # permanently unscrollable — worse than the bug being fixed.
-            assert not touch.is_touch_scroll_suspended(table)
-            assert table._touch_marquee_armed is False
-        finally:
-            table.deleteLater()
-
-    def test_cancelling_also_hands_the_scroller_back(self, app):
-        table = self._table()
-        try:
-            table._is_empty_viewport_area = lambda pos: True
-            table.touch_hold(QPoint(50, 50))
-            table._cancel_rubber_band()
-            assert not touch.is_touch_scroll_suspended(table)
-        finally:
-            table.deleteLater()
-
-    def test_an_armed_marquee_lets_the_drag_through(self, app):
-        table = self._table()
-        try:
-            table._is_empty_viewport_area = lambda pos: True
-            table.touch_hold(QPoint(50, 50))
-            # Once the hold has claimed the gesture, the finger's own drag
-            # must be allowed to drive the marquee.
-            QApplication.sendEvent(table.viewport(), _move(table.viewport(), QPoint(50, 200)))
-            assert table._rubber_dragging is True
-        finally:
-            table.deleteLater()
-
-
-class TestHoldHook:
-    def test_a_widget_hook_pre_empts_the_context_menu(self, app):
-        tree, received = _tree_with_menu()
-        calls: list = []
-        tree.touch_hold = lambda pos: (calls.append(pos), True)[1]
-        _hold(tree, tree.viewport(), QPoint(30, 30))
-        assert calls and received == [], "the hook claimed it; no menu should open"
-
-    def test_a_declining_hook_still_gets_the_menu(self, app):
-        tree, received = _tree_with_menu()
-        tree.touch_hold = lambda pos: False
-        _hold(tree, tree.viewport(), QPoint(30, 30))
-        assert received == [QPoint(30, 30)]
-
-    def test_a_raising_hook_does_not_break_input(self, app):
-        tree, received = _tree_with_menu()
-
-        def boom(pos):
-            raise RuntimeError("hook is broken")
-
-        tree.touch_hold = boom
-        _hold(tree, tree.viewport(), QPoint(30, 30))
-        # A broken hook must degrade to the default, not kill the gesture.
-        assert received == [QPoint(30, 30)]
-
-
-# ── pinch to zoom ─────────────────────────────────────────────────────────────
 
 def _ctrl_wheel(widget, notches: int):
     from PySide6.QtGui import QWheelEvent
@@ -825,3 +741,317 @@ class TestTagEditorPinchZoom:
             assert panel._zoom_persist_timer.isActive()
         finally:
             panel.deleteLater()
+
+
+# ── a scroll must not also be a tap, and must not drift or invert ─────────────
+
+class _Grid(__import__("PySide6.QtCore", fromlist=["QAbstractTableModel"]).QAbstractTableModel):
+    """Enough rows and columns for both scrollbars to have a range."""
+
+    def rowCount(self, parent=None):
+        return 60
+
+    def columnCount(self, parent=None):
+        return 30
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole:
+            return f"r{index.row()}c{index.column()}"
+        return None
+
+
+class TestScrollIsNotATap:
+    """A drag down the file table also marked the row it started from."""
+
+    def _table(self):
+        from ui.panels.metadata_editor.explorer_view import ExplorerDetailsView
+
+        table = ExplorerDetailsView()
+        model = _Grid()
+        table.setModel(model)
+        table._grid_model = model  # keep it alive for the view's lifetime
+        table.resize(400, 300)
+        table.show()
+        touch.enable_touch_scroll(table)
+        return table
+
+    def test_a_finger_press_selects_nothing_yet(self, app):
+        table = self._table()
+        try:
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), QPoint(120, 60)))
+            # Selecting here marked whichever row the scroll started from.
+            assert not table.selectionModel().selectedRows()
+        finally:
+            table.deleteLater()
+
+    def test_a_tap_still_selects_on_release(self, app):
+        table = self._table()
+        try:
+            spot = QPoint(120, 60)
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), spot))
+            QApplication.sendEvent(table.viewport(), _release(table.viewport(), spot))
+            rows = table.selectionModel().selectedRows()
+            assert len(rows) == 1
+            assert rows[0].row() == table.indexAt(spot).row()
+        finally:
+            table.deleteLater()
+
+    def test_a_scroll_selects_nothing_at_all(self, app):
+        table = self._table()
+        try:
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), QPoint(120, 60)))
+            QApplication.sendEvent(table.viewport(), _release(table.viewport(), QPoint(120, 230)))
+            # The finger travelled: this was a scroll, and a scroll chooses
+            # nothing it passed over.
+            assert not table.selectionModel().selectedRows()
+        finally:
+            table.deleteLater()
+
+    def test_a_scroll_from_the_checkbox_column_ticks_no_box(self, app):
+        table = self._table()
+        try:
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), QPoint(6, 60)))
+            QApplication.sendEvent(table.viewport(), _release(table.viewport(), QPoint(6, 230)))
+            # Same trap one column over: the deferred checkbox toggle has to
+            # be dropped by the same travel test.
+            assert table._pending_cb_row == -1
+            assert not table.selectionModel().selectedRows()
+        finally:
+            table.deleteLater()
+
+    def test_a_small_wobble_still_counts_as_a_tap(self, app):
+        table = self._table()
+        try:
+            QApplication.sendEvent(table.viewport(), _press(table.viewport(), QPoint(120, 60)))
+            QApplication.sendEvent(table.viewport(), _release(table.viewport(), QPoint(124, 63)))
+            # No finger lifts on the pixel it landed on.
+            assert len(table.selectionModel().selectedRows()) == 1
+        finally:
+            table.deleteLater()
+
+
+class TestRtlScrollDirection:
+    """Under RTL a finger dragged left scrolled the content right."""
+
+    def _table(self, direction):
+        from PySide6.QtWidgets import QTableView
+
+        table = QTableView()
+        table.setLayoutDirection(direction)
+        model = _Grid()
+        table.setModel(model)
+        table._grid_model = model
+        table.resize(400, 300)
+        table.show()
+        touch.enable_touch_scroll(table)
+        return table
+
+    def _drag_left_by(self, table, amount):
+        """Return column 0's x before and after QScroller advances the content."""
+        from PySide6.QtGui import QScrollEvent, QScrollPrepareEvent
+
+        bar = table.horizontalScrollBar()
+        bar.setValue(bar.maximum() // 2)
+        before = table.columnViewportPosition(0)
+
+        prepare = QScrollPrepareEvent(QPointF(0, 0))
+        QApplication.sendEvent(table.viewport(), prepare)
+        content = prepare.contentPos()
+        QApplication.sendEvent(
+            table.viewport(),
+            QScrollEvent(
+                QPointF(content.x() + amount, content.y()),
+                QPointF(0, 0),
+                QScrollEvent.ScrollState.ScrollUpdated,
+            ),
+        )
+        return before, table.columnViewportPosition(0)
+
+    def test_ltr_content_follows_the_finger(self, app):
+        table = self._table(Qt.LayoutDirection.LeftToRight)
+        try:
+            before, after = self._drag_left_by(table, 5)
+            assert after < before
+        finally:
+            table.deleteLater()
+
+    def test_rtl_content_follows_the_finger(self, app):
+        table = self._table(Qt.LayoutDirection.RightToLeft)
+        try:
+            before, after = self._drag_left_by(table, 5)
+            # This is the regression: RTL used to move the content right.
+            assert after < before
+        finally:
+            table.deleteLater()
+
+    def test_rtl_vertical_is_left_alone(self, app):
+        from PySide6.QtGui import QScrollEvent, QScrollPrepareEvent
+
+        table = self._table(Qt.LayoutDirection.RightToLeft)
+        try:
+            vbar = table.verticalScrollBar()
+            vbar.setValue(0)
+            prepare = QScrollPrepareEvent(QPointF(0, 0))
+            QApplication.sendEvent(table.viewport(), prepare)
+            content = prepare.contentPos()
+            QApplication.sendEvent(
+                table.viewport(),
+                QScrollEvent(
+                    QPointF(content.x(), content.y() + 7),
+                    QPointF(0, 0),
+                    QScrollEvent.ScrollState.ScrollUpdated,
+                ),
+            )
+            # Only x is mirrored; y must pass through untouched.
+            assert vbar.value() == 7
+        finally:
+            table.deleteLater()
+
+
+class TestAxisLock:
+    def test_the_scroller_locks_to_one_axis(self, app):
+        from PySide6.QtWidgets import QScroller, QScrollerProperties
+
+        area = QScrollArea()
+        touch.enable_touch_scroll(area)
+        props = QScroller.scroller(area.viewport()).scrollerProperties()
+        threshold = props.scrollMetric(
+            QScrollerProperties.ScrollMetric.AxisLockThreshold
+        )
+        # At 0 (Qt's default) a vertical flick carries every degree of
+        # sideways drift with it and the content slides about while scrolling.
+        assert threshold > 0.5
+
+
+# ── selecting several rows with a finger ──────────────────────────────────────
+
+class TestCrossSlideSelection:
+    """Windows' own gesture for picking several items with a finger.
+
+    Three earlier attempts here invented a gesture and hung it on a small
+    target — a 24 px checkbox column, a 17 px gutter — so missing by a
+    millimetre silently did something else. Microsoft's guidance for a list
+    that pans in one direction is a short sideways flick, with the whole row
+    as the target:
+
+        "A vertically panning one-dimensional list. Drag horizontally to
+         select or move an item."
+        "a small threshold of 2.7mm (approximately 10 pixels at target
+         resolution) must be crossed before either a select or drag
+         interaction is activated."
+        "cross-slide selection is constrained to a 90 degree threshold area"
+    """
+
+    def _table(self):
+        from ui.panels.metadata_editor.explorer_view import ExplorerDetailsView
+
+        table = ExplorerDetailsView()
+        model = _Grid()
+        table.setModel(model)
+        table._grid_model = model
+        table.resize(500, 400)
+        table.show()
+        touch.enable_touch_scroll(table)
+        return table
+
+    def _row_pos(self, table, row, x=200):
+        return QPoint(x, table.rowViewportPosition(row) + 4)
+
+    def _flick(self, table, row, dx, dy=0):
+        start = self._row_pos(table, row)
+        end = QPoint(start.x() + dx, start.y() + dy)
+        QApplication.sendEvent(table.viewport(), _press(table.viewport(), start))
+        QApplication.sendEvent(table.viewport(), _release(table.viewport(), end))
+
+    def _rows(self, table):
+        return sorted(i.row() for i in table.selectionModel().selectedRows())
+
+    def test_a_sideways_flick_selects_the_row(self, app):
+        table = self._table()
+        try:
+            self._flick(table, 3, dx=40)
+            assert self._rows(table) == [3]
+        finally:
+            table.deleteLater()
+
+    def test_flicking_several_rows_selects_all_of_them(self, app):
+        table = self._table()
+        try:
+            # The whole point: no mode to enter, no strip to find. Flick each
+            # row you want.
+            for row in (2, 5, 9):
+                self._flick(table, row, dx=40)
+            assert self._rows(table) == [2, 5, 9]
+        finally:
+            table.deleteLater()
+
+    def test_it_works_in_either_direction(self, app):
+        table = self._table()
+        try:
+            self._flick(table, 4, dx=-40)
+            assert self._rows(table) == [4]
+        finally:
+            table.deleteLater()
+
+    def test_flicking_a_selected_row_again_deselects_it(self, app):
+        table = self._table()
+        try:
+            self._flick(table, 3, dx=40)
+            self._flick(table, 3, dx=40)
+            assert self._rows(table) == []
+        finally:
+            table.deleteLater()
+
+    def test_below_the_activation_threshold_it_is_a_tap(self, app):
+        table = self._table()
+        try:
+            # Under Microsoft's 10 px the gesture must stay a tap, or the
+            # list could not be tapped at all without wobble selecting rows.
+            self._flick(table, 3, dx=6)
+            assert self._rows(table) == [3]  # tap selects, it does not toggle
+            self._flick(table, 3, dx=6)
+            assert self._rows(table) == [3]  # ...and taps do not deselect
+        finally:
+            table.deleteLater()
+
+    def test_a_vertical_drag_selects_nothing(self, app):
+        table = self._table()
+        try:
+            # Outside the 90 degree cone: this is a scroll.
+            self._flick(table, 3, dx=0, dy=120)
+            assert self._rows(table) == []
+        finally:
+            table.deleteLater()
+
+    def test_a_diagonal_drag_that_is_mostly_vertical_selects_nothing(self, app):
+        table = self._table()
+        try:
+            self._flick(table, 3, dx=30, dy=90)
+            assert self._rows(table) == []
+        finally:
+            table.deleteLater()
+
+    def test_a_long_sideways_drag_is_horizontal_panning(self, app):
+        table = self._table()
+        try:
+            # Microsoft assumes a list that pans one way only; this table
+            # also pans sideways, so distance separates the two.
+            self._flick(table, 3, dx=300)
+            assert self._rows(table) == []
+        finally:
+            table.deleteLater()
+
+    def test_a_mouse_drag_is_not_a_cross_slide(self, app):
+        table = self._table()
+        try:
+            start = self._row_pos(table, 3)
+            QApplication.sendEvent(
+                table.viewport(), _press(table.viewport(), start, finger=False)
+            )
+            assert table._apply_cross_slide(
+                _release(table.viewport(), QPoint(start.x() + 40, start.y()))
+            ) is False
+        finally:
+            table.deleteLater()
+
+

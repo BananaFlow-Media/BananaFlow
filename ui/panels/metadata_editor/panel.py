@@ -103,7 +103,12 @@ from core.metadata_models import (
 from ui import a11y
 from ui.components.empty_state_icon import EmptyStateIcon
 from ui.i18n import t
-from ui.touch import TOUCH_SPLITTER_HANDLE_PX, enable_pinch_zoom, is_touch_density
+from ui.touch import (
+    TOUCH_SPLITTER_HANDLE_PX,
+    enable_pinch_zoom,
+    is_touch_density,
+    touch_size,
+)
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_NEW,
     COL_ARTIST_NEW, COL_ALBUM_NEW,
@@ -5482,7 +5487,12 @@ class MetadataEditorPanel(
                 elif col == COL_END_GUTTER:
                     self._table.setColumnWidth(col, ExplorerDetailsView._END_EMPTY_GUTTER)
                 elif col == COL_CHECK:
-                    self._table.setColumnWidth(col, ExplorerDetailsView._CHECK_COLUMN_WIDTH)
+                    # The selection checkbox is how a finger picks several
+                    # rows, so under touch density it has to be a target a
+                    # finger can actually hit — 24 px is about 6 mm.
+                    self._table.setColumnWidth(
+                        col, touch_size(ExplorerDetailsView._CHECK_COLUMN_WIDTH)
+                    )
                 else:
                     self._table.setColumnWidth(col, max(10, int(base_w * factor)))
         finally:

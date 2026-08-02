@@ -45,7 +45,7 @@ import time
 from typing import Callable, Optional
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QSizeF, QTimer, Qt
 from PySide6.QtGui import QContextMenuEvent, QInputDevice
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -66,9 +66,6 @@ __all__ = [
     "TOUCH_SPLITTER_HANDLE_PX",
     "has_touch_screen",
     "is_touch_pointer",
-    "suspend_touch_scroll",
-    "resume_touch_scroll",
-    "is_touch_scroll_suspended",
     "set_touch_density",
     "is_touch_density",
     "touch_size",
@@ -206,6 +203,11 @@ def _touch_scroller_properties() -> QScrollerProperties:
     props.setScrollMetric(metric.DragStartDistance, 0.002)
     props.setScrollMetric(metric.DecelerationFactor, 0.35)
     props.setScrollMetric(metric.MaximumVelocity, 0.6)
+    # Lock to one axis once the drag commits to a direction. Without it a
+    # vertical flick down a wide table also carries the few degrees of
+    # sideways drift every real finger has, and the content slides left and
+    # right while it scrolls — reported from hardware as "not calm".
+    props.setScrollMetric(metric.AxisLockThreshold, 0.8)
     # Rubber-band at the ends, but do not let content be flung past the edge
     # and left there.
     props.setScrollMetric(metric.OvershootDragResistanceFactor, 0.4)
@@ -221,6 +223,91 @@ def _touch_scroller_properties() -> QScrollerProperties:
     return props
 
 
+class _MirroredScrollFilter(QObject):
+    """Corrects the horizontal axis of a kinetic scroll under RTL layout.
+
+    ``QScroller`` talks to a scroll area in "content position" coordinates and
+    assumes the left-to-right convention: a larger x means the content has
+    advanced further left.  ``QAbstractScrollArea`` maps that position
+    straight onto the horizontal scrollbar's value — and under RTL that
+    mapping is mirrored.  Measured on a 30-column table:
+
+        LTR   value 0 -> 27 moves column 0 from x=0    to x=-2644  (leftward)
+        RTL   value 0 -> 27 moves column 0 from x=256  to x=+2900  (rightward)
+
+    So under RTL a finger dragged left scrolled the content right.  Reported
+    from hardware exactly that way: "to move left I have to move right".
+
+    Rather than let ``QAbstractScrollArea`` apply the mapping, this filter
+    answers the two scroll events itself and mirrors x about the scrollbar's
+    own range.  The mirror is an involution, so the same expression serves
+    both directions and there is no second code path to keep in step.
+
+    Vertical scrolling is passed through untouched — only x is mirrored.
+
+    Deliberately holds no state.  A filter that only C++ has a reference to
+    can have its Python wrapper collected and rebuilt, and any attribute set
+    in ``__init__`` is gone when that happens — which showed up here as an
+    ``AttributeError`` raised from inside ``eventFilter``.  Deriving the
+    scroll area from the object being filtered removes the failure mode
+    instead of guarding against it.
+    """
+
+    @staticmethod
+    def _area_for(obj: QObject) -> Optional[QAbstractScrollArea]:
+        """The scroll area whose viewport is ``obj``, if it still exists."""
+        if not isinstance(obj, QWidget) or not shiboken6.isValid(obj):
+            return None
+        parent = obj.parentWidget()
+        if not isinstance(parent, QAbstractScrollArea):
+            return None
+        return parent if parent.viewport() is obj else None
+
+    @staticmethod
+    def _mirror_x(area: QAbstractScrollArea, value: float) -> float:
+        bar = area.horizontalScrollBar()
+        return float(bar.minimum() + bar.maximum()) - float(value)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() not in (QEvent.Type.ScrollPrepare, QEvent.Type.Scroll):
+            return False
+
+        area = self._area_for(obj)
+        # Read the direction live: the app mirrors its whole layout when the
+        # language changes, and a scroll area outlives that change.
+        if area is None or area.layoutDirection() != Qt.LayoutDirection.RightToLeft:
+            return False
+
+        hbar = area.horizontalScrollBar()
+        vbar = area.verticalScrollBar()
+
+        if event.type() == QEvent.Type.ScrollPrepare:
+            event.setViewportSize(QSizeF(obj.size()))
+            event.setContentPosRange(
+                QRectF(
+                    0.0,
+                    0.0,
+                    float(hbar.maximum() - hbar.minimum()),
+                    float(vbar.maximum() - vbar.minimum()),
+                )
+            )
+            event.setContentPos(
+                QPointF(self._mirror_x(area, hbar.value()) - hbar.minimum(),
+                        float(vbar.value() - vbar.minimum()))
+            )
+            event.accept()
+            return True
+
+        if event.type() == QEvent.Type.Scroll:
+            pos = event.contentPos()
+            hbar.setValue(int(round(self._mirror_x(area, pos.x() + hbar.minimum()))))
+            vbar.setValue(int(round(pos.y() + vbar.minimum())))
+            event.accept()
+            return True
+
+        return False
+
+
 def is_touch_pointer(event) -> bool:
     """True when ``event`` came from a finger rather than a real mouse.
 
@@ -230,57 +317,6 @@ def is_touch_pointer(event) -> bool:
     race and leaves the surface unscrollable.
     """
     return _HoldGestureWatcher._is_touch(event)
-
-
-#: Tracks whether this module has ungrabbed a target's scroll gesture.
-#:
-#: ``QScroller.hasScroller()`` cannot answer this: it reports whether a
-#: QScroller *object* exists, and that object outlives ``ungrabGesture`` — so
-#: using it as the guard made resume a no-op and left the surface permanently
-#: unscrollable, which is worse than the bug suspension exists to fix.
-_SUSPENDED_PROPERTY = "_bananaflow_scroll_suspended"
-
-
-def suspend_touch_scroll(widget: Optional[QWidget]) -> None:
-    """Hand the touch stream back to ``widget`` for the current gesture.
-
-    For the case where a deliberate gesture (a hold) means the user wants to
-    drag *within* the widget rather than scroll it.  Always pair with
-    :func:`resume_touch_scroll` on release — including on the paths where the
-    gesture is abandoned.
-    """
-    if widget is None:
-        return
-    target = _scroll_target(widget)
-    if target is None or bool(target.property(_SUSPENDED_PROPERTY)):
-        return
-    scroller = QScroller.scroller(target)
-    if scroller is not None:
-        scroller.stop()
-    QScroller.ungrabGesture(target)
-    target.setProperty(_SUSPENDED_PROPERTY, True)
-
-
-def resume_touch_scroll(widget: Optional[QWidget]) -> None:
-    """Give the touch stream back to the scroller after a suspension."""
-    if widget is None:
-        return
-    target = _scroll_target(widget)
-    if target is None or not bool(target.property(_SUSPENDED_PROPERTY)):
-        return
-    QScroller.grabGesture(target, QScroller.ScrollerGestureType.TouchGesture)
-    scroller = QScroller.scroller(target)
-    if scroller is not None:
-        scroller.setScrollerProperties(_touch_scroller_properties())
-    target.setProperty(_SUSPENDED_PROPERTY, False)
-
-
-def is_touch_scroll_suspended(widget: Optional[QWidget]) -> bool:
-    """Whether :func:`suspend_touch_scroll` currently holds ``widget``'s gesture."""
-    if widget is None:
-        return False
-    target = _scroll_target(widget)
-    return target is not None and bool(target.property(_SUSPENDED_PROPERTY))
 
 
 def enable_touch_scroll(widget: Optional[QWidget]) -> Optional[QWidget]:
@@ -313,6 +349,10 @@ def enable_touch_scroll(widget: Optional[QWidget]) -> Optional[QWidget]:
     scroller = QScroller.scroller(target)
     if scroller is not None:
         scroller.setScrollerProperties(_touch_scroller_properties())
+    # QScroller delivers its scroll events to the viewport; the mirror filter
+    # has to sit there to answer them before QAbstractScrollArea does.
+    if isinstance(widget, QAbstractScrollArea):
+        target.installEventFilter(_MirroredScrollFilter(target))
     return widget
 
 
@@ -512,20 +552,7 @@ class _HoldGestureWatcher(QObject):
         if pos is None or not self._alive(target):
             return
 
-        owner = self._menu_owner(target)
-        # A widget may claim the hold for itself. The Tag Editor's table uses
-        # this to start a marquee selection from empty space, which on a touch
-        # screen has no other gesture available — a plain drag has to scroll.
-        # Returning False (or having no hook) falls through to the menu.
-        hook = getattr(owner or target, "touch_hold", None)
-        if callable(hook):
-            try:
-                if hook(pos):
-                    return
-            except Exception:  # pragma: no cover - a hook must never break input
-                logger.warning("[touch] touch_hold hook raised; falling back", exc_info=True)
-
-        if owner is not None:
+        if self._menu_owner(target) is not None:
             self._open_context_menu(target, pos)
             return
         self._show_tooltip(target, pos)

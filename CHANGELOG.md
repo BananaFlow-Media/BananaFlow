@@ -43,8 +43,10 @@ First public BananaFlow release.
   activating it. The download queue's remove button no longer requires a
   hover to appear, and queue reordering — previously drag-only — is
   available from a card's menu. In the Tag Editor's file table a drag
-  scrolls rather than selecting; press and hold on empty space beside the
-  rows to draw a selection box. The Tag Editor's file list zooms by
+  scrolls rather than selecting, and a tap chooses a row only when the
+  finger stayed put. Several rows are selected by flicking each one
+  sideways — the cross-slide gesture Windows itself defines for a list
+  that scrolls in one direction. The Tag Editor's file list zooms by
   pinching — on a touch screen, on a precision touchpad, or with Ctrl +
   mouse wheel. An optional **Touch-Friendly Sizing**
   setting enlarges controls, scrollbars and menu rows to finger-sized
