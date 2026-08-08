@@ -79,6 +79,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_summary": "{n} download{plural} completed.",
         "status_completed_with_preexisting": "{completed} of {total} completed — {downloaded} downloaded, {preexisting} already existed.",
         "status_completed_with_errors": "{ok} completed, {failed} failed.",
+        "status_completed_with_cancelled": "{completed} of {total} completed — {cancelled} cancelled.",
         "status_stopped_summary": "Downloads stopped — {done} of {total} completed.",
         "status_stopped_error": "Downloads stopped because of an error.",
         # Kept short: it has to fit the fixed-width footer ETA slot alongside
@@ -1499,6 +1500,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_summary": "{n} הורדות הושלמו.",
         "status_completed_with_preexisting": "{completed} מתוך {total} הושלמו — {downloaded} הורדו, {preexisting} כבר היו קיימים.",
         "status_completed_with_errors": "{ok} הושלמו, {failed} נכשלו.",
+        "status_completed_with_cancelled": "{completed} מתוך {total} הושלמו — {cancelled} בוטלו.",
         "status_stopped_summary": "ההורדות נעצרו — {done} מתוך {total} הושלמו.",
         "status_stopped_error": "ההורדות נעצרו עקב שגיאה.",
         "phase_matching":    "מחפש התאמה…",

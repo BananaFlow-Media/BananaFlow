@@ -156,6 +156,27 @@ def test_completed_with_preexisting_renders_expected_example():
     assert rendered == "59 of 59 completed — 19 downloaded, 40 already existed."
 
 
+def test_completed_with_cancelled_summary_accounts_for_the_whole_batch():
+    """Cancelling single tracks never cancels the batch, so such a run still
+    ends as COMPLETED. Summarising only the successes ("9 downloads
+    completed.") silently drops the tracks the user stopped and ends the
+    batch short of its own total."""
+    import re
+    from ui.i18n import TRANSLATIONS
+
+    for lang in ("en", "he"):
+        assert "status_completed_with_cancelled" in TRANSLATIONS[lang]
+
+    source = _read("ui/app_window.py")
+    match = re.search(
+        r't\(\s*"status_completed_with_cancelled",(.*?)\)', source, re.S,
+    )
+    assert match, "status_completed_with_cancelled call site not found"
+    call_args = match.group(1)
+    for name in ("completed=", "total=", "cancelled="):
+        assert name in call_args, f"call site must supply {name}"
+
+
 def test_completed_with_preexisting_call_site_uses_completed_and_total():
     """The call site must supply the real batch totals (completed=/total=),
     not a bare n= that conflates "completed" with "downloaded"."""

@@ -11,6 +11,7 @@ without any network calls.
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -66,6 +67,7 @@ class FakeCallbacks:
         self.track_finished: list[tuple[str, str]] = []
         self.track_preexisting: list[tuple[str, str]] = []
         self.track_errors: list[tuple[str, ErrorInfo]] = []
+        self.job_counts: list[tuple[int, int]] = []
         self.overall: list[float] = []
         self.messages: list[str] = []
         self.snapshots: list = []
@@ -87,7 +89,8 @@ class FakeCallbacks:
     def on_metrics(self, speed, eta): pass
     def on_batch_snapshot(self, snapshot):
         self.snapshots.append(snapshot)
-    def on_job_count_changed(self, completed, total): pass
+    def on_job_count_changed(self, completed, total):
+        self.job_counts.append((completed, total))
     def on_track_thumbnail(self, key, url): pass
     def on_status_message(self, msg):
         self.messages.append(msg)
@@ -634,6 +637,132 @@ class TestLiveRequestSnapshot:
         assert cancelled_keys == set(), (
             f"paused jobs must not be reported cancelled, got {cancelled_keys}"
         )
+
+
+class _MidFlightCancelEngine:
+    """Engine that reproduces how core.downloader reacts to a cancel that
+    arrives once the transfer is already running: it fires a CANCELLED
+    DownloadProgress through on_progress and RETURNS NORMALLY. It never
+    calls on_error and never raises, so the retry wrapper around it sees a
+    plain, error-free return."""
+
+    def __init__(self, hold_urls: set[str] | None = None) -> None:
+        self._cancel_event = threading.Event()
+        # Only these URLs wait to be cancelled; every other job succeeds at
+        # once, so a batch can mix a cancelled track with real completions.
+        self._hold_urls = hold_urls if hold_urls is not None else {"http://a"}
+        self.started = threading.Event()
+
+    def cancel_all(self) -> None:
+        self._cancel_event.set()
+
+    def download(self, req: DownloadRequest) -> None:
+        if req.url in self._hold_urls:
+            self.started.set()
+            ev = req.cancel_event
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if (ev is not None and ev.is_set()) or self._cancel_event.is_set():
+                    if req.on_progress:
+                        req.on_progress(DownloadProgress(
+                            status=DownloadStatus.CANCELLED, url=req.url,
+                        ))
+                    return
+                time.sleep(0.01)
+        if req.on_finished:
+            req.on_finished(DownloadProgress(
+                status=DownloadStatus.FINISHED, url=req.url,
+                output_path="/tmp/out.mp3", fraction=1.0,
+            ))
+
+
+class TestMidFlightTrackCancel:
+    """A track cancelled AFTER its download started (past the up-front check
+    in _download_one). The cancel used to fall out of _download_one_locked
+    silently — no on_error, no on_finished, no aggregator transition — so the
+    card stayed on "downloading" forever and the batch never accounted for
+    the job."""
+
+    def test_cancel_mid_download_reports_the_track_cancelled(self):
+        from core.batch_progress import JobState
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _MidFlightCancelEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        jobs = [_make_job("a", "http://a")]
+
+        thread = threading.Thread(target=orch.run_batch, args=(jobs,))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            orch.cancel_track("a")
+        finally:
+            thread.join(timeout=10)
+
+        assert ("a", "cancelled") in cb.track_statuses
+        assert orch._aggregator.job_state("a") is JobState.CANCELLED
+        assert cb.snapshots[-1].cancelled == 1
+        # Never reported as a download that happened.
+        assert cb.track_finished == []
+        assert cb.track_errors == []
+        assert "downloaded." not in cb.messages[-1]
+
+    def test_the_x_of_total_counter_settles_at_total(self):
+        """With one track cancelled and the rest downloaded there is no work
+        left, so the counter must not stop one short ("9 of 10") — it counts
+        settled jobs, whatever each one's outcome was."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        engine = _MidFlightCancelEngine(hold_urls={"http://a"})
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+        jobs = [_make_job(k, f"http://{k}") for k in ("a", "b", "c")]
+
+        thread = threading.Thread(target=orch.run_batch, args=(jobs,))
+        thread.start()
+        try:
+            assert engine.started.wait(timeout=5)
+            orch.cancel_track("a")
+        finally:
+            thread.join(timeout=15)
+
+        assert cb.job_counts[-1] == (3, 3), (
+            f"counter left at {cb.job_counts[-1]} with nothing left to run"
+        )
+        # Monotonic: the two call sites used to disagree about whether
+        # non-successes counted, so the number could go backwards.
+        counts = [done for done, _total in cb.job_counts]
+        assert counts == sorted(counts), f"counter went backwards: {counts}"
+        final = cb.snapshots[-1]
+        assert (final.completed, final.cancelled) == (2, 1)
+        assert final.finished == final.total
+
+    def test_a_job_that_finished_first_is_not_relabelled_cancelled(self):
+        """The cancel lands in the instant after the job completed. The
+        terminal claim is idempotent, so without a state check the finished
+        card would be repainted "cancelled"."""
+        from core.download_orchestrator import DownloadOrchestrator
+
+        class _FinishThenCancelEngine(FakeEngine):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cancel_after_finish: threading.Event | None = None
+
+            def download(self, req: DownloadRequest) -> None:
+                super().download(req)          # fires on_finished
+                if req.cancel_event is not None:
+                    req.cancel_event.set()     # ...and only then, the cancel
+
+        engine = _FinishThenCancelEngine()
+        cb = FakeCallbacks()
+        orch = DownloadOrchestrator(engine=engine, callbacks=cb, max_workers=1)
+
+        result = orch.run_batch([_make_job("a", "http://a")])
+
+        assert result.completed == 1
+        assert ("a", "done") in cb.track_statuses
+        assert ("a", "cancelled") not in cb.track_statuses
 
 
 class TestPreexistingJobs:

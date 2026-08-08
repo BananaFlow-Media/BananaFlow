@@ -158,6 +158,27 @@ class TestBatchProgress:
         assert "MB/s" in bar._speed_lbl.text()
         assert bar._eta_lbl.text() != ""
 
+    def test_counter_counts_settled_work_not_just_successes(self, bar):
+        """A cancelled (or failed) track is finished with. Counting only
+        successes left the footer reading "2 of 3" with nothing left to
+        download — a counter that never reaches its own total."""
+        from ui import i18n
+
+        agg = BatchProgressAggregator(speed_smoothing=1.0)
+        agg.reset(["a", "b", "c"])
+        agg.complete("a", final_bytes=1_000_000)
+        agg.complete("b", final_bytes=1_000_000)
+        agg.cancel("c")
+
+        original = i18n._current
+        try:
+            i18n.set_language("en")
+            bar.show_batch_progress(agg.snapshot())
+        finally:
+            i18n.set_language(original)
+
+        assert "3 of 3" in bar._status_lbl.text(), bar._status_lbl.text()
+
 
 # ── Temporary messages ──────────────────────────────────────────────────────
 

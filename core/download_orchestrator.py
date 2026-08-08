@@ -233,6 +233,12 @@ class DownloadOrchestrator:
         self._aggregator = BatchProgressAggregator()
         self._completed = 0
         self._failed    = 0
+        # Jobs the user stopped. Counted separately from failures (a cancel is
+        # not an error and must never be reported as one) but still counted:
+        # the job-count callback reports *settled* work, so a batch with a
+        # cancelled track in it still reaches total instead of stalling one
+        # short forever with nothing left to run.
+        self._cancelled = 0
         self._total     = 0
 
         # YouTube-only conservative reliability mode: serializes YouTube
@@ -363,11 +369,45 @@ class DownloadOrchestrator:
         already claimed it, in which case the job is *paused*, not cancelled,
         and must keep both its resumable state and its "paused" card label
         (cancellation and pause set the same events; only the claim tells
-        them apart)."""
+        them apart).
+
+        A job that already reached a terminal state is left alone. The claim
+        is idempotent per outcome, so a cancel arriving in the instant after
+        a job completed would otherwise be granted "terminal" a second time
+        and repaint a finished card as "cancelled"."""
+        if is_terminal_state(self._aggregator.job_state(key)):
+            return
         if not self._claim_job_outcome(key, "terminal"):
             return
+        # Cancellation cut the current phase short, so it is dropped rather
+        # than learned as a completed observation, and further heartbeat /
+        # progress repaints for this key are suppressed — the same treatment
+        # the pause path in live_request_snapshot applies for the same reason.
+        with self._phase_state_lock:
+            self._phase_suppressed_keys.add(key)
+            self._job_phase.pop(key, None)
         self._aggregator.cancel(key)
+        with self._progress_lock:
+            self._cancelled += 1
         self._safe_cb("on_track_status", key, "cancelled")
+        self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+        self._emit_job_count()
+
+    def _emit_job_count(self) -> None:
+        """Publish the x-of-total counter as *settled work*, not successes.
+
+        Every job that will never run again counts here — completed,
+        preexisting, failed and cancelled alike — so the counter always ends
+        a batch at total. Reporting successes only left it one short for
+        good the moment anything did not succeed ("9 of 10" with nothing
+        left to download), and the two call sites disagreed about whether
+        failures counted at all, so the number could even go backwards.
+        The success / failure / cancel breakdown is the end-of-batch
+        summary's job, and BatchResult keeps the three counts apart.
+        """
+        with self._progress_lock:
+            settled = self._completed + self._failed + self._cancelled
+        self._safe_cb("on_job_count_changed", settled, self._total)
 
     def live_request_snapshot(
         self, key: str,
@@ -513,6 +553,7 @@ class DownloadOrchestrator:
         self._total     = total_jobs
         self._completed = 0
         self._failed    = 0
+        self._cancelled = 0
         stagger_delay_range = tuple(delay_range) if delay_range else None
         with self._stagger_lock:
             self._next_pipeline_start_at = None
@@ -618,7 +659,7 @@ class DownloadOrchestrator:
             with self._progress_lock:
                 self._completed += 1
             self._safe_cb("on_track_preexisting", key, existing_path)
-            self._safe_cb("on_job_count_changed", self._completed, self._total)
+            self._emit_job_count()
         if preexisting:
             snapshot = self._aggregator.snapshot()
             self._safe_cb("on_overall_progress", snapshot.progress)
@@ -819,10 +860,7 @@ class DownloadOrchestrator:
                         self._safe_cb("on_track_status", key, "error")
                         self._safe_cb("on_track_error", key, err)
                         self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
-                        self._safe_cb(
-                            "on_job_count_changed",
-                            self._completed + self._failed, self._total,
-                        )
+                        self._emit_job_count()
                         logger.error(
                             "[Orchestrator] Unhandled exception for %s: %s",
                             key, exc, exc_info=True,
@@ -840,6 +878,7 @@ class DownloadOrchestrator:
         # ── Finalisation ──────────────────────────────────────────────────────
         was_cancelled = self._engine._cancel_event.is_set()  # noqa: SLF001
         if was_cancelled:
+            swept = 0
             for key in self._aggregator.cancel_outstanding():
                 # A job a Global Pause claimed is paused, not cancelled: it
                 # keeps its snapshot and its "paused" card. Telling the UI
@@ -849,6 +888,14 @@ class DownloadOrchestrator:
                 if self._job_outcomes.get(key) == "paused":
                     continue
                 self._safe_cb("on_track_status", key, "cancelled")
+                swept += 1
+            if swept:
+                # Only the jobs actually reported cancelled are counted as
+                # settled — paused work is deliberately still outstanding,
+                # because a Resume will run it.
+                with self._progress_lock:
+                    self._cancelled += swept
+                self._emit_job_count()
 
         # Workspace cleanup: only when this orchestrator created one AND the
         # batch ran to a natural end with nothing paused/cancelled in it.
@@ -897,6 +944,16 @@ class DownloadOrchestrator:
                 "on_status_message",
                 f"Finished: {ok} completed, {self._failed} failed.",
             )
+        elif snapshot.cancelled > 0:
+            # A per-track cancel never sets the engine-wide event, so this
+            # batch reads as a clean completion and would otherwise report
+            # every track as downloaded — including the ones the user
+            # stopped. Name them instead of counting them as successes.
+            parts = [f"{snapshot.downloaded} downloaded"]
+            if snapshot.preexisting > 0:
+                parts.append(f"{snapshot.preexisting} already existed")
+            parts.append(f"{snapshot.cancelled} cancelled")
+            self._safe_cb("on_status_message", "Finished: " + ", ".join(parts) + ".")
         else:
             s = "s" if self._total != 1 else ""
             if snapshot.preexisting > 0:
@@ -914,8 +971,10 @@ class DownloadOrchestrator:
         self._safe_cb("on_batch_finished", outcome)
 
         logger.info(
-            "[Orchestrator] Batch finished: total=%d completed=%d failed=%d cancelled=%s outcome=%s",
-            self._total, self._completed, self._failed, was_cancelled, outcome.value,
+            "[Orchestrator] Batch finished: total=%d completed=%d failed=%d "
+            "cancelled=%s cancelled_tracks=%d outcome=%s",
+            self._total, self._completed, self._failed, was_cancelled,
+            snapshot.cancelled, outcome.value,
         )
         self._log_phase_summary(time.monotonic() - run_start)
 
@@ -1072,9 +1131,7 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_status", key, "error")
             self._safe_cb("on_track_error", key, err)
             self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
-            self._safe_cb(
-                "on_job_count_changed", self._completed + self._failed, self._total,
-            )
+            self._emit_job_count()
             logger.error("[Orchestrator] Unhandled exception for %s: %s", key, exc, exc_info=True)
 
         def fill_window() -> None:
@@ -1617,7 +1674,7 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_finished", key, p.output_path or "")
             self._safe_cb("on_overall_progress", snapshot.progress)
             self._safe_cb("on_batch_snapshot", snapshot)
-            self._safe_cb("on_job_count_changed", self._completed, self._total)
+            self._emit_job_count()
             if p.warning_message:
                 # Non-fatal post-processing note; plain text, no emoji.
                 self._safe_cb("on_status_message", p.warning_message)
@@ -1648,7 +1705,7 @@ class DownloadOrchestrator:
             self._safe_cb("on_track_status", key, "error")
             self._safe_cb("on_track_error", key, err)
             self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
-            self._safe_cb("on_job_count_changed", self._completed + self._failed, self._total) # treat failed as 'done' for progress count
+            self._emit_job_count()
             from utils.yt_dlp_opts import note_cookie_diagnostic
             if note_cookie_diagnostic(p.error_message or ""):
                 logger.debug(
@@ -1725,7 +1782,29 @@ class DownloadOrchestrator:
 
         final_error = retry_download(_attempt, cancel_event=cancel_ev, job_key=key)
 
-        if final_error and final_error != "Cancelled":
+        # A job cancelled once it was already running needs exactly the
+        # terminal bookkeeping the up-front check in _download_one does.
+        # Cancellation arrives here in two shapes, and neither produces an
+        # error to report:
+        #   * retry_download saw the event between attempts or during a
+        #     backoff sleep and returned the literal "Cancelled";
+        #   * the engine aborted mid-transfer, fired a CANCELLED progress
+        #     event (never on_error) and returned normally, so final_error
+        #     is None — the common case, and the one a "Cancelled"-string
+        #     check alone would miss.
+        # Both used to fall out of this function silently: no on_error, no
+        # on_finished, no aggregator transition. The card stayed on
+        # "downloading" forever and the job stayed non-terminal, so the
+        # batch could never account for it.
+        if (
+            final_error == "Cancelled"
+            or cancel_ev.is_set()
+            or self._engine._cancel_event.is_set()  # noqa: SLF001
+        ):
+            self._mark_cancelled(key)
+            return
+
+        if final_error:
             on_error(DownloadProgress(
                 status=DownloadStatus.ERROR,
                 url=req.url,

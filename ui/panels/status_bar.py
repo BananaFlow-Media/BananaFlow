@@ -158,7 +158,11 @@ class StatusBar(QFrame):
         if message is None:
             message = t(
                 "status_downloading_progress",
-                done=snapshot.completed,
+                # Settled work, not successes: a job that failed or that the
+                # user cancelled is finished with, so counting only successes
+                # left this reading "9 of 10" with nothing left to download.
+                # The outcome breakdown belongs to the end-of-batch summary.
+                done=snapshot.finished,
                 total=snapshot.total,
                 pct=pct,
             )

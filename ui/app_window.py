@@ -1332,7 +1332,20 @@ class AppWindow(FluentWindow):
         else:  # COMPLETED
             self._queue_panel.set_pause_resume_state(False)
             preexisting = snap.preexisting if snap else 0
-            if preexisting > 0:
+            cancelled = snap.cancelled if snap else 0
+            if cancelled > 0:
+                # Cancelling single tracks never cancels the batch, so this
+                # still ends as a plain COMPLETED run. Reporting only the
+                # successes would quietly drop the tracks the user stopped
+                # and leave the summary short of the total.
+                self._status_bar.show_temporary(
+                    t(
+                        "status_completed_with_cancelled",
+                        completed=done, total=total, cancelled=cancelled,
+                    ),
+                    StatusKind.CANCELLING,
+                )
+            elif preexisting > 0:
                 # Anchor on completed/total, not a bare "N downloads" count —
                 # some of "completed" was a duplicate-skip that never
                 # downloaded anything, so the whole batch must not be
