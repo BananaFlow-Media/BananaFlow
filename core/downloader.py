@@ -262,6 +262,8 @@ class DownloadRequest:
     forced_artist:   Optional[str] = None
     forced_album:    Optional[str] = None
     forced_index:    Optional[int] = None
+    forced_disc:     Optional[int] = None    # 1-based disc number (multi-disc releases)
+    forced_total:    Optional[int] = None    # tracks in the release (single-disc only)
     forced_duration: Optional[int] = None    # seconds, for duplicate check
 
     # Playlist sub-folder routing
@@ -501,6 +503,95 @@ def _bytes_to_mb(b: Optional[int]) -> Optional[float]:
     if b is None:
         return None
     return round(b / (1024 * 1024), 2)
+
+
+def _forced_metadata_args(
+    req: DownloadRequest, pp_keys: tuple[str, ...],
+) -> dict[str, list[str]]:
+    """Build yt-dlp ``postprocessor_args`` carrying our forced metadata.
+
+    The dict keys MUST be yt-dlp's ``PostProcessor.pp_key()`` lowercased,
+    which is the class name with both the ``FFmpeg`` prefix and the ``PP``
+    suffix stripped: FFmpegMetadataPP -> "metadata", FFmpegExtractAudioPP ->
+    "extractaudio", FFmpegVideoConvertorPP -> "videoconvertor". Keying this
+    dict by the class name instead ("FFmpegMetadata") makes yt-dlp's
+    utils.cli_configuration_args lookup miss silently, so every argument here
+    is dropped without a warning — that is what left album downloads with no
+    ID3 TRCK frame (issue #65).
+
+    A field we have no authoritative value for is OMITTED, never emitted as
+    an empty ``-metadata key=``: an empty assignment tells ffmpeg to erase
+    whatever the source already provided, and losing a correct value is worse
+    than not improving it.
+    """
+    args: list[str] = []
+    if req.forced_title:
+        args += ["-metadata", f"title={req.forced_title}"]
+    if req.forced_artist:
+        args += ["-metadata", f"artist={req.forced_artist}"]
+    if req.forced_album:
+        args += ["-metadata", f"album={req.forced_album}"]
+    if req.forced_index:
+        track = str(req.forced_index)
+        # "n/total" only where the total is unambiguous — see
+        # _stamp_authoritative_position for why a multi-disc release omits it.
+        if req.forced_total and not req.forced_disc:
+            track = f"{track}/{req.forced_total}"
+        args += ["-metadata", f"track={track}"]
+    if req.forced_disc:
+        args += ["-metadata", f"disc={req.forced_disc}"]
+
+    return {key: list(args) for key in pp_keys}
+
+
+def _stamp_authoritative_position(req: DownloadRequest, path: str) -> None:
+    """Write the collection-authoritative track/disc position into the file.
+
+    yt-dlp's own metadata pass only writes a track number when the *source*
+    (YouTube) happens to expose one, which for the album journeys that matter
+    here it does not — the position comes from the Spotify/catalog listing and
+    is carried on the request. This runs at the very end of the post-download
+    pipeline, after artwork embedding, MusicBrainz enrichment, lyrics and
+    ReplayGain, so nothing downstream can drop the frame again, and it goes
+    through the same canonical backend the Tag Editor uses, so every supported
+    container gets its native field (ID3 TRCK/TPOS, Vorbis
+    tracknumber/discnumber, MP4 trkn/disk).
+
+    A request with no forced position (a single, or a bare URL) writes
+    nothing at all, so independent downloads stay unnumbered.
+    """
+    if not req.forced_index and not req.forced_disc:
+        return
+
+    from core.metadata_backend import FORMAT_CAPABILITIES, CapabilityLevel
+    from core.metadata_models import ProposedTags
+    from core.metadata_processor import read_tags, write_tags
+
+    target = Path(path)
+
+    # Containers with no writable tag layer (webm, mkv, aac …) have nowhere to
+    # put a track number. That is a property of the chosen output format, not
+    # a failure of this download, so it must not raise a partial-failure
+    # warning on every such file.
+    level = FORMAT_CAPABILITIES.by_extension(target.suffix).level
+    if level not in (CapabilityLevel.FULL, CapabilityLevel.LIMITED):
+        logger.debug(
+            "[Downloader] %s has no writable tag layer — skipping track position",
+            target.suffix or target.name,
+        )
+        return
+    original = read_tags(target)
+    proposed = ProposedTags(
+        track_num=req.forced_index or None,
+        disc_num=req.forced_disc or None,
+        # A release spanning discs numbers its tracks per disc, but the only
+        # total we are given is for the whole release — writing that as the
+        # per-disc total would be wrong, so a multi-disc release gets a bare
+        # track number and no total.
+        track_total=(req.forced_total or None) if not req.forced_disc else None,
+    )
+    if not write_tags(target, proposed, original):
+        raise RuntimeError(f"could not write track position to {target.name}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -867,7 +958,12 @@ class DownloadEngine:
         # Sanitize
         stem = re.sub(r'[\\/*?:"<>|]', "_", stem)
         if request.forced_index:
-            stem = f"{request.forced_index:02d} {stem}"
+            # "NN - " is the one numbering convention in this app: the yt-dlp
+            # output templates build it and core.duplicate_checker.expected_stem
+            # looks for it. This path used to omit the separator, so its files
+            # sorted alongside everything else but were invisible to the
+            # duplicate check.
+            stem = f"{request.forced_index:02d} - {stem}"
 
         output_path = str(out_dir / f"{stem}.{ext}")
 
@@ -907,6 +1003,19 @@ class DownloadEngine:
             ))
             return
 
+        # This path builds the numbered filename itself and never went
+        # through yt-dlp's metadata postprocessor, so the collection position
+        # would otherwise reach the filename and nothing else. Only the
+        # position is stamped here — the rest of _run_final_pipeline
+        # (artwork, MusicBrainz, lyrics, ReplayGain) has never run for raw
+        # stream downloads and enabling it is a separate decision.
+        hls_warning = ""
+        try:
+            _stamp_authoritative_position(request, output_path)
+        except Exception as exc:
+            logger.error("[Downloader] Track position error (HLS): %s", exc, exc_info=True)
+            hls_warning = f"Post-processing partial failure: track number: {exc}"
+
         try:
             output_path = self._publish_to_final_location(request, output_path)
         except PublishCancelled:
@@ -928,6 +1037,7 @@ class DownloadEngine:
             fraction=1.0,
             downloaded_bytes=hls_bytes or 0,
             total_bytes=hls_bytes,
+            warning_message=hls_warning,
             output_path=output_path,
         ))
 
@@ -1098,6 +1208,15 @@ class DownloadEngine:
             ))
             return
 
+        # Same reason as the HLS path: ffmpeg wrote the container directly, so
+        # no metadata postprocessor ever ran over it.
+        stream_warning = ""
+        try:
+            _stamp_authoritative_position(request, output_path)
+        except Exception as exc:
+            logger.error("[Downloader] Track position error (stream): %s", exc, exc_info=True)
+            stream_warning = f"Post-processing partial failure: track number: {exc}"
+
         try:
             output_path = self._publish_to_final_location(request, output_path)
         except PublishCancelled:
@@ -1119,6 +1238,7 @@ class DownloadEngine:
             fraction=1.0,
             downloaded_bytes=stream_bytes or 0,
             total_bytes=stream_bytes,
+            warning_message=stream_warning,
             output_path=output_path,
         ))
 
@@ -1273,26 +1393,9 @@ class DownloadEngine:
             "writethumbnail": use_ytdlp_thumb,
         }
 
-        meta_args: list[str] = []
-        if req.forced_title:
-            meta_args.extend(["-metadata", f"title={req.forced_title}"])
-        if req.forced_artist:
-            meta_args.extend(["-metadata", f"artist={req.forced_artist}"])
-            
-        if req.forced_album:
-            meta_args.extend(["-metadata", f"album={req.forced_album}"])
-        else:
-            meta_args.extend(["-metadata", "album="])
-            
-        if req.forced_index:
-            meta_args.extend(["-metadata", f"track={req.forced_index}"])
-        else:
-            meta_args.extend(["-metadata", "track="])
-            
-        opts["postprocessor_args"] = {
-            "FFmpegMetadata":      meta_args,
-            "FFmpegExtractAudio":  meta_args,
-        }
+        opts["postprocessor_args"] = _forced_metadata_args(
+            req, ("metadata", "extractaudio"),
+        )
 
         return opts
 
@@ -1327,26 +1430,9 @@ class DownloadEngine:
             opts["subtitleslangs"]  = ["en"]
             opts["subtitlesformat"] = "vtt"
 
-        meta_args = []
-        if req.forced_title:
-            meta_args.extend(["-metadata", f"title={req.forced_title}"])
-        if req.forced_artist:
-            meta_args.extend(["-metadata", f"artist={req.forced_artist}"])
-            
-        if req.forced_album:
-            meta_args.extend(["-metadata", f"album={req.forced_album}"])
-        else:
-            meta_args.extend(["-metadata", "album="])
-            
-        if req.forced_index:
-            meta_args.extend(["-metadata", f"track={req.forced_index}"])
-        else:
-            meta_args.extend(["-metadata", "track="])
-            
-        opts["postprocessor_args"] = {
-            "FFmpegMetadata":        meta_args,
-            "FFmpegVideoConvertor":  meta_args,
-        }
+        opts["postprocessor_args"] = _forced_metadata_args(
+            req, ("metadata", "videoconvertor"),
+        )
 
         return opts
 
@@ -1816,6 +1902,14 @@ class DownloadEngine:
             except Exception as exc:
                 logger.error(f"[Downloader] ReplayGain error: {exc}")
                 failures.append(f"ReplayGain: {exc}")
+
+        # 5. Authoritative track/disc position — LAST, so that no earlier step
+        #    (artwork rewrite, MusicBrainz, lyrics, ReplayGain) can drop it.
+        try:
+            _stamp_authoritative_position(req, final_path)
+        except Exception as exc:
+            logger.error(f"[Downloader] Track position error: {exc}", exc_info=True)
+            failures.append(f"track number: {exc}")
 
         logger.info(f"[Downloader] Post-processing finished for: {Path(final_path).name}")
         return failures

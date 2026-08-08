@@ -68,6 +68,8 @@ class QueueItem:
     quality_label:  str           = DEFAULT_AUDIO_QUALITY_ID
     playlist_name:  str           = ""
     forced_index:   Optional[int] = None
+    forced_disc:    Optional[int] = None
+    forced_total:   Optional[int] = None
 
     def to_dict(self) -> dict:
         return asdict(self)

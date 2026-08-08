@@ -34,7 +34,7 @@ _PLAIN_FIELDS = (
     "playlist_start", "playlist_end",
     "cookies_file", "cookies_browser", "proxy_url",
     "forced_title", "forced_artist", "forced_album",
-    "forced_index", "forced_duration",
+    "forced_index", "forced_disc", "forced_total", "forced_duration",
     "playlist_name", "thumbnail_url",
     "sponsorblock", "sponsorblock_categories",
     "embed_lyrics", "replay_gain", "musicbrainz",
