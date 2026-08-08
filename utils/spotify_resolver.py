@@ -681,6 +681,10 @@ class SpotifyResolver:
                 "album_type":    item.get("album_type") or item.get("type", "album"),
                 "release_type":  item.get("album_type") or item.get("type", "album"),
                 "album_index":   item.get("track_number") or item.get("index") or 0,
+                # Spotify restarts track_number at 1 on every disc, so without
+                # the disc number a multi-disc release has ambiguous positions.
+                # Absent (or the usual single-disc 1) means "no disc context".
+                "disc_number":   item.get("disc_number") or item.get("disc") or 0,
                 "parent_artist": parent_artist_name,
             }
             normalized_list.append(normalized)

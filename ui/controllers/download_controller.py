@@ -275,6 +275,7 @@ class DownloadController(QObject):
         def _build_request(
             card, output_dir: str, track_playlist_name: Optional[str],
             is_parent_discography: bool, track_index: Optional[int], is_clean: bool,
+            disc_number: Optional[int] = None, track_total: Optional[int] = None,
         ) -> DownloadRequest:
             # Map the card.platform string to a SourcePlatform enum so the
             # orchestrator can persist the correct platform on the history
@@ -305,6 +306,8 @@ class DownloadController(QObject):
                 forced_album=card.album,
                 forced_duration=getattr(card, "duration_sec", None),
                 forced_index=track_index,
+                forced_disc=disc_number,
+                forced_total=track_total,
                 cookies_file=self._cfg.cookies_file or None,
                 cookies_browser=self._cfg.cookies_browser or None,
                 playlist_name=self._get_dynamic_folder(
@@ -361,6 +364,25 @@ class DownloadController(QObject):
                 }
 
             return req
+
+        # Which releases in this batch actually span more than one disc.
+        # A disc number is only meaningful in that context: on a single-disc
+        # album every track reports disc 1, and stamping TPOS=1 on all of them
+        # adds noise. It also cannot be decided per card — disc 1 of a 2-disc
+        # set looks exactly like a whole single-disc album until you have seen
+        # its sibling — so the whole selection is scanned once up front.
+        discs_per_release: dict[tuple[str, str], set[int]] = {}
+        for card in selected:
+            disc = getattr(card, "disc_number", 0) or 0
+            if disc > 0:
+                release_key = (
+                    (card.parent_artist or card.artist or "").strip(),
+                    (card.album or "").strip(),
+                )
+                discs_per_release.setdefault(release_key, set()).add(disc)
+        multi_disc_releases = {
+            release for release, discs in discs_per_release.items() if len(discs) > 1
+        }
 
         for card in selected:
             key = str(id(card))
@@ -469,14 +491,32 @@ class DownloadController(QObject):
 
             # Calculate the index to use for filename prefixing and metadata tags
             track_index = None
+            is_release_position = False
             if grouped_source or (not has_source_context and not is_solo):
                 if card.release_type in ("album", "ep") and card.album_index > 0:
                     track_index = card.album_index
+                    is_release_position = True
                 elif card.release_type == "playlist":
                     # User explicitly requested no numbering for playlists
                     track_index = None
                 elif self._cfg.playlist_index_prefix:
                     track_index = card.queue_index
+
+            # Disc and total only describe a real release position. A queue
+            # ordinal (the playlist_index_prefix case above) is a local
+            # convenience number, not album metadata, so it is written to the
+            # filename but must not claim to be a track-of-total on a disc.
+            disc_number = None
+            track_total = None
+            if is_release_position:
+                release_key = (
+                    (card.parent_artist or card.artist or "").strip(),
+                    (card.album or "").strip(),
+                )
+                if release_key in multi_disc_releases:
+                    disc_number = getattr(card, "disc_number", 0) or None
+                if card.total_tracks > 0:
+                    track_total = card.total_tracks
 
             # Duplicate detection — pass include_artist=False to match the
             # is_clean filename layout produced below.
@@ -510,12 +550,15 @@ class DownloadController(QObject):
                             "is_parent_discography": is_parent_discography,
                             "track_index": track_index,
                             "is_clean": is_clean,
+                            "disc_number": disc_number,
+                            "track_total": track_total,
                         })
                         continue
 
             req = _build_request(
                 card, output_dir, track_playlist_name,
                 is_parent_discography, track_index, is_clean,
+                disc_number, track_total,
             )
             self._key_to_card[key] = card
             jobs.append((key, req))
@@ -540,6 +583,7 @@ class DownloadController(QObject):
                     req = _build_request(
                         card, p["output_dir"], p["track_playlist_name"],
                         p["is_parent_discography"], p["track_index"], p["is_clean"],
+                        p["disc_number"], p["track_total"],
                     )
                     self._key_to_card[key] = card
                     jobs.append((key, req))
@@ -889,6 +933,7 @@ class DownloadController(QObject):
             "release_type":     getattr(card, "release_type", ""),
             "category":         getattr(card, "category", ""),
             "album_index":      getattr(card, "album_index", 0),
+            "disc_number":      getattr(card, "disc_number", 0),
             "total_tracks":     getattr(card, "total_tracks", 0),
             "duration_sec":     getattr(card, "duration_sec", None),
             "spotify_id":       getattr(card, "spotify_id", ""),

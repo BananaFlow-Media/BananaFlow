@@ -112,6 +112,7 @@ class FetchWorker(QThread):
                 "release_type":  track.release_type,
                 "category":      track.category,
                 "album_index":   track.album_index,
+                "disc_number":   track.disc_number,
                 "total_tracks":  track.total_tracks,
                 "duration_sec":  track.duration_sec,
                 "spotify_id":    track.spotify_id,

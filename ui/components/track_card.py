@@ -179,6 +179,7 @@ class TrackCard(QFrame):
         parent_artist: str         = "",
         release_type:  str         = "",
         album_index:   int         = 0,
+        disc_number:   int         = 0,
         thumbnail_url: str         = "",
         category:      str         = "",
         total_tracks:  int         = 0,
@@ -202,6 +203,7 @@ class TrackCard(QFrame):
         self.category      = category
         self.total_tracks  = total_tracks
         self.album_index   = album_index
+        self.disc_number   = disc_number
         self.thumbnail_url = thumbnail_url
         self.duration       = duration
         self.duration_sec   = duration_sec
