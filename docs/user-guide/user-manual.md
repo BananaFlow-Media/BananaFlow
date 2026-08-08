@@ -498,6 +498,50 @@ YouTube can require a **PO Token** (Proof-of-Origin Token) for some requests bef
 
 ---
 
+## Touch screens
+
+BananaFlow is usable with a finger, without a mouse or a stylus.
+
+| Gesture | What it does |
+|---|---|
+| Drag | Scrolls any list, table or panel, with flick-to-coast |
+| Tap | Activates a button, row or tab |
+| Press and hold | Opens the same menu a right-click opens; on a control that only has a tooltip, shows the tooltip instead of activating the control |
+| Press, pause, then drag in the Tag Editor's file table | Draws a selection box across rows |
+| Tap a row's checkbox in the Tag Editor | Adds that one row to the selection |
+| Pinch (two fingers) on the Tag Editor's file table | Zooms the list between 50% and 200% |
+
+Notes:
+
+- **Press and hold never activates what you were holding.** Holding a button
+  to find out what it does shows its tooltip and stops there. Tap to activate.
+- **Dragging always scrolls**, unless a press-and-hold came first. In the Tag
+  Editor's folder tree, dragging a file onto a folder to move it is a mouse
+  gesture; with a finger, press and hold the item and choose **Move…**. In the
+  download queue, press and hold a card and choose **Move Up** / **Move Down**
+  to reorder it.
+- **Selecting several files** works exactly as it does in File Explorer:
+  **press, pause for a moment, then drag**. The short pause is what tells the
+  list you mean to select rather than scroll — drag straight away and it
+  scrolls instead. Once the box appears, every row you drag across is
+  selected, and the list scrolls on its own when you reach the top or bottom
+  edge. It adds to whatever is already selected. You can also tap the
+  checkboxes one at a time, or use the checkbox in the column header to
+  select everything.
+- **Keep holding without moving** and you get the context menu instead, just
+  as a right-click would.
+- **Zooming the file list** works by pinching on a touch screen, by pinching
+  on a precision touchpad, and with **Ctrl + mouse wheel**. It is the same
+  zoom the **–** / **+** buttons above the list apply, and the level is
+  remembered between sessions. The Tag Editor's file list is the only view in
+  BananaFlow with a zoom level.
+- **Turn on Touch-Friendly Sizing** (Settings → Basic → Appearance) to enlarge
+  buttons, fields, scrollbars and menu rows to finger-sized targets. It
+  applies immediately and can be turned off again at any time. Scrolling and
+  press-and-hold work with or without it.
+
+---
+
 ## Settings
 
 In the app, Settings is organised into three pages: **Basic** (appearance,
@@ -530,6 +574,7 @@ All settings are stored in:
 | `language` | `en` | UI language: `en` (English) or `he` (Hebrew / RTL) |
 | `theme` | `dark` | UI theme: `dark` or `light` |
 | `accent_color` | `#F5A623` | Custom accent hex colour |
+| `touch_density` | `false` | Enlarge controls to finger-sized targets (see **Touch screens**) |
 
 `media_type`, `audio_quality`, `video_quality`, `audio_format`, and
 `video_format` follow the Type/Format/Quality pickers in the main toolbar —

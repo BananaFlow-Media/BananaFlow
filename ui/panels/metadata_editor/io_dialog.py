@@ -26,6 +26,7 @@ from core.tag_actions import builtin_registry
 from qfluentwidgets import FluentIcon
 from ui.dialogs.styled_dialog import add_header, make_footer
 from ui.i18n import current_language, t
+from ui.touch import apply_touch_support
 from utils.paths import get_tag_action_presets_path
 from .shared import mark_tag_editor_dialog
 
@@ -109,6 +110,8 @@ class MetadataIODialog(QDialog):
         self.status_label.setWordWrap(True)
         close = QPushButton(t("close")); close.setAccessibleName(t("close")); close.clicked.connect(self.reject)
         layout.addWidget(make_footer(close, leading=(self.status_label,)))
+        # Not a StyledDialog, so the shared touch sweep does not reach it.
+        apply_touch_support(self)
 
     @staticmethod
     def _scope_combo(*, playlist: bool = False) -> QComboBox:

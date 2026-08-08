@@ -17,6 +17,7 @@ from ui.dialogs.styled_dialog import confirm, show_info, show_warning
 from ui.dialogs.styled_dialog import add_header, make_footer
 from ui.i18n import t
 from ui.panels.metadata_editor.shared import mark_tag_editor_dialog
+from ui.touch import apply_touch_support
 from qfluentwidgets import FluentIcon
 
 
@@ -73,6 +74,8 @@ class BackupManagerDialog(QDialog):
         self._delete.clicked.connect(self._delete_selected)
         self._refresh.clicked.connect(self.refresh)
         self.refresh()
+        # Not a StyledDialog, so the shared touch sweep does not reach it.
+        apply_touch_support(self)
 
     def refresh(self) -> None:
         self._infos = self._manager.list_backups()

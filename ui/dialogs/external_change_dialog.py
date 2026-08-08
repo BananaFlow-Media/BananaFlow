@@ -14,6 +14,7 @@ from ui.direction import isolate_ltr, isolate_value_for_field
 from ui.i18n import t
 from ui.panels.metadata_editor.shared import mark_tag_editor_dialog
 from ui.dialogs.styled_dialog import add_header
+from ui.touch import apply_touch_support
 from qfluentwidgets import FluentIcon
 
 #: Columns holding a raw field value.  What they contain depends on the field:
@@ -109,6 +110,8 @@ class ExternalChangeReviewDialog(QDialog):
         cancel.setAutoDefault(True)
         cancel.clicked.connect(self.reject); buttons.addWidget(cancel)
         layout.addLayout(buttons)
+        # Not a StyledDialog, so the shared touch sweep does not reach it.
+        apply_touch_support(self)
 
     def _choose(self, action: ConflictResolutionAction) -> None:
         self.selected_action = action

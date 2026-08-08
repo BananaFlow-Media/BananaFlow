@@ -214,6 +214,20 @@ class SettingsPanel(QWidget):
         self._a11y_card.checkedChanged.connect(self._on_accessibility_toggle)
         appearance_grp.addSettingCard(self._a11y_card)
 
+        # Touch density. Scrolling, long-press menus and always-visible
+        # controls need no setting — they cost a mouse user nothing. Growing
+        # every control to a finger-sized target is the one touch change that
+        # does, so it is the one the user chooses.
+        self._touch_card = SwitchSettingCard(
+            icon=FluentIcon.ZOOM_IN,
+            title=t("touch_density"),
+            content=t("touch_density_desc"),
+            parent=appearance_grp,
+        )
+        self._touch_card.setChecked(self._cfg.touch_density)
+        self._touch_card.checkedChanged.connect(self._on_touch_density_toggle)
+        appearance_grp.addSettingCard(self._touch_card)
+
         layout.addWidget(appearance_grp)
 
         # ── 2. Downloads ───────────────────────────────────────────────────────
@@ -840,6 +854,11 @@ class SettingsPanel(QWidget):
     def _on_accessibility_toggle(self, checked: bool) -> None:
         self._persist("accessibility_mode", checked)
         self.accessibility_changed.emit(checked)
+
+    def _on_touch_density_toggle(self, checked: bool) -> None:
+        # The theme manager owns persistence here (it also has to restyle and
+        # notify), so this must not _persist the key a second time.
+        self._theme.set_touch_density(checked)
 
     def _on_browse_cookies(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

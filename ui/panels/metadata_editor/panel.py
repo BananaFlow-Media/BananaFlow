@@ -103,6 +103,12 @@ from core.metadata_models import (
 from ui import a11y
 from ui.components.empty_state_icon import EmptyStateIcon
 from ui.i18n import t
+from ui.touch import (
+    TOUCH_SPLITTER_HANDLE_PX,
+    enable_pinch_zoom,
+    is_touch_density,
+    touch_size,
+)
 from ui.models.metadata_table_model import (
     COL_CHECK, COL_FILENAME, COL_TITLE_NEW,
     COL_ARTIST_NEW, COL_ALBUM_NEW,
@@ -508,8 +514,21 @@ class MetadataEditorPanel(
             _tm.theme_changed.connect(self._apply_theme)
         self._apply_theme()
 
+    def _apply_touch_density(self) -> None:
+        """Re-size the geometry a stylesheet cannot reach.
+
+        Rides on the theme signal because the density toggle emits it, which
+        is what lets the setting apply without restarting the application.
+        """
+        dense = is_touch_density()
+        if hasattr(self, "_body_splitter"):
+            self._body_splitter.setHandleWidth(
+                TOUCH_SPLITTER_HANDLE_PX if dense else 6
+            )
+
     def _apply_theme(self) -> None:
         """Re-apply theme-dependent styles for the toolbar, tree, table, buttons."""
+        self._apply_touch_density()
         c = tag_editor_colors()
         accent = c.accent
         accent_dim = dim_hex(accent)
@@ -1681,7 +1700,10 @@ class MetadataEditorPanel(
         splitter = QSplitter(Qt.Horizontal)
         splitter.setLayoutDirection(QApplication.layoutDirection())
         splitter.setChildrenCollapsible(True)
-        splitter.setHandleWidth(6)
+        # A 6 px handle is a mouse-sized target; a finger cannot land on it at
+        # all. handleWidth is a widget property, not a styleable box, so this
+        # cannot come from the density stylesheet.
+        splitter.setHandleWidth(TOUCH_SPLITTER_HANDLE_PX if is_touch_density() else 6)
         self._body_splitter = splitter
 
         # ── Left: folder/file tree ────────────────────────────────────────────
@@ -1900,6 +1922,13 @@ class MetadataEditorPanel(
         self._table.setModel(self._proxy)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # Pinch to zoom the list — on a touch screen, on a touchpad (which
+        # Windows delivers as Ctrl+wheel), and with Ctrl+wheel on a mouse.
+        # The +/- buttons stay; this is the direct-manipulation equivalent.
+        self._zoom_persist_timer = QTimer(self)
+        self._zoom_persist_timer.setSingleShot(True)
+        self._zoom_persist_timer.timeout.connect(self._persist_zoom)
+        enable_pinch_zoom(self._table, self._on_pinch_zoom)
         # EditKeyPressed = F2 on Windows (Qt platform edit key) — matches
         # Win11 Explorer rename behavior.
         self._table.setEditTriggers(
@@ -5374,14 +5403,40 @@ class MetadataEditorPanel(
         new_val = max(50, min(200, self._zoom_level + delta))
         self._set_zoom(new_val)
 
-    def _set_zoom(self, pct: int) -> None:
-        self._zoom_level = pct
-        self._zoom_val_lbl.setText(f"{pct}%")
-        
+    def _on_pinch_zoom(self, factor: float) -> None:
+        """Apply one increment of a pinch (or Ctrl+wheel) to the list zoom.
+
+        A pinch arrives as a stream of small factors, so the fractional level
+        is carried separately: rounding each step to the integer percent the
+        control uses would quantise every increment to zero and the gesture
+        would do nothing at all.
+        """
+        current = getattr(self, "_zoom_fractional", None)
+        if current is None:
+            current = float(self._zoom_level)
+        current = max(50.0, min(200.0, current * factor))
+        self._zoom_fractional = current
+
+        target = int(round(current))
+        if target != self._zoom_level:
+            # Defer the config write: a pinch crosses many integer steps and
+            # each _set_zoom would otherwise be a separate disk write.
+            self._set_zoom(target, persist=False)
+            self._zoom_persist_timer.start(400)
+
+    def _persist_zoom(self) -> None:
         if self._cfg:
-            self._cfg.tag_editor_zoom = pct
+            self._cfg.tag_editor_zoom = self._zoom_level
             self._cfg.save()
-            
+
+    def _set_zoom(self, pct: int, *, persist: bool = True) -> None:
+        self._zoom_level = pct
+        self._zoom_fractional = float(pct)
+        self._zoom_val_lbl.setText(f"{pct}%")
+
+        if persist:
+            self._persist_zoom()
+
         font_size = max(6, int(10 * (pct / 100.0)))
         factor = pct / 100.0
         
@@ -5432,7 +5487,12 @@ class MetadataEditorPanel(
                 elif col == COL_END_GUTTER:
                     self._table.setColumnWidth(col, ExplorerDetailsView._END_EMPTY_GUTTER)
                 elif col == COL_CHECK:
-                    self._table.setColumnWidth(col, ExplorerDetailsView._CHECK_COLUMN_WIDTH)
+                    # The selection checkbox is how a finger picks several
+                    # rows, so under touch density it has to be a target a
+                    # finger can actually hit — 24 px is about 6 mm.
+                    self._table.setColumnWidth(
+                        col, touch_size(ExplorerDetailsView._CHECK_COLUMN_WIDTH)
+                    )
                 else:
                     self._table.setColumnWidth(col, max(10, int(base_w * factor)))
         finally:

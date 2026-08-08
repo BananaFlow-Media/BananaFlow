@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.i18n import t
+from ui.touch import apply_touch_support
 
 
 def _is_app_rtl() -> bool:
@@ -368,6 +369,12 @@ class StyledDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt override
         _apply_dialog_theme(self)
+        # Every dialog builds its body before it is shown, so this is the one
+        # point where the whole tree — scroll areas and context-menu policies
+        # alike — is guaranteed to exist. Doing it in the shared base is what
+        # keeps a new dialog touch-usable without its author knowing this
+        # module exists; apply_touch_support is idempotent across re-shows.
+        apply_touch_support(self)
         super().showEvent(event)
         QTimer.singleShot(0, self, lambda: center_on_parent(self))
 

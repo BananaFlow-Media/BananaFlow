@@ -37,6 +37,21 @@ First public BananaFlow release.
   arm64 DMG; SHA-256 checksums; CycloneDX SBOM; GitHub build
   attestations.
 * **Update check** against the BananaFlow GitHub Releases feed.
+* **Touch screen support**: drag to scroll any list, table or panel with
+  flick-to-coast; press and hold in place of a right-click for context
+  menus, and in place of a hover to read a control's tooltip without
+  activating it. The download queue's remove button no longer requires a
+  hover to appear, and queue reordering — previously drag-only — is
+  available from a card's menu. In the Tag Editor's file table a drag
+  scrolls rather than selecting, and a tap chooses a row only when the
+  finger stayed put. Several rows are selected the way File Explorer
+  does it — press, pause briefly, then drag a selection box — while
+  dragging straight away still scrolls and holding still opens the menu.
+  The Tag Editor's file list zooms by
+  pinching — on a touch screen, on a precision touchpad, or with Ctrl +
+  mouse wheel. An optional **Touch-Friendly Sizing**
+  setting enlarges controls, scrollbars and menu rows to finger-sized
+  targets.
 
 ### Known limitations
 

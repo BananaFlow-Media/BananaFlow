@@ -44,6 +44,10 @@ from qfluentwidgets import Theme, setTheme, setThemeColor
 from qfluentwidgets.common.config import qconfig
 
 from config import AppConfig
+from ui.touch import TOUCH_SCROLLBAR_PX, TOUCH_TARGET_PX
+# Aliased: ThemeManager has a method of the same name, and an unqualified
+# call inside it would read as recursion to anyone editing this later.
+from ui.touch import set_touch_density as _publish_touch_density
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Accent palette  (name → hex)
@@ -2497,6 +2501,85 @@ QDialog QPushButton#dialogInfoBtn {{
 
 
 # ------------------------------------------------------------------------------
+# Touch density overlay
+# ------------------------------------------------------------------------------
+
+def _build_touch_density_qss() -> str:
+    """Enlarge every control to a finger-sized target.
+
+    Appended *after* the theme stylesheet rather than folded into it, for two
+    reasons.  It has to compose with the high-contrast accessibility sheet,
+    which replaces the theme wholesale — a user who needs both must get both.
+    And it carries no colour at all, so it stays valid for dark, light and
+    accessibility variants alike and never has to be rebuilt per accent.
+
+    Only geometry appears here.  Anything sized with ``setFixedSize`` in
+    Python is out of reach of a stylesheet and is handled by
+    :func:`ui.touch.touch_size` at the widget instead.
+    """
+    target = TOUCH_TARGET_PX
+    bar = TOUCH_SCROLLBAR_PX
+    return f"""
+/* ── Touch density ─────────────────────────────────────────────────────────
+   Active only while the "touch_density" setting is on. Geometry only. */
+
+QPushButton, PushButton, PrimaryPushButton, QToolButton, ToolButton,
+QComboBox, QLineEdit, LineEdit, SearchLineEdit, QSpinBox, QDoubleSpinBox,
+QDateEdit, QTimeEdit, QDateTimeEdit {{
+    min-height: {target}px;
+}}
+
+QComboBox, QLineEdit, LineEdit, SearchLineEdit {{
+    padding-top: 4px;
+    padding-bottom: 4px;
+}}
+
+QMenu::item {{
+    padding: 12px 24px;
+    min-height: {target - 16}px;
+}}
+
+QTabBar::tab {{
+    min-height: {target}px;
+    padding-left: 16px;
+    padding-right: 16px;
+}}
+
+QHeaderView::section {{
+    min-height: {target - 8}px;
+}}
+
+QCheckBox::indicator, QRadioButton::indicator,
+QTreeView::indicator, QTableView::indicator {{
+    width: 24px;
+    height: 24px;
+}}
+
+/* A 6 px groove cannot be caught by a finger. The handle keeps a visible
+   minimum length so a long list still offers something to grab. */
+QScrollBar:vertical {{
+    width: {bar}px;
+}}
+QScrollBar::handle:vertical {{
+    min-height: {target}px;
+}}
+QScrollBar:horizontal {{
+    height: {bar}px;
+}}
+QScrollBar::handle:horizontal {{
+    min-width: {target}px;
+}}
+
+QSlider::handle:horizontal, QSlider::handle:vertical {{
+    width: 24px;
+    height: 24px;
+    margin: -8px 0;
+    border-radius: 12px;
+}}
+"""
+
+
+# ------------------------------------------------------------------------------
 # ThemeManager
 # ------------------------------------------------------------------------------
 _THEME_WINDOW_ATTRS: Final[tuple[str, str]] = ("navigationInterface", "stackedWidget")
@@ -2539,6 +2622,10 @@ class ThemeManager(QObject):
         # Accessibility (high-contrast) override. When non-empty it is
         # applied INSTEAD of the decorative theme QSS — see set_accessibility_qss.
         self._accessibility_qss = ""
+        # Touch density is appended to whichever of the two is active, so it
+        # composes with high contrast instead of competing with it.
+        self._touch_density = bool(getattr(config, "touch_density", False))
+        _publish_touch_density(self._touch_density)
         self._apply_fluent()
 
     # ---- Public API ----------------------------------------------------------
@@ -2616,6 +2703,25 @@ class ThemeManager(QObject):
         self._accessibility_qss = qss or ""
         self._apply_qss()
 
+    def set_touch_density(self, enabled: bool) -> None:
+        """Enable/disable finger-sized controls across the whole application.
+
+        Persists the choice, restyles immediately and emits ``theme_changed``
+        so the few controls whose size is fixed in Python (and therefore
+        unreachable from a stylesheet) can resize themselves on the same
+        signal. That is what makes the setting take effect without a restart.
+        """
+        enabled = bool(enabled)
+        if enabled == self._touch_density:
+            return
+        self._touch_density = enabled
+        _publish_touch_density(enabled)
+        if hasattr(self._config, "touch_density"):
+            self._config.touch_density = enabled
+            self._config.save()
+        self._apply_qss()
+        self.theme_changed.emit()
+
     def theme_display_label(self) -> str:
         return {"dark": "🌙  Dark", "light": "☀️  Light"}.get(self._current, "🌙  Dark")
 
@@ -2647,6 +2753,8 @@ class ThemeManager(QObject):
         if app is None:
             return
         qss = self._accessibility_qss or self._current_qss()
+        if self._touch_density:
+            qss = qss + _build_touch_density_qss()
         windows = self._theme_windows(app)
         if windows:
             if self._last_app_qss and app.styleSheet() == self._last_app_qss:
