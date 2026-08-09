@@ -46,11 +46,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _NATIVE_COMPONENTS = [
     {
         "name": "FFmpeg (Windows, LGPL)",
-        "version": "N-125628-ga5e6c0175a",
+        "version": "N-125994-gf944afd040",
         "license": "LGPL-2.1-or-later WITH LGPL-3.0-linking-exception",
         "source": "https://github.com/BtbN/FFmpeg-Builds",
-        "purl": "pkg:generic/ffmpeg@N-125628-ga5e6c0175a?download_url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-15-14-01/ffmpeg-N-125628-ga5e6c0175a-win64-lgpl.zip",
-        "hashes": {"SHA-256": "0c5b629d720a6f13cbc5f5a03b140dec6447aaf6b969220e483275912ebc6aed"},
+        "purl": "pkg:generic/ffmpeg@N-125994-gf944afd040?download_url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-08-13-06/ffmpeg-N-125994-gf944afd040-win64-lgpl.zip",
+        "hashes": {"SHA-256": "9df5ca19ba109855856375ad9db8b737bdbc23a3833d1b76d68bcc052c173ac9"},
     },
     {
         "name": "FFmpeg (macOS, LGPL)",

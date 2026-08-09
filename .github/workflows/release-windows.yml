@@ -133,9 +133,9 @@ jobs:
         # SHA-256, and update all three values together.
         shell: pwsh
         run: |
-          $tag = "autobuild-2026-07-15-14-01"
-          $asset = "ffmpeg-N-125628-ga5e6c0175a-win64-lgpl.zip"
-          $expectedSha256 = "0c5b629d720a6f13cbc5f5a03b140dec6447aaf6b969220e483275912ebc6aed"
+          $tag = "autobuild-2026-08-08-13-06"
+          $asset = "ffmpeg-N-125994-gf944afd040-win64-lgpl.zip"
+          $expectedSha256 = "9df5ca19ba109855856375ad9db8b737bdbc23a3833d1b76d68bcc052c173ac9"
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag/$asset"
 
           Invoke-WebRequest -Uri $url -OutFile ffmpeg-lgpl.zip
