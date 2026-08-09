@@ -47,7 +47,12 @@ jobs:
 
       - name: Run real-network tests
         id: network
-        run: python scripts/run_network_tests.py
+        run: |
+          # Kept on disk so the report step below can quote the failing
+          # assertions. pipefail: without it tee's exit code would mask a
+          # failing test run and this step would pass.
+          set -o pipefail
+          python scripts/run_network_tests.py 2>&1 | tee network-tests.log
 
       - name: Report a failure as an issue
         if: failure() && steps.network.outcome == 'failure'
@@ -61,22 +66,43 @@ jobs:
           existing=$(gh issue list --state all --search "$title in:title" \
             --json number,state --jq '.[0].number // empty')
 
-          body=$(printf '%s\n' \
-            "The weekly real-network run failed: $RUN_URL" \
-            "" \
-            "This checks BananaFlow's YouTube channel tab discovery against a real" \
-            "channel. A failure means one of:" \
-            "" \
-            "* YouTube changed something (DOM, consent flow, yt-dlp extractor" \
-            "  behaviour) and tab discovery is genuinely broken for users;" \
-            "* YouTube is blocking this GitHub Actions runner (CAPTCHA, IP" \
-            "  reputation), which is common and is NOT a product defect." \
-            "" \
-            "Reproduce from a real network before concluding which:" \
-            "" \
-            '```' \
-            "python scripts/run_network_tests.py" \
-            '```')
+          # Quote the failing assertions rather than only linking to them.
+          # Issue #20 collected three reports that listed YouTube-side causes
+          # only, and sent the investigation that way for weeks — while the
+          # assertion in the log plainly read "Chromium is not installed",
+          # a defect in this workflow's own environment.
+          summary=""
+          if [ -f network-tests.log ]; then
+            summary=$(sed -n '/short test summary info/,$p' network-tests.log | head -40)
+          fi
+          [ -n "$summary" ] || summary="(no pytest summary captured — read the run log)"
+
+          body=$(cat <<EOF
+          The weekly real-network run failed: $RUN_URL
+
+          \`\`\`
+          $summary
+          \`\`\`
+
+          This checks BananaFlow's YouTube channel tab discovery against a real
+          channel. A failure means one of:
+
+          * this runner's own environment is broken — Chromium missing or
+            invisible to Playwright, a dependency that will not install — which
+            is a CI defect, not a product defect. The summary above names the
+            failing assertion; read it before assuming anything about YouTube;
+          * YouTube is blocking this GitHub Actions runner (CAPTCHA, IP
+            reputation), which is common and is also NOT a product defect;
+          * YouTube changed something (DOM, consent flow, yt-dlp extractor
+            behaviour) and tab discovery is genuinely broken for users.
+
+          Reproduce from a real network before concluding which:
+
+          \`\`\`
+          python scripts/run_network_tests.py
+          \`\`\`
+          EOF
+          )
 
           if [ -n "$existing" ]; then
             gh issue reopen "$existing" || true
