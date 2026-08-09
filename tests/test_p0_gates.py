@@ -589,6 +589,201 @@ class TestGitHubRepoURLConsistency:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 11a³. The official website URL, everywhere it is stated
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestOfficialWebsiteURLConsistency:
+    """BananaFlow has exactly one official website, and this repository
+    must advertise that one and only that one.
+
+    ``utils/website.py::WEBSITE_URL`` is the source of truth. Python
+    callers import it, but four surfaces cannot: the Inno Setup script,
+    the wheel metadata in ``pyproject.toml``, the README badge, and the
+    prose in the community-health and user documentation. Those state
+    the URL literally, so they are pinned here — the same shape as
+    TestGitHubRepoURLConsistency guards the repository URL.
+
+    The site is bilingual and serves every page under a locale prefix
+    (``/he/…``, ``/en/…``), so a link that drops the prefix, or drops
+    the trailing slash the static export canonicalizes to, is a
+    redirect at best and a 404 at worst. ``site_url()`` is the only
+    thing that should ever build one.
+    """
+
+    EXPECTED_URL = "https://bananaflow.bananaflow-media.workers.dev/"
+
+    # (relative path, human label) — every live file that states the
+    # website URL as a literal string rather than importing it.
+    _FILES_WITH_WEBSITE_URL = [
+        ("packaging/bananaflow.iss", "Inno Setup WebsiteURL"),
+        ("pyproject.toml", "[project.urls] Homepage"),
+        ("README.md", "website badge and Download section"),
+        ("SUPPORT.md", "support channels"),
+        ("SECURITY.md", "official distribution channels"),
+        ("CONTRIBUTING.md", "repository scope"),
+        (".github/ISSUE_TEMPLATE/config.yml", "issue-template contact link"),
+        ("docs/user-guide/user-manual.md", "user manual"),
+        ("docs/user-guide/user-guide-he.md", "Hebrew user guide"),
+        ("docs/release/RELEASING.md", "post-publish website check"),
+        ("CHANGELOG.md", "website entry"),
+    ]
+
+    def _root(self):
+        from pathlib import Path
+        return Path(__file__).resolve().parents[1]
+
+    def test_website_module_is_the_source_of_truth(self):
+        from utils.website import (
+            FALLBACK_LOCALE,
+            SITE_DEFAULT_LOCALE,
+            SITE_LOCALES,
+            WEBSITE_URL,
+        )
+
+        assert WEBSITE_URL == self.EXPECTED_URL
+        assert WEBSITE_URL.startswith("https://"), "the site must be HTTPS-only"
+        assert WEBSITE_URL.endswith("/"), (
+            "WEBSITE_URL must keep its trailing slash so site_url() can "
+            "concatenate a path onto it"
+        )
+        # A bare origin, not a page: no path, query or fragment to
+        # accidentally inherit into every generated link.
+        from urllib.parse import urlsplit
+        parts = urlsplit(WEBSITE_URL)
+        assert (parts.path, parts.query, parts.fragment) == ("/", "", "")
+        assert SITE_DEFAULT_LOCALE in SITE_LOCALES
+        assert FALLBACK_LOCALE in SITE_LOCALES
+
+    def test_site_url_builds_locale_prefixed_absolute_urls(self):
+        from utils.website import SITE_LOCALES, SITE_PAGES, site_url
+
+        for locale in SITE_LOCALES:
+            for page in SITE_PAGES:
+                url = site_url(page, lang=locale)
+                assert url.startswith(f"{self.EXPECTED_URL}{locale}/"), (
+                    f"site_url({page!r}, {locale!r}) = {url!r} is missing the "
+                    f"locale prefix the site requires"
+                )
+                assert url.endswith("/"), (
+                    f"site_url({page!r}, {locale!r}) = {url!r} must end in a "
+                    f"slash; the static export canonicalizes to trailing slashes"
+                )
+                assert "//" not in url[len("https://"):], (
+                    f"site_url({page!r}, {locale!r}) = {url!r} has a doubled slash"
+                )
+
+        assert site_url("home", lang="en") == f"{self.EXPECTED_URL}en/"
+        assert site_url("download", lang="he") == f"{self.EXPECTED_URL}he/download/"
+        # Regional tags resolve to their base language.
+        assert site_url("faq", lang="en-US") == site_url("faq", lang="en")
+        assert site_url("faq", lang="he_IL") == site_url("faq", lang="he")
+
+    def test_site_url_never_emits_an_unsupported_locale(self):
+        from utils.website import FALLBACK_LOCALE, site_url
+
+        for unsupported in ("", "fr", "ru-RU", "zz"):
+            assert site_url("home", lang=unsupported) == (
+                f"{self.EXPECTED_URL}{FALLBACK_LOCALE}/"
+            ), f"{unsupported!r} must fall back rather than build a 404 link"
+
+    def test_unknown_page_is_a_loud_error_not_a_broken_link(self):
+        from utils.website import site_url
+
+        with pytest.raises(ValueError):
+            site_url("no-such-page")
+
+    def test_every_surface_that_states_the_url_states_the_current_one(self):
+        root = self._root()
+        missing = []
+        for rel_path, label in self._FILES_WITH_WEBSITE_URL:
+            text = (root / rel_path).read_text(encoding="utf-8")
+            if self.EXPECTED_URL not in text:
+                missing.append(f"{rel_path} ({label})")
+        assert not missing, (
+            f"These files no longer state the official website URL "
+            f"{self.EXPECTED_URL!r}: {missing}"
+        )
+
+    def test_no_tracked_file_advertises_a_different_bananaflow_site(self):
+        """A second workers.dev hostname would mean two 'official' sites."""
+        import re
+        import subprocess
+
+        root = self._root()
+        files = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True, text=True, check=True, cwd=root,
+        ).stdout.split("\n")
+
+        host_re = re.compile(r"https://([a-z0-9.\-]*\.workers\.dev)")
+        expected_host = "bananaflow.bananaflow-media.workers.dev"
+        offenders = []
+        for name in filter(None, files):
+            path = root / name
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for host in host_re.findall(text):
+                if host != expected_host:
+                    offenders.append(f"{name}: {host}")
+        assert not offenders, (
+            f"Only {expected_host!r} is BananaFlow's official website; found: "
+            f"{offenders}"
+        )
+
+    def test_the_installer_uses_the_website_for_publisher_and_support(self):
+        """Apps & features shows these; they should lead to the site,
+        not to a source-code host a non-technical user cannot act on."""
+        root = self._root()
+        iss = (root / "packaging" / "bananaflow.iss").read_text(encoding="utf-8")
+
+        assert "AppPublisherURL={#WebsiteURL}" in iss
+        assert "AppSupportURL={#WebsiteHelpURL}" in iss
+        # Updates still point at the Releases feed that actually hosts
+        # the artifacts.
+        assert "AppUpdatesURL={#AppURL}/releases" in iss
+
+    def test_packaging_metadata_declares_the_website_as_homepage(self):
+        root = self._root()
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10
+            pytest.skip("tomllib requires Python 3.11+")
+
+        data = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        urls = data["project"]["urls"]
+        assert urls["Homepage"] == self.EXPECTED_URL
+        assert urls["Source"] == "https://github.com/BananaFlow-Media/BananaFlow"
+        # The sub-table must not have swallowed the rest of [project]:
+        # if it had, these scalar keys would be missing.
+        assert data["project"]["name"] == "bananaflow"
+        assert data["project"]["dependencies"]
+
+    def test_the_app_offers_the_website_in_both_languages(self):
+        """The About card is the in-app entry point to the site, and the
+        strings behind it must exist in English and Hebrew."""
+        from ui.i18n import TRANSLATIONS
+
+        for lang in ("en", "he"):
+            for key in ("about_website", "about_website_desc", "about_website_link"):
+                assert TRANSLATIONS[lang].get(key), (
+                    f"missing translation {key!r} for {lang!r}"
+                )
+
+        settings_panel = (
+            self._root() / "ui" / "panels" / "settings_panel.py"
+        ).read_text(encoding="utf-8")
+        assert "from utils.website import site_url" in settings_panel
+        assert 'site_url("home")' in settings_panel, (
+            "the About card must resolve the URL through utils.website, not "
+            "hard-code it"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 11b. Version consistency across all declared sources
 # ──────────────────────────────────────────────────────────────────────────────
 

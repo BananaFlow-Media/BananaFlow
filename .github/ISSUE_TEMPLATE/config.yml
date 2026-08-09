@@ -1,5 +1,15 @@
 blank_issues_enabled: false
 contact_links:
+  - name: 🌐 BananaFlow official website
+    url: https://bananaflow.bananaflow-media.workers.dev/
+    about: >-
+      Downloads, Help, FAQ and Support pages in English and Hebrew. Start
+      here if you are using BananaFlow rather than developing it.
+  - name: ❓ Help and FAQ (before opening an Issue)
+    url: https://bananaflow.bananaflow-media.workers.dev/en/faq/
+    about: >-
+      The FAQ answers the most common install, download and format
+      questions — including the Windows SmartScreen warning.
   - name: 🔒 Report a security vulnerability
     url: https://github.com/BananaFlow-Media/BananaFlow/security/advisories/new
     about: >-

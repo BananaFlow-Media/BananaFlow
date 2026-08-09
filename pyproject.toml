@@ -47,6 +47,24 @@ dependencies = [
     "playwright>=1.42.0",
 ]
 
+# Project URLs surfaced by pip (`pip show`), by PyPI-style indexes and
+# by anything else that reads wheel metadata. `Homepage` is BananaFlow's
+# official website; every URL here is pinned to the same canonical
+# values as `utils/website.py` by
+# tests/test_p0_gates.py::TestOfficialWebsiteURLConsistency.
+#
+# This table must stay below every scalar key of [project]: a sub-table
+# ends the parent table in TOML, so anything placed after it would be
+# parsed as a URL entry.
+[project.urls]
+Homepage = "https://bananaflow.bananaflow-media.workers.dev/"
+Download = "https://bananaflow.bananaflow-media.workers.dev/en/download/"
+Documentation = "https://bananaflow.bananaflow-media.workers.dev/en/help/"
+Support = "https://bananaflow.bananaflow-media.workers.dev/en/support/"
+Source = "https://github.com/BananaFlow-Media/BananaFlow"
+Issues = "https://github.com/BananaFlow-Media/BananaFlow/issues"
+Changelog = "https://github.com/BananaFlow-Media/BananaFlow/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

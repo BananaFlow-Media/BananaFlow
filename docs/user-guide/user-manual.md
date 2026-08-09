@@ -5,6 +5,16 @@ desktop app for downloading, converting and tagging audio and video from
 YouTube, YouTube Music and Spotify. For a quick overview, start at the
 repository [README](../../README.md).
 
+BananaFlow's official website is
+<https://bananaflow.bananaflow-media.workers.dev/>. It is the official
+[download page](https://bananaflow.bananaflow-media.workers.dev/en/download/)
+and carries shorter, task-oriented
+[Help](https://bananaflow.bananaflow-media.workers.dev/en/help/) and
+[FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) pages in
+English and Hebrew — including the Windows SmartScreen walkthrough. This
+manual is the exhaustive reference behind them. Inside the app the same
+link is one click away under **Settings ▸ About ▸ Official website**.
+
 ---
 
 ## Features at a Glance

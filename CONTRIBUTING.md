@@ -3,6 +3,26 @@
 Thanks for helping make BananaFlow better. This project aims to be a
 practical, community-friendly open-source desktop app.
 
+## Scope of this repository
+
+This repository is the BananaFlow **application** — the PySide6 GUI, the
+CLI, the download/convert/tag engines and their packaging.
+
+BananaFlow's official website, <https://bananaflow.bananaflow-media.workers.dev/>,
+is a separate project with its own repository and its own deployment
+(a statically exported site on Cloudflare Workers). Changes to the site's
+pages, wording or design are not made here. If you spot a problem on the
+website — a wrong download link, an out-of-date FAQ answer, a broken page —
+open an Issue in **this** tracker anyway and label it as a website
+problem; a maintainer routes it to the site project.
+
+What *is* in scope here is every place the application points at the
+site. `utils/website.py` is the single source of truth for the site's
+address, and `tests/test_p0_gates.py::TestOfficialWebsiteURLConsistency`
+fails the build if any other file (installer script, packaging metadata,
+docs) drifts from it. Never hard-code the site URL in a new file without
+adding it to that gate.
+
 ## Prerequisites
 
 | Requirement | Version |

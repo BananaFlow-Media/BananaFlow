@@ -66,6 +66,25 @@ These controls reduce risk but cannot guarantee that every future secret shape
 or third-party error message is recognized. Treat logs and diagnostics as
 potentially sensitive and inspect them before sharing.
 
+## Official distribution channels
+
+BananaFlow has exactly two official channels, and any other site offering
+"BananaFlow" downloads is not ours:
+
+- the official website, <https://bananaflow.bananaflow-media.workers.dev/>
+  (its download pages link to the release assets below and publish the
+  matching checksums); and
+- the GitHub Releases of this repository,
+  <https://github.com/BananaFlow-Media/BananaFlow/releases>, which host
+  the artifacts themselves.
+
+The website publishes its own
+[security page](https://bananaflow.bananaflow-media.workers.dev/en/security/)
+for end users. A vulnerability **in the website itself** — as opposed to
+in the application — may be reported either through that page's private
+email route or through this repository's private advisory form; both
+reach the same maintainer. As here, never open a public Issue for one.
+
 ## Updates, signing, and checksums
 
 The app checks the public GitHub Releases API for application updates when

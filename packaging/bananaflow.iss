@@ -8,6 +8,17 @@
 #define AppName        "BananaFlow"
 #define AppPublisher   "BananaFlow Media"
 #define AppURL         "https://github.com/BananaFlow-Media/BananaFlow"
+; BananaFlow's official website. This is what Windows shows as the
+; publisher/help link in Apps & features, and what the Start-menu
+; "Official website" shortcut opens. Kept in sync with
+; utils/website.py::WEBSITE_URL by
+; tests/test_p0_gates.py::TestOfficialWebsiteURLConsistency.
+#define WebsiteURL     "https://bananaflow.bananaflow-media.workers.dev/"
+; The installer offers Hebrew and English, but a shortcut is a single
+; static URL, so it points at the site's Hebrew entry page — the same
+; page a bare visit to the site redirects to (/ -> 308 -> /he/).
+#define WebsiteHomeURL "https://bananaflow.bananaflow-media.workers.dev/he/"
+#define WebsiteHelpURL "https://bananaflow.bananaflow-media.workers.dev/he/help/"
 #define AppExeName     "bananaflow.exe"
 #define AppCliExeName  "bananaflow-cli.exe"
 ; A brand-new installation identity: BananaFlow installs side-by-side
@@ -47,8 +58,8 @@ AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-AppPublisherURL={#AppURL}
-AppSupportURL={#AppURL}/issues
+AppPublisherURL={#WebsiteURL}
+AppSupportURL={#WebsiteHelpURL}
 AppUpdatesURL={#AppURL}/releases
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
@@ -93,6 +104,11 @@ Source: "{#RepoRoot}README.md";             DestDir: "{app}"; Flags: ignoreversi
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\{#AppName} (CLI)"; Filename: "{app}\{#AppCliExeName}"
+; Internet shortcut: Inno writes a .url file when Filename is a URL.
+; The label stays ASCII on purpose — this script has no BOM, so ISCC
+; would read a Hebrew {cm:} custom message as ANSI and garble it in the
+; Start menu. The page it opens is Hebrew regardless.
+Name: "{group}\{#AppName} Website"; Filename: "{#WebsiteHomeURL}"
 ; Name: "{group}\Install Playwright"; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\install_playwright.ps1"""
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon

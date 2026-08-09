@@ -56,6 +56,7 @@ from ui.theme_manager import ACCENT_PALETTE, ThemeManager
 from utils.cookie_validator import check_cookies_valid, merge_cookies_file
 from utils.paths import get_app_cookies_path
 from utils.security import delete_stored_auth_data
+from utils.website import site_url
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -681,6 +682,18 @@ class SettingsPanel(QWidget):
 
         # ── 9. About ───────────────────────────────────────────────────────────
         about_grp = SettingCardGroup(t("about"), content)
+        # The official website first: it is where a user goes for
+        # downloads, help, the FAQ and support. The URL is resolved from
+        # utils.website so the link opens the site in the language the
+        # app is currently running in.
+        about_grp.addSettingCard(HyperlinkCard(
+            url=site_url("home"),
+            text=t("about_website_link"),
+            icon=FluentIcon.GLOBE,
+            title=t("about_website"),
+            content=t("about_website_desc"),
+            parent=about_grp,
+        ))
         about_grp.addSettingCard(HyperlinkCard(
             url="https://github.com/BananaFlow-Media/BananaFlow",
             text="GitHub",

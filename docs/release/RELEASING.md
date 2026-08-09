@@ -62,6 +62,19 @@ representation drifts. To bump a version:
    Prereleases are marked **pre-release**.
 6. **Publish:** the maintainer presses Publish. Nothing publishes
    automatically.
+7. **Website follow-up (after publishing):** the official website —
+   <https://bananaflow.bananaflow-media.workers.dev/> — builds its
+   download pages from a verified snapshot of *this* repository's
+   GitHub Releases. The snapshot is refreshed by a scheduled job in the
+   website project and only promotes a release once at least one
+   channel verifies (asset names, sizes and published SHA-256 values
+   must match), so a freshly published release does not appear on the
+   site instantly. Before announcing a release, confirm that
+   <https://bananaflow.bananaflow-media.workers.dev/en/download/> offers
+   the new version and that its checksum matches `SHA256SUMS*.txt`. If
+   it still shows the previous version some hours later, the snapshot
+   refresh failed verification — that is a website-project issue, not a
+   reason to re-tag here.
 
 ## Rollback
 
