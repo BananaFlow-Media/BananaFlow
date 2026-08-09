@@ -867,12 +867,65 @@ class DownloadController(QObject):
 
         Symmetric with global_pause, which already covers every running
         worker: a track the user resumed individually lives in its own
-        single-job worker and was previously left running by Cancel All."""
+        single-job worker and was previously left running by Cancel All.
+
+        Paused work is abandoned too, BEFORE the workers are cancelled --
+        see _discard_paused_requests. Cancel All means "throw this batch
+        away"; leaving the paused snapshots behind kept offering Resume for
+        tracks the user had just cancelled, and after a Global Pause it left
+        them behind completely untouched, since by then no worker is running
+        for this to reach at all."""
         self._set_termination_intent(BatchOutcome.CANCELLED_BY_USER)
+        self._discard_paused_requests()
         self._engine.cancel_all()
         for worker in [self._dl_worker, *self._resume_workers]:
             if worker is not None and worker.isRunning():
                 worker.cancel()
+
+    def _discard_paused_requests(self) -> None:
+        """Cancel All's half of the pause/cancel split: throw every paused
+        snapshot away, mark its card cancelled, and release what is holding
+        its partial download on disk.
+
+        Runs BEFORE the workers are cancelled, while the orchestrator that
+        owns each job is still alive. cancel_paused_job takes the pause's
+        outcome claim back and moves the job to CANCELLED in the batch
+        aggregator; done afterwards, the batch would already have finalised
+        and the job would stay PAUSED in a snapshot nobody can correct.
+
+        Workspaces are removed here ONLY for jobs no running worker owns any
+        more -- the Global-Pause-then-Cancel-All case, where nothing else
+        will ever clean up after them. For a job whose worker is still
+        winding down, removal is left to _cleanup_cancelled_batch once that
+        worker has actually finished: deleting a .part file out from under a
+        job that is still shutting down is the one thing this must not do.
+        """
+        if not self._paused_requests:
+            return
+        from utils.paths import remove_workspace_tree
+
+        abandoned_containers: set[Path] = set()
+        for key, req in list(self._paused_requests.items()):
+            worker = self._worker_for_key(key)
+            orch = getattr(worker, "_orch", None) if worker is not None else None
+            if orch is not None:
+                orch.cancel_paused_job(key)
+            card = self._key_to_card.get(key)
+            if card is not None:
+                # Set directly rather than relying on the orchestrator's
+                # "cancelled" callback: that arrives over a queued signal
+                # from a worker that is about to be torn down, and for a
+                # batch that already finished there is no worker to send it.
+                card.set_status("cancelled")
+            still_owned = worker is not None and worker.isRunning()
+            if not still_owned and req.workspace_dir:
+                # req.workspace_dir is this job's per-job subdir
+                # (<container>/<job_key>); its parent is the batch container.
+                abandoned_containers.add(Path(req.workspace_dir).parent)
+        self._paused_requests.clear()
+        self._persist_paused_state()  # nothing paused left -> clears the store
+        for container in abandoned_containers:
+            remove_workspace_tree(container)
 
     def pause_track(self, card) -> bool:
         """Save the in-flight request for this card and cancel only that

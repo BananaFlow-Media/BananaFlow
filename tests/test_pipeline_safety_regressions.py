@@ -78,7 +78,14 @@ def test_pause_claim_suppresses_later_phase_and_heartbeat_updates():
     orch._enter_phase(key, TrackPhase.STARTING)
     orch._emit_track_position(key)
 
-    assert callbacks.events == []
+    # The pause itself publishes ONE whole-batch snapshot, so the footer sees
+    # the paused job immediately rather than at the end of the batch. What
+    # must stay silent is this track's own repaints: every later phase and
+    # heartbeat update for a paused key is suppressed.
+    batch_snapshots = [e for e in callbacks.events if e[0] == "on_batch_snapshot"]
+    assert len(batch_snapshots) == 1
+    assert batch_snapshots[0][1].paused == 1
+    assert [e for e in callbacks.events if e[0] != "on_batch_snapshot"] == []
     assert key not in orch._job_phase
     assert key in orch._phase_suppressed_keys
 

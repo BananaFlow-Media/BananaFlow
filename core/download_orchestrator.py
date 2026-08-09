@@ -393,6 +393,40 @@ class DownloadOrchestrator:
         self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
         self._emit_job_count()
 
+    def cancel_paused_job(self, key: str) -> bool:
+        """Turn a job this orchestrator is holding as PAUSED into a real
+        cancellation. Returns whether anything changed.
+
+        Cancel All abandons paused work; Global Pause preserves it. That
+        difference is intent, and intent lives in DownloadController — the
+        orchestrator cannot tell the two apart on its own (both cancel the
+        engine), which is exactly why the finalisation sweep leaves PAUSED
+        jobs alone and why abandoning them has to be said explicitly, here.
+
+        Takes back the outcome claim before touching anything: the claim is
+        what stops the job's own pool thread from completing it, so handing
+        it to "terminal" first means the cancellation cannot race a
+        completion that the pause was holding off.
+        """
+        lock = self._job_locks.get(key)
+        if lock is None:
+            return False
+        with lock:
+            if self._job_outcomes.get(key) != "paused":
+                # Never claimed by a pause — either still live (Cancel All's
+                # normal path already handles it) or already terminal.
+                return False
+            if is_terminal_state(self._aggregator.job_state(key)):
+                return False
+            self._job_outcomes[key] = "terminal"
+            self._aggregator.cancel(key)
+        with self._progress_lock:
+            self._cancelled += 1
+        self._safe_cb("on_track_status", key, "cancelled")
+        self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+        self._emit_job_count()
+        return True
+
     def _emit_job_count(self) -> None:
         """Publish the x-of-total counter as *settled work*, not successes.
 
@@ -473,12 +507,34 @@ class DownloadOrchestrator:
             with self._phase_state_lock:
                 self._phase_suppressed_keys.add(key)
                 self._job_phase.pop(key, None)
+            # PAUSED is recorded HERE, under the same lock and in the same
+            # step as the claim — not by the job's own thread once it
+            # notices the cancel. That thread reaches _mark_cancelled, sees
+            # the pause already owns the outcome and correctly backs off
+            # without touching the aggregator, so nothing else ever records
+            # the state: the job sat at QUEUED/ACTIVE for the rest of the
+            # batch. A whole-batch pause papered over it (the finalisation
+            # sweep at least moved it to something terminal, if the wrong
+            # thing), but a single-track pause does not set the engine-wide
+            # cancel flag, so that sweep never runs and nothing repaired it
+            # at all — the batch could reach a natural end still holding a
+            # non-terminal job, with its ETA counting work that was never
+            # coming and its x-of-total stuck one short.
+            self._aggregator.pause(key)
             # snapshot_copy, not dataclasses.replace: replace() rebuilds
             # through __init__ and silently drops the init=False
             # output-path tracker, which is what a job paused in the
             # instant between yt-dlp finishing and its checkpoint being
             # written has to keep in order to resume at all.
-            return state, req.snapshot_copy()
+            snapshot = req.snapshot_copy()
+        # Outside the job lock: this runs on the UI thread and a callback is
+        # free to re-enter the orchestrator for the same key (the per-job
+        # lock is a plain Lock, not an RLock, so doing this above would be a
+        # deadlock). The counter is deliberately NOT re-emitted — paused work
+        # is still outstanding as far as x-of-total is concerned, because a
+        # Resume will run it (see the finalisation sweep in run_batch).
+        self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+        return state, snapshot
 
     # ── Main entry point (blocking — call from background thread) ─────────────
 
@@ -885,6 +941,11 @@ class DownloadOrchestrator:
                 # "cancelled" here would overwrite that label a moment after
                 # the pause set it (a whole-batch pause cancels the engine,
                 # so every paused job lands in this loop).
+                #
+                # cancel_outstanding no longer returns PAUSED jobs at all, so
+                # this now only catches the narrow race where a pause claim
+                # lands between that sweep and this loop. The claim, not the
+                # aggregator, is the authority on which label the card gets.
                 if self._job_outcomes.get(key) == "paused":
                     continue
                 self._safe_cb("on_track_status", key, "cancelled")

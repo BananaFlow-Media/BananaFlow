@@ -615,9 +615,21 @@ class BatchProgressAggregator:
         self._terminate(key, JobState.CANCELLED)
 
     def pause(self, key: str) -> None:
-        """Pause preserves the job's accumulated bytes but stops its speed."""
+        """Pause preserves the job's accumulated bytes but stops its speed.
+
+        A job that already reached a terminal state is left alone, for the
+        same reason _terminate refuses to move one: pausing is decided
+        against a state read that a job's own pool thread can invalidate a
+        microsecond later, and resurrecting a COMPLETED job as PAUSED would
+        put finished work back into the outstanding set and offer the user a
+        Resume for a file that is already correct on disk. The caller that
+        wins the pause claim (DownloadOrchestrator.live_request_snapshot)
+        checks terminality under the job's own lock first; this is the
+        aggregator's own guarantee, independent of that."""
         with self._lock:
             job = self._jobs.setdefault(key, JobProgress(key=key))
+            if job.state in _TERMINAL:
+                return
             job.state = JobState.PAUSED
             job.speed_bps = 0.0
             job.eta_seconds = None
@@ -650,11 +662,26 @@ class BatchProgressAggregator:
             self._recompute_speed_locked()
 
     def cancel_outstanding(self) -> list[str]:
-        """Cancel every non-terminal job and return the keys that changed."""
+        """Cancel every job this batch still has outstanding and return the
+        keys that changed.
+
+        PAUSED is deliberately NOT outstanding — the same rule the ETA and
+        throughput calculations already apply (see _eta_details_locked): a
+        paused job is not work this batch will get through, it is work a
+        later Resume will run as a new batch. Sweeping it to CANCELLED here
+        is what made a whole-batch pause report `paused=0, cancelled=N`
+        while every card in the UI read "paused": a Global Pause cancels the
+        engine, so every job it captured lands in this sweep.
+
+        Abandoning paused work outright is Cancel All's job, and it is
+        expressed by cancelling those jobs individually BEFORE the sweep
+        (DownloadOrchestrator.cancel_paused_job) — by which point they are
+        terminal and this skips them anyway. The distinction between a pause
+        and a cancel is intent, and intent lives above the aggregator."""
         changed: list[str] = []
         with self._lock:
             for key, job in self._jobs.items():
-                if job.state in _TERMINAL:
+                if job.state in _TERMINAL or job.state == JobState.PAUSED:
                     continue
                 job.state = JobState.CANCELLED
                 job.speed_bps = 0.0
