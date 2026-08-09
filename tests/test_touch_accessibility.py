@@ -681,7 +681,12 @@ class TestPinchZoom:
             0.25,
             QPointF(0, 0),
         )
-        QApplication.sendEvent(view.viewport(), event)
+        # Qt's offscreen macOS platform sends this synthetic event through its
+        # gesture manager and drops it before installed event filters see it.
+        # Exercise the application filter directly; real native gestures still
+        # arrive through Qt's normal event-filter path.
+        zoom_filter = view.findChild(touch._PinchZoomFilter)
+        assert zoom_filter.eventFilter(view.viewport(), event)
         # value() is a delta around zero, not a scale factor.
         assert factors and abs(factors[0] - 1.25) < 1e-6
 
