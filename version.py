@@ -37,7 +37,7 @@ VERSION_INFO: tuple[int, int, int] = (1, 0, 0)
 
 # Pre-release suffix in SemVer notation, or None for a stable release.
 # Examples: "beta.1", "beta.2", "rc.1".
-PRERELEASE: str | None = "beta.1"
+PRERELEASE: str | None = None
 
 # Public SemVer string: tags (v-prefixed), artifact names, updater,
 # About dialog, CLI --version.

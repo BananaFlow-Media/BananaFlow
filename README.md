@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/BananaFlow-Media/BananaFlow/actions/workflows/tests.yml/badge.svg)](https://github.com/BananaFlow-Media/BananaFlow/actions/workflows/tests.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Status: Beta](https://img.shields.io/badge/status-pre--release%20Beta-orange.svg)](CHANGELOG.md)
+[![Status: Stable](https://img.shields.io/badge/status-Stable-success.svg)](CHANGELOG.md)
 
 **Download, convert, tag — YouTube, YouTube Music, and Spotify in one app.**
 

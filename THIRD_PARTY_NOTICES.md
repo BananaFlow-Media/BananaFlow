@@ -9,7 +9,7 @@ This file is a best-effort open-source release compliance document. It
 is not legal advice and does not imply that a lawyer has approved a
 release.
 
-Version reference: BananaFlow `1.0.0-beta.1` (see [`version.py`](version.py)).
+Version reference: BananaFlow `1.0.0` (see [`version.py`](version.py)).
 
 ---
 

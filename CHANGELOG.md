@@ -4,7 +4,7 @@ All notable changes to BananaFlow are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org/).
 
-## [1.0.0-beta.1] — unreleased
+## [1.0.0] — 2026-08-09
 
 First public BananaFlow release.
 
@@ -59,7 +59,7 @@ First public BananaFlow release.
   requires right-click → Open. Verify downloads against the published
   checksums (see `SECURITY.md`).
 * macOS support is experimental; Linux is source-install only.
-* This beta starts with a fresh application-data directory. It does not
+* This release starts with a fresh application-data directory. It does not
   read or migrate configuration, download history, tag backups, presets
   or cookies created by any software previously installed on the
   machine.
