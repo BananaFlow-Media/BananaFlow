@@ -2,6 +2,13 @@
 
 ברוך הבא ל-BananaFlow! מדריך זה נכתב בצורה מפורטת במיוחד, תוך מתן דגש על מיקום האלמנטים על המסך ותיאורם המילולי, כדי לאפשר לך להשתמש בתוכנה בצורה מלאה גם ללא צורך לראות את הממשק הויזואלי.
 
+האתר הרשמי של BananaFlow הוא
+<https://bananaflow.bananaflow-media.workers.dev/he/>. שם נמצאים
+[עמוד ההורדה הרשמי](https://bananaflow.bananaflow-media.workers.dev/he/download/),
+[עמוד העזרה](https://bananaflow.bananaflow-media.workers.dev/he/help/)
+ו[שאלות נפוצות](https://bananaflow.bananaflow-media.workers.dev/he/faq/)
+בעברית ובאנגלית. בתוך התוכנה הקישור זמין תחת **הגדרות ◂ אודות ◂ האתר הרשמי**.
+
 ---
 
 ## פרק 1: מבנה התוכנה והניווט הראשי

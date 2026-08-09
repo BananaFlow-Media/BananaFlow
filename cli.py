@@ -180,6 +180,7 @@ class TerminalCallbacks:
 
 def build_parser() -> argparse.ArgumentParser:
     from version import FULL_VERSION, PRODUCT_NAME
+    from utils.website import site_url
 
     p = argparse.ArgumentParser(
         prog="bananaflow-cli",
@@ -193,11 +194,19 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s URL --list\n"
             "  %(prog)s --version\n"
             "  %(prog)s --doctor\n"
+            "\n"
+            f"Official website: {site_url('home')}\n"
+            f"Help and FAQ:     {site_url('help')}\n"
         ),
     )
     p.add_argument(
         "--version",
         action="version",
+        # Deliberately one line: the Windows release workflow runs the
+        # packaged `bananaflow-cli.exe --version` and matches the whole
+        # captured output against the build version, so a second line
+        # here would fail the release gate. The website is advertised in
+        # --help and in the --doctor header instead.
         version=f"%(prog)s {FULL_VERSION}",
     )
     p.add_argument(
@@ -324,11 +333,13 @@ def _run_doctor(args) -> int:
     from error_handler import run_preflight
     from core.youtube_doctor import run_youtube_doctor
     from version import FULL_VERSION, PRODUCT_NAME
+    from utils.website import site_url
 
     output_dir = args.output if args.output else ""
     cookies_file = args.cookies if args.cookies else ""
 
     print(f"{PRODUCT_NAME} v{FULL_VERSION}  —  diagnostics")
+    print(f"Help: {site_url('help')}")
     print("=" * 60)
     result = run_preflight(output_dir=output_dir, cookies_file=cookies_file)
     print(redact_text(result.detail_text()))

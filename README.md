@@ -1,10 +1,18 @@
 # BananaFlow
 
+[![Website](https://img.shields.io/badge/website-bananaflow.bananaflow--media.workers.dev-1F1F1F.svg)](https://bananaflow.bananaflow-media.workers.dev/)
 [![Tests](https://github.com/BananaFlow-Media/BananaFlow/actions/workflows/tests.yml/badge.svg)](https://github.com/BananaFlow-Media/BananaFlow/actions/workflows/tests.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Status: Stable](https://img.shields.io/badge/status-Stable-success.svg)](CHANGELOG.md)
 
 **Download, convert, tag — YouTube, YouTube Music, and Spotify in one app.**
+
+**Official website: <https://bananaflow.bananaflow-media.workers.dev/>** —
+downloads, help, FAQ and support, in
+[English](https://bananaflow.bananaflow-media.workers.dev/en/) and
+[Hebrew](https://bananaflow.bananaflow-media.workers.dev/he/). This
+repository is the application's source; the website is BananaFlow's
+public front door and is maintained as a separate project.
 
 BananaFlow is a desktop application for downloading audio and video from
 **YouTube**, **YouTube Music**, and **Spotify**, with a full batch
@@ -20,8 +28,15 @@ first-class, fully mirrored RTL layout, not a translated afterthought.
 
 ## Download
 
-Windows installer, Windows portable ZIP and a macOS DMG are published on
-the **[Releases page](https://github.com/BananaFlow-Media/BananaFlow/releases)**
+The official download page is
+**<https://bananaflow.bananaflow-media.workers.dev/en/download/>**
+([Hebrew](https://bananaflow.bananaflow-media.workers.dev/he/download/)) —
+it picks the right package for your platform and links the matching
+checksum.
+
+The files themselves are the GitHub Release assets: Windows installer,
+Windows portable ZIP and a macOS DMG are published on the
+**[Releases page](https://github.com/BananaFlow-Media/BananaFlow/releases)**
 with SHA-256 checksums and an SBOM.
 
 > **Note:** the binaries are currently **unsigned**. Windows SmartScreen
@@ -97,6 +112,8 @@ full development workflow.
 
 | Document | Purpose |
 |---|---|
+| [Official website](https://bananaflow.bananaflow-media.workers.dev/) | Downloads, help, FAQ, support, privacy and terms |
+| [Website help](https://bananaflow.bananaflow-media.workers.dev/en/help/) · [FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) | End-user help pages (English / [Hebrew](https://bananaflow.bananaflow-media.workers.dev/he/help/)) |
 | [User Manual](docs/user-guide/user-manual.md) | Complete usage guide |
 | [Hebrew user guide](docs/user-guide/user-guide-he.md) | מדריך למשתמש בעברית |
 | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | Code layout for contributors |
@@ -132,8 +149,12 @@ your own use — see [docs/legal/acceptable-use.md](docs/legal/acceptable-use.md
 
 ## Contributing and support
 
+* Using the app → the website's
+  [Help](https://bananaflow.bananaflow-media.workers.dev/en/help/) and
+  [FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) pages
 * Bugs and feature requests → [Issues](https://github.com/BananaFlow-Media/BananaFlow/issues)
-* Questions and help → [SUPPORT.md](SUPPORT.md)
+* Questions and help → [SUPPORT.md](SUPPORT.md) and the website's
+  [Support page](https://bananaflow.bananaflow-media.workers.dev/en/support/)
 * Security reports → [SECURITY.md](SECURITY.md) (never open a public issue for a vulnerability)
 * Development workflow → [CONTRIBUTING.md](CONTRIBUTING.md); community
   standards → [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md);

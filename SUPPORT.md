@@ -3,9 +3,21 @@
 This document explains where to get help with BananaFlow, and
 where **not** to post certain kinds of information.
 
+The official website — <https://bananaflow.bananaflow-media.workers.dev/> —
+is the first stop for anyone using the app rather than developing it. It
+carries the end-user
+[Help](https://bananaflow.bananaflow-media.workers.dev/en/help/),
+[FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) and
+[Support](https://bananaflow.bananaflow-media.workers.dev/en/support/)
+pages in English and Hebrew. This document covers the developer-facing
+channels in this repository.
+
 ## Before asking
 
-1. Check `README.md`'s "Troubleshooting" section for the most common
+1. Check the website's
+   [Help](https://bananaflow.bananaflow-media.workers.dev/en/help/) and
+   [FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) pages,
+   and `README.md`'s "Troubleshooting" section, for the most common
    issues (FFmpeg not found, Playwright/Chromium missing, PO Token
    errors).
 2. Run `bananaflow-cli --doctor` (or the in-app "YouTube Doctor" from
@@ -18,7 +30,10 @@ where **not** to post certain kinds of information.
 
 ## Where to ask
 
-* **"How do I...?" / usage questions** → [Discussions → Help](../../discussions/categories/help).
+* **"How do I...?" / usage questions** → the website's
+  [Help](https://bananaflow.bananaflow-media.workers.dev/en/help/) and
+  [FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) pages
+  first, then [Discussions → Help](../../discussions/categories/help).
 * **Something is broken** → open an Issue using the *Bug Report* template
   (or a more specific template — *Installation Failure*, *Download
   Failure*, *Site Compatibility*, *Converter Problem*, *Tag Editor

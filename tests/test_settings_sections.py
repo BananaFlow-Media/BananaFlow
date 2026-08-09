@@ -152,6 +152,33 @@ class TestSettingsSections:
                 f"{key}: Hebrew value looks untranslated"
             )
 
+    @pytest.mark.parametrize("lang", ["en", "he"])
+    def test_about_links_to_the_official_website_in_the_ui_language(
+        self, tmp_path, monkeypatch, lang
+    ):
+        """Settings ▸ About is the app's entry point to the official
+        website, and the site serves each language under its own prefix —
+        a Hebrew UI must not send the user to the English site."""
+        from qfluentwidgets import HyperlinkButton
+
+        from utils.website import site_url
+
+        _app, panel = _make_panel(tmp_path, monkeypatch, lang=lang)
+        try:
+            links = {
+                b.url.toString()
+                for b in panel._section_pages["expert"].findChildren(HyperlinkButton)
+            }
+            assert site_url("home", lang=lang) in links, (
+                f"the About group must link to the {lang!r} site; found {links}"
+            )
+            # The source repository link stays alongside it.
+            assert "https://github.com/BananaFlow-Media/BananaFlow" in links
+        finally:
+            panel.deleteLater()
+            from ui.i18n import set_language
+            set_language("en")
+
     def test_spotify_proxy_secret_is_masked(self, tmp_path, monkeypatch):
         from PySide6.QtWidgets import QLineEdit
 

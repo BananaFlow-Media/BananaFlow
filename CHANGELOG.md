@@ -53,6 +53,16 @@ First public BananaFlow release.
   setting enlarges controls, scrollbars and menu rows to finger-sized
   targets.
 
+* **Official website** at
+  <https://bananaflow.bananaflow-media.workers.dev/> — bilingual
+  (English/Hebrew) download, help, FAQ, support and legal pages. The app
+  links to it from **Settings ▸ About ▸ Official website** in the
+  language the UI is running in; `bananaflow-cli --help` and
+  `--doctor` print it; the Windows installer registers it as the
+  publisher and support URL and adds a Start-menu shortcut; and it is
+  the `Homepage` in the Python package metadata. `utils/website.py` is
+  the single source of truth for the address.
+
 ### Known limitations
 
 * Binaries are unsigned: Windows SmartScreen warns on first run; macOS

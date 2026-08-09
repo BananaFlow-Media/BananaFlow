@@ -133,7 +133,9 @@ truth for app-data locations — including the tag-backup and preset
 helpers — plus bundled-FFmpeg discovery), `playwright_check.py`,
 `cookie_validator.py`, `artwork_cleaner.py`, `metadata_cleaner.py`,
 `url_cleaner.py`, `time_format.py`, `network_probe.py`, `logger.py`,
-`logging_config.py`.
+`logging_config.py`, `website.py` (single source of truth for the
+official website's address, plus the locale-aware `site_url()` helper the
+About card and the CLI use).
 
 ## `packaging/` and `scripts/` — build and release
 

@@ -1454,6 +1454,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # ── About ───────────────────────────────────────────────────────────────
         "about_app": "About",
+        "about_website": "Official website",
+        "about_website_desc": "Downloads, help, FAQ and support — bananaflow.bananaflow-media.workers.dev",
+        "about_website_link": "Visit website",
     },
 
     "he": {
@@ -2854,6 +2857,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # ── About ───────────────────────────────────────────────────────────────
         "about_app": "אודות",
+        "about_website": "האתר הרשמי",
+        "about_website_desc": "הורדות, עזרה, שאלות נפוצות ותמיכה — האתר הרשמי של BananaFlow",
+        "about_website_link": "מעבר לאתר",
 
         # ── YouTube Doctor messages (keys defined in core.youtube_doctor.
         #    DOCTOR_TEXTS_EN; the English side is injected below) ────────────────
