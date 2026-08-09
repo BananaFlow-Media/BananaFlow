@@ -225,6 +225,7 @@ _PLAYWRIGHT_BUNDLING_SITES = {
 # without copying it into a shipped artifact.
 _MENTIONS_WITHOUT_BUNDLING = {
     "main.py", "cli.py", "scripts/install_playwright.ps1", "tests/test_packaging.py",
+    "tests/test_channel_tab_discoverer_phase6.py",
 }
 
 
