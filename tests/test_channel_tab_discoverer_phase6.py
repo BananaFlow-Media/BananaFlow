@@ -16,13 +16,47 @@ tab. The mocked messages below use that exact real format.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-# Captured at import/collection time, before the autouse
-# `_isolate_user_data_dirs` fixture (tests/conftest.py) redirects LOCALAPPDATA
-# per-test — needed by the real-network Playwright test below, since
-# Playwright resolves its installed Chromium relative to the real
-# LOCALAPPDATA, not the per-test redirected one.
-_REAL_LOCALAPPDATA = os.environ.get("LOCALAPPDATA")
+
+# Resolved at import/collection time, before the autouse
+# `_isolate_user_data_dirs` fixture (tests/conftest.py) redirects the home
+# directories per-test — needed by the real-network Playwright tests below,
+# since Playwright locates its installed Chromium under the real home:
+# %LOCALAPPDATA%\ms-playwright on Windows, $XDG_CACHE_HOME (or
+# $HOME/.cache)/ms-playwright on Linux, ~/Library/Caches/ms-playwright on
+# macOS. Issue #20: this used to restore LOCALAPPDATA only, so every run on
+# the Linux CI runner reported Chromium as "not installed" — a green product
+# reported as a broken one, weekly, for as long as the workflow existed.
+#
+# Rather than re-implement that per-platform table (getting it wrong per
+# platform is the bug), ask Playwright itself while the environment is still
+# real, and hand the answer back later via PLAYWRIGHT_BROWSERS_PATH, which
+# overrides all of the home-derived paths. HOME stays sandboxed.
+def _resolve_real_browsers_path() -> str | None:
+    """Return the real Playwright browser registry, or None if unresolvable."""
+    from_env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if from_env:
+        return from_env
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+    except Exception:
+        return None
+    # .../ms-playwright/chromium-1228/<per-platform layout>/chrome[.exe]
+    registry = next((parent.parent for parent in executable.parents
+                     if parent.name.startswith("chromium-")), None)
+    return str(registry) if registry else None
+
+
+# Only pay for the probe (it starts the Playwright driver) when the gated
+# tests that need it will actually run.
+_REAL_BROWSERS_PATH = (
+    _resolve_real_browsers_path()
+    if os.environ.get("BANANAFLOW_RUN_NETWORK_TESTS") == "1"
+    else None
+)
 
 from unittest.mock import MagicMock, patch
 
@@ -359,11 +393,47 @@ def test_http_probe_reports_an_unread_channel_name_as_empty():
         assert channel_name == "", f"expected an empty name, got {channel_name!r}"
 
 
+@pytest.fixture
+def real_playwright_browsers(monkeypatch):
+    """Point Playwright back at the Chromium that is actually installed.
+
+    Undoes conftest's home-directory sandboxing for browser lookup only, by
+    the narrowest means available: PLAYWRIGHT_BROWSERS_PATH, leaving HOME and
+    friends pointed at the temp profile so a test that writes user data still
+    cannot touch the real one.
+
+    A browser this fixture cannot find is an environment problem, and it says
+    so — it must never reach the test body, where `assert result.error is
+    None` would report it as a broken tab discovery. Issue #20 filed three
+    weekly "YouTube may have changed something" reports on exactly that
+    conflation, while the product was fine.
+    """
+    pytest.importorskip("playwright")
+    if not _REAL_BROWSERS_PATH:
+        pytest.fail(
+            "Could not locate the installed Playwright Chromium before the "
+            "suite sandboxed the home directories. This is a setup problem, "
+            "NOT a tab-discovery regression. Install it with `python -m "
+            "playwright install chromium`, or set PLAYWRIGHT_BROWSERS_PATH "
+            "to an existing browser registry."
+        )
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", _REAL_BROWSERS_PATH)
+
+    from utils.playwright_check import is_playwright_available
+    if not is_playwright_available():
+        pytest.fail(
+            f"Playwright cannot use the browsers at {_REAL_BROWSERS_PATH!r}. "
+            "Again a setup problem, NOT a tab-discovery regression."
+        )
+
+
 @pytest.mark.skipif(
     os.environ.get("BANANAFLOW_RUN_NETWORK_TESTS") != "1",
     reason="set BANANAFLOW_RUN_NETWORK_TESTS=1 to run the optional real-network test",
 )
-def test_playwright_fallback_bypasses_the_eu_consent_wall_against_a_real_channel(monkeypatch):
+def test_playwright_fallback_bypasses_the_eu_consent_wall_against_a_real_channel(
+    real_playwright_browsers,
+):
     """Optional manual smoke test against a real YouTube channel.
 
     A fresh Playwright context has no cookies, so YouTube redirects to its
@@ -376,12 +446,6 @@ def test_playwright_fallback_bypasses_the_eu_consent_wall_against_a_real_channel
     This deliberately uses the real Playwright/Chromium implementation and
     network. It is skipped during normal test and CI runs.
     """
-    pytest.importorskip("playwright")
-    if _REAL_LOCALAPPDATA:
-        # Undo this test's own LOCALAPPDATA redirection (conftest.py) so
-        # Playwright finds its actually-installed Chromium, not a path under
-        # the empty per-test temp profile.
-        monkeypatch.setenv("LOCALAPPDATA", _REAL_LOCALAPPDATA)
     result = _discover_tabs_via_playwright("https://www.youtube.com/@lexfridman")
 
     assert result.error is None
@@ -411,7 +475,7 @@ def test_http_probe_resolves_real_tabs_for_a_real_channel():
     os.environ.get("BANANAFLOW_RUN_NETWORK_TESTS") != "1",
     reason="set BANANAFLOW_RUN_NETWORK_TESTS=1 to run the optional real-network test",
 )
-def test_http_probe_and_playwright_agree_on_the_real_tab_list(monkeypatch):
+def test_http_probe_and_playwright_agree_on_the_real_tab_list(real_playwright_browsers):
     """Issue #34: a direct comparison of both strategies against the same
     real channel. This is the test that would have caught the Phase 6
     "stale selectors" report (issue #27) directly — the Playwright path
@@ -420,10 +484,6 @@ def test_http_probe_and_playwright_agree_on_the_real_tab_list(monkeypatch):
     the HTTP probe returned the correct tabs, a discrepancy this test
     would have surfaced immediately instead of via incidental discovery.
     """
-    pytest.importorskip("playwright")
-    if _REAL_LOCALAPPDATA:
-        monkeypatch.setenv("LOCALAPPDATA", _REAL_LOCALAPPDATA)
-
     probe_result = _probe_tabs_via_ytdlp("https://www.youtube.com/@lexfridman")
     assert probe_result is not None
     _, probe_tabs = probe_result
