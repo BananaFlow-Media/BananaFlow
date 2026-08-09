@@ -79,7 +79,7 @@ def request_to_dict(req: DownloadRequest) -> dict[str, Any]:
     serialised, but the caller needs to know whether ``url`` here is a real,
     downloadable URL or still just a placeholder waiting on that match, so
     it knows to rebuild an equivalent resolver on restore (see
-    ui.controllers.download_controller._build_spotify_resolver). A job can
+    core.spotify_request_builder.build_spotify_resolver). A job can
     only ever reach this function fully resolved OR never-started — never
     mid-resolve — since DownloadOrchestrator.live_request_snapshot refuses
     to hand out a snapshot while a resolve is actually in flight."""
