@@ -322,6 +322,41 @@ class TestCancellationSemantics:
         assert snap.cancelled == 1
         assert snap.progress < 1.0
 
+    def test_cancel_outstanding_preserves_paused_jobs(self):
+        """Issue #61. A whole-batch pause cancels the engine, so every paused
+        job lands in this sweep — and used to come out CANCELLED, leaving the
+        snapshot saying `paused=0` while every card in the UI read "paused"."""
+        a = _agg(["a", "b"])
+        a.pause("a")
+        changed = a.cancel_outstanding()
+        snap = a.snapshot()
+        assert changed == ["b"], "a paused job is not outstanding work"
+        assert snap.paused == 1
+        assert snap.cancelled == 1
+
+    def test_pause_never_resurrects_a_terminal_job(self):
+        """Pausing is decided against a state read that the job's own thread
+        can invalidate a microsecond later. Moving a COMPLETED job back to
+        PAUSED would put finished work into the outstanding set and offer a
+        Resume for a file that is already correct on disk."""
+        for terminal in ("complete", "fail", "cancel", "mark_preexisting"):
+            a = _agg(["a"])
+            getattr(a, terminal)("a")
+            a.pause("a")
+            assert a.job_state("a") != JobState.PAUSED, (
+                f"pause overwrote a job already {terminal}d"
+            )
+            assert a.snapshot().paused == 0
+
+    def test_an_explicit_cancel_still_moves_a_paused_job(self):
+        """Cancel All abandons paused work. Only the sweeping
+        cancel_outstanding leaves PAUSED alone — a targeted cancel must not."""
+        a = _agg(["a"])
+        a.pause("a")
+        a.cancel("a")
+        assert a.job_state("a") == JobState.CANCELLED
+        assert a.snapshot().paused == 0
+
 
 # ── Duplicate-skip ("preexisting") accounting ────────────────────────────────
 # Root-cause coverage for the "19/19 instead of 59/59" bug: a batch of 40
