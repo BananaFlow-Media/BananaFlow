@@ -441,6 +441,7 @@ def main() -> int:
 
     # ── 3. Build download jobs ────────────────────────────────────────────
     from core.downloader import DownloadEngine, DownloadRequest, MediaType
+    from core.spotify_request_builder import attach_spotify_matching, is_downloadable
 
     media_type = MediaType(args.media_type)
     is_audio   = media_type == MediaType.AUDIO
@@ -454,7 +455,26 @@ def main() -> int:
 
     playlist_name = result.playlist_title if len(result.tracks) > 1 else None
 
+    # A track the scrape could not build usable metadata for has no target and
+    # never will — a Spotify item that failed validation carries an empty URL.
+    # The desktop app drops these before building requests; the CLI used to
+    # hand yt-dlp the empty URL and report a download failure per track.
+    # Same admission rule for both front-ends (issue #59).
+    playable: list[TrackMeta] = []
     for track in result.tracks:
+        if is_downloadable(track):
+            playable.append(track)
+            continue
+        print(
+            f"  ⚠  Skipping (no usable metadata): "
+            f"{track.artist[:20]} — {track.title[:45]}",
+            file=sys.stderr,
+        )
+    if not playable:
+        print("❌  No track has usable metadata to download.", file=sys.stderr)
+        return 1
+
+    for track in playable:
         key = f"track-{track.index}"
         req_kwargs = dict(
             url=track.url,
@@ -465,17 +485,35 @@ def main() -> int:
             embed_metadata=True,
             forced_title=track.title,
             forced_artist=track.artist,
+            # Spotify only: TrackMeta.album carries the *playlist* title for
+            # YouTube sources, so forcing it there would stamp a playlist name
+            # into the album tag of every YouTube download. On Spotify it is
+            # the real album name, which is what the GUI writes.
+            forced_album=(
+                track.album if track.platform == SourcePlatform.SPOTIFY else None
+            ),
             forced_index=track.index if playlist_name else None,
             forced_duration=track.duration_sec,
             playlist_name=playlist_name,
             cookies_file=args.cookies,
+            # Only reaches the history record (per-platform stats): the one
+            # other platform-dependent branch, thumbnail cropping, additionally
+            # requires square_thumbnails + thumbnail_url, neither of which the
+            # CLI sets. Without this every CLI download was recorded "unknown".
+            platform=track.platform,
         )
         if is_audio:
             req_kwargs["audio_quality"] = quality
         else:
             req_kwargs["video_quality"] = quality
 
-        jobs.append((key, DownloadRequest(**req_kwargs)))
+        req = DownloadRequest(**req_kwargs)
+        # Stage 2 of the Spotify two-stage import. Without this the CLI shipped
+        # the parser's `ytsearch1:` placeholder straight to yt-dlp, downloading
+        # the first free-text search hit while bypassing the scorer, the
+        # album-aware search chain and the persistent match cache the GUI uses.
+        attach_spotify_matching(req, track, args.cookies)
+        jobs.append((key, req))
 
     # ── 4. Run orchestrator ───────────────────────────────────────────────
     from core.download_orchestrator import DownloadOrchestrator

@@ -42,6 +42,13 @@ from core.quality_presets import (
     default_audio_quality_id_for_codec,
     video_quality_from_id,
 )
+from core.spotify_request_builder import (
+    attach_spotify_matching,
+    build_spotify_resolver,
+    effective_match_status,
+    is_downloadable,
+    spotify_identity,
+)
 from ui.i18n import localized_folder_name, t
 
 logger = logging.getLogger(__name__)
@@ -175,19 +182,17 @@ class DownloadController(QObject):
 
         t_click = time.monotonic()
 
+        # Admission rule shared with the CLI (core.spotify_request_builder) so
+        # both front-ends agree on which tracks are downloadable at all.
         downloadable = []
         for card in selected:
-            match_status = getattr(card, "match_status", "matched")
-            if (
-                match_status == "unresolved"
-                and str(getattr(card, "platform", "")).lower() == "spotify"
-            ):
+            match_status = effective_match_status(card)
+            if match_status == "pending" and getattr(card, "match_status", "") != "pending":
+                # A previously "unresolved" card is being retried: clear the
+                # stale error so the row stops rendering as blocked.
                 card.match_status = "pending"
                 card.resolution_error = ""
-                match_status = "pending"
-            pending = match_status == "pending"
-            has_url = bool((getattr(card, "track_url", "") or "").strip())
-            if match_status in ("metadata_invalid", "unresolved") or (not pending and not has_url):
+            if not is_downloadable(card, match_status):
                 if hasattr(card, "mark_metadata_invalid"):
                     card.mark_metadata_invalid(t("spotify_metadata_invalid_card"))
                 continue
@@ -338,30 +343,12 @@ class DownloadController(QObject):
             )
 
             # Two-stage Spotify import: a card whose YouTube match was deferred
-            # carries match_status == "pending". Attach a lazy resolver so the
+            # carries match_status == "pending", and gets a lazy resolver so the
             # download pool matches it to YouTube the instant before it starts
             # downloading — pipelining the (possibly large) catalog's matching
             # with the downloads instead of blocking every download on it.
-            if getattr(card, "match_status", "matched") == "pending":
-                td = {
-                    "spotify_id":       getattr(card, "spotify_id", ""),
-                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
-                    "title":            card.title,
-                    "album":            getattr(card, "album", ""),
-                    "artist":           card.artist,
-                    "duration_sec":     getattr(card, "duration_sec", None),
-                }
-                req.spotify_match_identity = dict(td)
-                req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
-            elif req_platform == SourcePlatform.SPOTIFY:
-                req.spotify_match_identity = {
-                    "spotify_id":       getattr(card, "spotify_id", ""),
-                    "spotify_key_kind": getattr(card, "spotify_key_kind", "spotify_id"),
-                    "title":            card.title,
-                    "album":            getattr(card, "album", ""),
-                    "artist":           card.artist,
-                    "duration_sec":     getattr(card, "duration_sec", None),
-                }
+            # Shared with the CLI so both build the same request (issue #59).
+            attach_spotify_matching(req, card, self._cfg.cookies_file or None)
 
             return req
 
@@ -689,32 +676,17 @@ class DownloadController(QObject):
     @staticmethod
     def _build_spotify_resolver(td: dict, cookies: Optional[str]):
         """Build a lazy url_resolver closure for a Spotify two-stage match
-        from the minimal identity dict it needs (spotify_id,
-        spotify_key_kind, title, artist, duration_sec).
+        from the minimal identity dict it needs.
 
-        Shared by start_batch (building a fresh request from a live queue
-        card) and restore_paused_jobs (rebuilding an EQUIVALENT resolver
-        for a paused job that was never resolved before the app
-        restarted). The resolver itself is a live closure and cannot be
-        persisted, but everything it needs to rebuild an equivalent one
-        can be -- see core.download_request_codec's had_pending_resolver
-        flag and _card_to_dict's spotify_id/spotify_key_kind/duration_sec
-        fields."""
-        from core.scraper import track_match_source_hint
-
-        source_hint = track_match_source_hint(td)
-
-        def _resolve(ev, _td=td, _cookies=cookies):
-            from core.scraper import resolve_track_to_youtube
-            from utils.url_cleaner import clean_youtube_url as _clean
-            resolved = resolve_track_to_youtube(
-                _td, cookies_file=_cookies,
-                cancel_check=lambda: ev is not None and ev.is_set(),
-            )
-            _resolve.resolve_source = _td.get("_match_source", "live")
-            return _clean(resolved)
-        _resolve.resolve_source = source_hint
-        return _resolve
+        Thin delegate to core.spotify_request_builder, which owns the
+        matching contract for BOTH front-ends (issue #59). Kept as a method
+        so restore_paused_jobs -- which rebuilds an EQUIVALENT resolver for a
+        paused job that was never resolved before the app restarted -- reads
+        the same way as it always did. The resolver itself is a live closure
+        and cannot be persisted, but everything needed to rebuild an
+        equivalent one can be: see core.download_request_codec's
+        had_pending_resolver flag and _card_to_dict's identity fields."""
+        return build_spotify_resolver(td, cookies)
 
     @staticmethod
     def _snapshot_for_pause(req: DownloadRequest) -> DownloadRequest:
@@ -1103,13 +1075,11 @@ class DownloadController(QObject):
             # so it re-matches to YouTube instead of trying to download a
             # placeholder URL.
             if pj.request.get("had_pending_resolver") and pj.card.get("spotify_id"):
-                td = {
-                    "spotify_id":       pj.card.get("spotify_id", ""),
-                    "spotify_key_kind": pj.card.get("spotify_key_kind", "spotify_id"),
-                    "title":            pj.card.get("title", ""),
-                    "artist":           pj.card.get("artist", ""),
-                    "duration_sec":     pj.card.get("duration_sec"),
-                }
+                # spotify_identity() reads the persisted card dict directly, so
+                # a restored resolver is built from the SAME six fields as a
+                # live one -- including "album", which the hand-written copy
+                # this replaced dropped even though _card_to_dict saves it.
+                td = spotify_identity(pj.card)
                 req.url_resolver = self._build_spotify_resolver(td, self._cfg.cookies_file or None)
                 req.spotify_match_identity = dict(td)
             self._paused_requests[key] = req
