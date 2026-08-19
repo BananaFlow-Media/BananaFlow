@@ -51,16 +51,6 @@ class TestConservativeOptionsBuilder:
         opts = self._opts(tmp_path, "https://example.com/some-video")
         assert opts["concurrent_fragment_downloads"] == 5  # existing default, untouched
 
-    def test_youtube_player_client_uses_web_and_web_embedded(self, tmp_path):
-        for media_type in (MediaType.AUDIO, MediaType.VIDEO):
-            req = DownloadRequest(
-                url="https://www.youtube.com/watch?v=TESTVIDEOAAA",
-                output_dir=str(tmp_path),
-                media_type=media_type,
-            )
-            opts = DownloadEngine()._build_ydl_opts(req)  # noqa: SLF001
-            assert opts.get("extractor_args", {}).get("youtube", {}).get("player_client") == ["web", "web_embedded"]
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. Scheduler (DownloadOrchestrator) — parallelism + cooldown

@@ -1,11 +1,10 @@
 """
 tests/test_dependency_versions.py  –  Dependency-version drift guard
 ========================================================================
-requirements.txt, pyproject.toml, and core.youtube_doctor.MIN_YT_DLP_VERSION
-must all agree on the minimum yt-dlp version. Phase 3.1 fixed a real
-drift where pyproject.toml had been left at the pre-phase-1 2026.3.13
-while requirements.txt had already moved to 2026.6.9 — this test exists
-so that regresses silently again.
+requirements.txt and pyproject.toml must agree on BananaFlow's yt-dlp
+release requirement. YouTube Doctor has a separate concept: the oldest
+version it considers locally usable. The product release may deliberately
+pin a newer reviewed nightly, so those two values must not be forced equal.
 """
 
 from __future__ import annotations
@@ -16,34 +15,55 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _extract_yt_dlp_min_version(text: str) -> str:
-    match = re.search(r'yt-dlp\[default\]>=(\S+?)(?:[\s"#,]|$)', text)
-    assert match, "could not find a yt-dlp[default]>=X.Y.Z pin"
-    return match.group(1)
+def _extract_yt_dlp_requirement(text: str) -> tuple[str, str]:
+    match = re.search(
+        r'yt-dlp\[default\](==|>=)(\S+?)(?:[\s"#,]|$)',
+        text,
+    )
+    assert match, "could not find a yt-dlp[default] ==/>= requirement"
+    return match.group(1), match.group(2)
 
 
-def test_requirements_and_pyproject_agree_on_yt_dlp_minimum():
+def _calver_date(version: str) -> tuple[int, int, int]:
+    """Compare the date portion of yt-dlp CalVer, including nightly strings."""
+    parts = re.findall(r"\d+", version or "")
+    assert len(parts) >= 3, f"invalid yt-dlp CalVer: {version!r}"
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def test_requirements_and_pyproject_agree_on_yt_dlp_requirement():
     requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
     pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    requirements_version = _extract_yt_dlp_min_version(requirements_text)
-    pyproject_version = _extract_yt_dlp_min_version(pyproject_text)
+    requirements_spec = _extract_yt_dlp_requirement(requirements_text)
+    pyproject_spec = _extract_yt_dlp_requirement(pyproject_text)
 
-    assert requirements_version == pyproject_version, (
-        f"requirements.txt pins yt-dlp[default]>={requirements_version} but "
-        f"pyproject.toml pins yt-dlp[default]>={pyproject_version} — keep them in sync."
+    assert requirements_spec == pyproject_spec, (
+        f"requirements.txt requires yt-dlp[default]{requirements_spec[0]}{requirements_spec[1]} "
+        f"but pyproject.toml requires yt-dlp[default]{pyproject_spec[0]}{pyproject_spec[1]} — "
+        "keep the release requirement in sync."
     )
 
 
-def test_youtube_doctor_minimum_agrees_with_requirements():
+def test_release_requirement_is_at_least_security_patched_2026_7_4():
+    requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    _operator, release_version = _extract_yt_dlp_requirement(requirements_text)
+
+    assert _calver_date(release_version) >= (2026, 7, 4), (
+        "BananaFlow must not release with a yt-dlp requirement older than "
+        "2026.7.4, which is the first patched release for GHSA-6v4j-43gg-vj32."
+    )
+
+
+def test_youtube_doctor_minimum_is_not_newer_than_release_requirement():
     from core.youtube_doctor import MIN_YT_DLP_VERSION
 
     requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
-    requirements_version = _extract_yt_dlp_min_version(requirements_text)
+    _operator, release_version = _extract_yt_dlp_requirement(requirements_text)
 
-    assert MIN_YT_DLP_VERSION == requirements_version, (
-        f"core.youtube_doctor.MIN_YT_DLP_VERSION={MIN_YT_DLP_VERSION!r} no longer "
-        f"matches requirements.txt's yt-dlp[default]>={requirements_version} pin."
+    assert _calver_date(MIN_YT_DLP_VERSION) <= _calver_date(release_version), (
+        f"YouTube Doctor requires {MIN_YT_DLP_VERSION}, which is newer than "
+        f"the product's yt-dlp release requirement {release_version}."
     )
 
 

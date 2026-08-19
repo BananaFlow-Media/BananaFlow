@@ -1,8 +1,11 @@
 # ── Core downloading engine ──────────────────────────────────────────────────
-# The [default] extra pins an exact matching yt-dlp-ejs release (YouTube JS
-# player logic) as a transitive dependency — do not also list yt-dlp-ejs
-# separately, it would just be an unpinned duplicate of that same pin.
-yt-dlp[default]>=2026.6.9  # The heart of the downloading engine (plus JS solvers)
+# yt-dlp recommends its nightly channel for regular users because stable can
+# become stale as sites change. Pin the latest reviewed published snapshot
+# instead of floating to future nightlies; 2026.8.4 includes the July 20
+# YouTube player-client maintenance that post-dates stable 2026.7.4.
+# The [default] extra also pins an exact compatible yt-dlp-ejs release, so do
+# not list yt-dlp-ejs separately.
+yt-dlp[default]==2026.8.4.234419.dev0
 
 # PO Token Provider plugin: not a source-tree runtime requirement, but
 # the public Windows build pins and stages bgutil-ytdlp-pot-provider
