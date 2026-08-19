@@ -1359,14 +1359,10 @@ class DownloadEngine:
             )
 
         # Reliable YouTube player client selection:
-        # For audio-only downloads, android/ios player clients provide rapid, reliable streams without 403 blocks.
-        # For video downloads, web/web_embedded player clients are used so full 4K / 1440p / 1080p Full HD
-        # streams are extracted and merged with high-bitrate audio, rather than being restricted to 360p mobile formats.
+        # web/web_embedded player clients provide full access to 4K / 1440p / 1080p Full HD video streams
+        # and high-bitrate Opus/AAC audio streams without 360p mobile SABR throttling or android client blocks.
         if is_youtube_url(req.url) or (req.url and req.url.startswith(("ytsearch:", "ytsearchdate:"))):
-            if req.media_type == MediaType.AUDIO:
-                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["android", "ios"]
-            else:
-                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["web", "web_embedded"]
+            opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["web", "web_embedded"]
 
         return opts
 
