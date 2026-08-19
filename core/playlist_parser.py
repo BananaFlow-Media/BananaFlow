@@ -174,7 +174,7 @@ class ParseResult:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _YT_PLAYLIST_RE  = re.compile(r"[?&]list=([A-Za-z0-9_-]+)")
-_YT_VIDEO_RE     = re.compile(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})")
+_YT_VIDEO_RE     = re.compile(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([A-Za-z0-9_-]{11})")
 _YTM_RE          = re.compile(r"music\.youtube\.com")
 _SPOTIFY_RE      = re.compile(
     r"open\.spotify\.com/(track|album|playlist|artist)/([A-Za-z0-9]+)"
@@ -387,7 +387,15 @@ def _entry_to_track(
         album=(entry.get("album") or entry.get("playlist_title") or album or "").strip(),
         duration_sec=duration_sec,
         duration_str=TrackMeta.format_duration(duration_sec),
-        thumbnail_url=clean_artwork_url(_best_thumbnail(entry), platform),
+        thumbnail_url=clean_artwork_url(
+            _best_thumbnail(entry)
+            or (
+                f"https://i.ytimg.com/vi/{entry['id']}/hqdefault.jpg"
+                if entry.get("id") and platform in (SourcePlatform.YOUTUBE, SourcePlatform.YOUTUBE_MUSIC)
+                else ""
+            ),
+            platform,
+        ),
         platform=platform,
         release_type=entry.get("release_type", ""),
         album_index=entry.get("album_index", 0) or entry.get("playlist_index", 0),

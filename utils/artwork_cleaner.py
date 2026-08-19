@@ -11,6 +11,45 @@ from urllib.parse import urlparse
 from utils.url_cleaner import host_matches_domain
 
 
+def extract_youtube_video_id(url_or_id: str) -> str:
+    """Extract an 11-character YouTube video ID from a URL or return the string if already an ID."""
+    if not url_or_id:
+        return ""
+    url_or_id = url_or_id.strip()
+    if len(url_or_id) == 11 and re.match(r"^[A-Za-z0-9_-]{11}$", url_or_id):
+        return url_or_id
+    
+    # Check for i.ytimg.com/vi/<ID>/
+    m = re.search(r"i\.ytimg\.com/vi(?:_webp)?/([A-Za-z0-9_-]{11})", url_or_id)
+    if m:
+        return m.group(1)
+        
+    # Check standard YouTube URLs
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([A-Za-z0-9_-]{11})", url_or_id)
+    if m:
+        return m.group(1)
+        
+    return ""
+
+
+def get_youtube_thumbnail_candidates(url_or_id: str) -> list[str]:
+    """
+    Return an ordered list of thumbnail URLs to try for a YouTube video,
+    from highest quality to most reliable fallback.
+    """
+    video_id = extract_youtube_video_id(url_or_id)
+    if not video_id:
+        return [url_or_id] if url_or_id else []
+
+    return [
+        f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+        f"https://i.ytimg.com/vi/{video_id}/sddefault.jpg",
+        f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
+        f"https://i.ytimg.com/vi/{video_id}/default.jpg",
+    ]
+
+
 def clean_artwork_url(url: str, platform) -> str:
     """
     Transform a raw thumbnail URL into a high-res square version if possible.
@@ -62,3 +101,4 @@ def clean_artwork_url(url: str, platform) -> str:
                     return url.replace(quality, "maxresdefault.jpg")
             
     return url
+

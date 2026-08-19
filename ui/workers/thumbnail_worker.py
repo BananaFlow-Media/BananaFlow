@@ -17,10 +17,37 @@ thumbnail_ready(int, bytes)
     Nothing is emitted on failure – the card simply keeps its placeholder.
 """
 
-from __future__ import annotations
-
+import collections
+import io
+import threading
 from PySide6.QtCore import QThread, Signal
 import requests
+from utils.artwork_cleaner import extract_youtube_video_id, get_youtube_thumbnail_candidates
+
+# In-memory LRU cache for fetched thumbnail bytes (max 500 items)
+_CACHE_MAX_SIZE = 500
+_THUMBNAIL_CACHE: collections.OrderedDict[str, bytes] = collections.OrderedDict()
+_CACHE_LOCK = threading.Lock()
+
+
+def get_cached_thumbnail(url: str) -> bytes | None:
+    """Retrieve raw thumbnail bytes from memory cache if available."""
+    with _CACHE_LOCK:
+        if url in _THUMBNAIL_CACHE:
+            _THUMBNAIL_CACHE.move_to_end(url)
+            return _THUMBNAIL_CACHE[url]
+    return None
+
+
+def store_cached_thumbnail(url: str, data: bytes) -> None:
+    """Store raw thumbnail bytes into the in-memory LRU cache."""
+    if not url or not data:
+        return
+    with _CACHE_LOCK:
+        _THUMBNAIL_CACHE[url] = data
+        _THUMBNAIL_CACHE.move_to_end(url)
+        if len(_THUMBNAIL_CACHE) > _CACHE_MAX_SIZE:
+            _THUMBNAIL_CACHE.popitem(last=False)
 
 
 class ThumbnailWorker(QThread):
@@ -64,46 +91,74 @@ class ThumbnailWorker(QThread):
         if not self._url:
             return
 
+        # 1. Instant Cache Hit
+        cached = get_cached_thumbnail(self._url)
+        if cached:
+            self.thumbnail_ready.emit(self._index, cached)
+            return
+
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
-            response = requests.get(
-                self._url,
-                timeout=self._timeout,
-                headers={
-                    # Some CDNs reject requests without a browser User-Agent
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    )
-                },
-                stream=False,
-                verify=False,
-            )
-            response.raise_for_status()
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
 
-            raw: bytes = response.content
-            if raw:
-                # Many Qt Windows installations lack the WebP imageformats plugin.
-                # If the image is WebP, we decode it with Pillow and emit JPEG bytes.
-                is_webp = raw[:4] == b'RIFF' and raw[8:12] == b'WEBP'
+            # 2. Determine URL candidates (with fallback hierarchy for YouTube)
+            video_id = extract_youtube_video_id(self._url)
+            if video_id:
+                candidates = get_youtube_thumbnail_candidates(self._url)
+            else:
+                candidates = [self._url]
+
+            raw_bytes: bytes | None = None
+
+            for candidate_url in candidates:
+                # Check cache for candidate
+                cached_candidate = get_cached_thumbnail(candidate_url)
+                if cached_candidate:
+                    raw_bytes = cached_candidate
+                    break
+
+                try:
+                    resp = requests.get(
+                        candidate_url,
+                        timeout=self._timeout,
+                        headers=headers,
+                        stream=False,
+                        verify=False,
+                    )
+                    if resp.status_code == 200 and resp.content:
+                        # Some YouTube 404s or placeholders might return small 1x1 GIF / HTML
+                        if len(resp.content) > 200:
+                            raw_bytes = resp.content
+                            store_cached_thumbnail(candidate_url, raw_bytes)
+                            break
+                except Exception:
+                    continue
+
+            if raw_bytes:
+                # Convert WebP to JPEG if necessary for Qt Windows compatibility
+                is_webp = raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP"
                 if is_webp:
                     try:
                         from PIL import Image
-                        import io
-                        img = Image.open(io.BytesIO(raw))
+                        img = Image.open(io.BytesIO(raw_bytes))
                         buf = io.BytesIO()
                         img.convert("RGB").save(buf, format="JPEG", quality=90)
-                        raw = buf.getvalue()
-                    except Exception as e:
-                        pass # Fallback to raw bytes if PIL fails or is unavailable
-                
-                self.thumbnail_ready.emit(self._index, raw)
+                        raw_bytes = buf.getvalue()
+                    except Exception:
+                        pass  # Fallback to raw bytes if PIL conversion fails
+
+                store_cached_thumbnail(self._url, raw_bytes)
+                self.thumbnail_ready.emit(self._index, raw_bytes)
 
         except Exception:  # noqa: BLE001
             # Silently discard – the TrackCard keeps its grey placeholder.
-            # We intentionally do NOT emit an error signal; a missing thumbnail
-            # is cosmetic and must never surface a dialog to the user.
             pass
+

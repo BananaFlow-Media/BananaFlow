@@ -1358,6 +1358,13 @@ class DownloadEngine:
                 CONSERVATIVE_FRAGMENT_CONCURRENCY,
             )
 
+        # Reliable YouTube player client selection:
+        # YouTube recently introduced restrictions / SABR throttling on default android_vr / web clients,
+        # leading to HTTP 403 Forbidden mid-stream. Setting android/ios player_client ensures
+        # reliable, high-speed stream downloads without 403 blocks.
+        if is_youtube_url(req.url) or (req.url and req.url.startswith(("ytsearch:", "ytsearchdate:"))):
+            opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["android", "ios"]
+
         return opts
 
     # ── Format-specific option builders ───────────────────────────────────────
