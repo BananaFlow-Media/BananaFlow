@@ -1359,11 +1359,14 @@ class DownloadEngine:
             )
 
         # Reliable YouTube player client selection:
-        # YouTube recently introduced restrictions / SABR throttling on default android_vr / web clients,
-        # leading to HTTP 403 Forbidden mid-stream. Setting android/ios player_client ensures
-        # reliable, high-speed stream downloads without 403 blocks.
+        # For audio-only downloads, android/ios player clients provide rapid, reliable streams without 403 blocks.
+        # For video downloads, web/web_embedded player clients are used so full 4K / 1440p / 1080p Full HD
+        # streams are extracted and merged with high-bitrate audio, rather than being restricted to 360p mobile formats.
         if is_youtube_url(req.url) or (req.url and req.url.startswith(("ytsearch:", "ytsearchdate:"))):
-            opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["android", "ios"]
+            if req.media_type == MediaType.AUDIO:
+                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["android", "ios"]
+            else:
+                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["web", "web_embedded"]
 
         return opts
 
