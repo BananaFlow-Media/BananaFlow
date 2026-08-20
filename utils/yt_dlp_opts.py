@@ -409,11 +409,12 @@ def build_base_ydl_opts(
 ) -> dict[str, Any]:
     """
     Return a base yt-dlp options dict with BananaFlow's standard network,
-    cookie, and retry settings applied. Lets yt-dlp handle impersonation natively.
+    cookie, and retry settings applied. Lets yt-dlp own its rapidly-changing
+    YouTube client defaults except for the currently documented cookie-session
+    compatibility fallback below.
     """
     opts: dict[str, Any] = {
         # ── Network resilience ────────────────────────────────────────────────
-        "nocheckcertificate":              True,
         "retries":                         retries,
         "fragment_retries":                retries,
         "extractor_retries":               5,
@@ -451,6 +452,15 @@ def build_base_ydl_opts(
         require_supported_browser_cookie_mode(cookies_browser)
         profile = _detect_last_used_chromium_profile(cookies_browser)
         opts["cookiesfrombrowser"] = (cookies_browser, profile, None, None)
+
+    # Current yt-dlp cookie sessions can select tv_downgraded, which is
+    # broken for some users. The maintainer's Aug-2026 scoped workaround is
+    # player_client=default,web_embedded when cookies really are in use.
+    # Keep it conditional so public downloads continue following upstream's
+    # changing defaults instead of freezing another global client list.
+    if cookies_file or cookies_browser:
+        youtube_args = opts.setdefault("extractor_args", {}).setdefault("youtube", {})
+        youtube_args.setdefault("player_client", ["default", "web_embedded"])
 
     # ── Optional HTTP/HTTPS/SOCKS proxy ──────────────────────────────────────
     if proxy:

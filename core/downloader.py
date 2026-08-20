@@ -1358,12 +1358,6 @@ class DownloadEngine:
                 CONSERVATIVE_FRAGMENT_CONCURRENCY,
             )
 
-        # Reliable YouTube player client selection:
-        # web/web_embedded player clients provide full access to 4K / 1440p / 1080p Full HD video streams
-        # and high-bitrate Opus/AAC audio streams without 360p mobile SABR throttling or android client blocks.
-        if is_youtube_url(req.url) or (req.url and req.url.startswith(("ytsearch:", "ytsearchdate:"))):
-            opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = ["web", "web_embedded"]
-
         return opts
 
     # ── Format-specific option builders ───────────────────────────────────────

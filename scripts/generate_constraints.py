@@ -1,20 +1,23 @@
 """
 scripts/generate_constraints.py  –  Reviewed-environment constraints snapshot
 ==============================================================================
-Phase 4 (reproducible builds / supply chain), section D. `requirements.txt`
-and `pyproject.toml` intentionally keep floor (`>=`) version bounds so a
-routine `pip install` always gets current fixes; that flexibility means two
-installs on different days can resolve different exact versions. This
-script captures the exact version of every installed package in a
-known-good, isolated-gate-passing environment as a pip constraints file,
-so a release build (or anyone debugging a regression) can reproduce that
-same environment exactly:
+Phase 4 (reproducible builds / supply chain). Most application dependencies
+use floor (``>=``) bounds so routine installs can receive compatible fixes,
+while exceptionally site-sensitive backends may use an exact, deliberately
+reviewed pin when upstream behavior changes faster than BananaFlow can safely
+accept untested updates. Either policy can still leave the rest of the Python
+environment different across install dates.
+
+This script captures the exact version of every installed package in a
+known-good, isolated-gate-passing environment as a pip constraints file, so
+a release build (or anyone debugging a regression) can reproduce that same
+environment exactly:
 
     pip install -r requirements.txt -c constraints-windows-py312.txt
 
-Regenerate this file whenever a dependency changes AND the isolated test
-gate (scripts/run_isolated_tests.py) passes against the new environment —
-never commit an unreviewed snapshot. `THIRD_PARTY_NOTICES.md`'s dependency
+Regenerate this file whenever a dependency changes AND the isolated test gate
+(scripts/run_isolated_tests.py) passes against the new Windows environment —
+never commit an unreviewed snapshot. ``THIRD_PARTY_NOTICES.md``'s dependency
 table and this file should agree; a mismatch means one of them is stale.
 
 Usage:

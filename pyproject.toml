@@ -22,8 +22,12 @@ classifiers = [
 ]
 
 dependencies = [
-    "yt-dlp[default]>=2026.6.9",
-    "yt-dlp-ejs",
+    # yt-dlp recommends its nightly channel for regular users because stable
+    # releases can go stale as sites change. Pin the latest reviewed published
+    # nightly instead of floating to future builds; 2026.8.4 includes the
+    # July 20 YouTube player-client maintenance that post-dates stable 2026.7.4.
+    # [default] also installs yt-dlp's exact compatible EJS dependency.
+    "yt-dlp[default]==2026.8.4.234419.dev0",
     "ffmpeg-python>=0.2.0",
     "pyloudnorm>=0.1.1",
     "soundfile>=0.12.1",
