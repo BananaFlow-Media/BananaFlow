@@ -9,7 +9,7 @@ Before changing code:
 1. Read [`AGENTS.md`](AGENTS.md) if you are using an AI coding agent.
 2. Read [`docs/README.md`](docs/README.md) and the subsystem documentation.
 3. Review the Code → Documentation map in [`docs/DOCUMENTATION_POLICY.md`](docs/DOCUMENTATION_POLICY.md).
-4. For large/architecture-changing work, align in an Issue or [Development discussion](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development) before investing in a large diff.
+4. For large/architecture-changing work, open a focused [feature/proposal Issue](https://github.com/BananaFlow-Media/BananaFlow/issues/new?template=feature_request.yml) and align on the approach before investing in a large diff.
 
 ## Development setup
 
@@ -96,7 +96,7 @@ Read [`docs/i18n/TRANSLATING.md`](docs/i18n/TRANSLATING.md) and [`docs/accessibi
 
 Every new user-facing string must exist in both language tables. New/custom interactive widgets need keyboard access and meaningful accessible semantics. Technical paths/URLs/identifiers must remain readable in RTL layouts.
 
-Translation-specific discussion belongs in [Discussions / Translations](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations); pre-release testing feedback belongs in [Discussions / Beta Testing](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/beta-testing).
+Translation/RTL problems use the dedicated [Hebrew / Translation Issue form](https://github.com/BananaFlow-Media/BananaFlow/issues/new?template=hebrew_translation.yml). Pre-release/nightly/build feedback should use the closest Issue form and include the exact build identifier. GitHub Discussions are not currently enabled for this repository, so current documentation must not route contributors there.
 
 ## Dependencies and third-party code
 

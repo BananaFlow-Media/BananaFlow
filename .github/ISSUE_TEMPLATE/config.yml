@@ -16,15 +16,15 @@ contact_links:
       Do NOT open a public Issue for a security vulnerability. Use GitHub
       private vulnerability reporting instead. See SECURITY.md.
   - name: 💬 Usage question / "how do I...?"
-    url: https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/help
-    about: Ask in Discussions → Help instead of opening an Issue.
+    url: https://bananaflow.bananaflow-media.workers.dev/en/support/
+    about: Use the official Support page after checking Help and FAQ.
   - name: 🏗️ Large or architecture-changing proposal
-    url: https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development
+    url: https://github.com/BananaFlow-Media/BananaFlow/issues/new?template=feature_request.yml
     about: >-
-      Align on the approach in Discussions → Development before investing
-      in a large PR. See CONTRIBUTING.md.
+      Open a focused proposal Issue and align on the approach before
+      investing in a large PR. See CONTRIBUTING.md.
   - name: 🌐 Translation / RTL coordination
-    url: https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations
+    url: https://github.com/BananaFlow-Media/BananaFlow/issues/new?template=hebrew_translation.yml
     about: >-
-      For terminology, wording or RTL conventions across the UI. A single
-      wrong or missing string is an Issue — use the Hebrew/Translation form.
+      Use the Hebrew/Translation form for terminology, wording, missing
+      strings or RTL conventions across the UI.

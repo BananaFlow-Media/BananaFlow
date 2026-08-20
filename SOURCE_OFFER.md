@@ -14,7 +14,7 @@ The preferred source for BananaFlow is the project repository:
 https://github.com/BananaFlow-Media/BananaFlow
 
 For a tagged release, the corresponding source is the matching Git tag
-(`v<version>`, e.g. `v1.0.0-beta.1`) or the source archive GitHub
+(`v<version>`, e.g. `v1.0.0`) or the source archive GitHub
 generates for that tag. It includes the application source, tests,
 packaging scripts, the PyInstaller spec, the installer configuration and
 the documentation needed to build, install, run and modify that release.

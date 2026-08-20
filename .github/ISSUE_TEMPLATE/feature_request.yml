@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        For an early-stage idea you want to discuss before writing a full
-        proposal, consider [Discussions → Ideas](../../discussions/categories/ideas)
-        instead — it's lower-friction for back-and-forth.
+        Use this form for an early-stage idea or a detailed proposal. For a
+        large/architecture-changing change, align on the approach here before
+        investing in an implementation PR.
   - type: textarea
     id: problem
     attributes:
@@ -31,7 +31,7 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I searched existing Issues and Discussions first
+        - label: I searched existing Issues first
           required: true
         - label: This isn't a request to circumvent a site's access controls, DRM, or terms of service (see docs/legal/acceptable-use.md)
           required: true

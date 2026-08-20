@@ -33,7 +33,7 @@ This is the supported full-suite gate. Each tracked test file runs in a fresh in
 
 Do not replace the release/CI gate with a single `pytest tests/` invocation merely because it passes on one machine.
 
-The regular CI matrix exercises the source tree on Windows and Ubuntu across the supported Python versions. That is part of the evidence for Linux source-install support; lack of a Linux installer is a packaging gap, not a statement that the application is expected to fail on Linux. macOS packaged support is additionally validated through its release workflow and manual package acceptance.
+The regular CI matrix exercises the source tree on Windows and Ubuntu across the supported Python versions, and failures on either operating system block the test workflow. That is part of the evidence for Linux source-install support; lack of a Linux installer is a packaging gap, not a statement that the application is expected to fail on Linux. macOS packaged support is additionally validated through its release workflow and manual package acceptance.
 
 ## Test layers
 

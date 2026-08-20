@@ -9,6 +9,8 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 - Reorganized repository documentation around explicit sources of truth, current-vs-historical lifecycle and a Code → Documentation impact map.
 - Added canonical AI-agent context (`AGENTS.md`, `docs/AI_CONTEXT.md`) plus thin Claude/Gemini/Copilot adapters and path-specific subsystem instructions.
 - Added a Documentation GitHub Actions gate covering internal Markdown references, stale Stable/Beta language, yt-dlp/provider version consistency, AI-adapter integrity, current platform-status wording and pull-request documentation impact.
+- Made the local documentation gate ignore untracked development artifacts and enforce that every tracked document under `docs/` is reachable from the documentation map.
+- Replaced inactive GitHub Discussions routes with the currently available website-support and GitHub Issue paths.
 - Reconciled Security, Privacy, Support, English/Hebrew user references and the Spotify Search Proxy contract with the current Stable product behavior.
 - Separated current architecture/policy from historical browser, updater, PO-token and performance evidence without discarding the engineering record.
 - Promoted **macOS Apple Silicon** from the 1.0.0 release's experimental status to a currently supported packaged target after maintainer validation that the packaged app opens and runs; signing/notarization limitations remain separately documented.

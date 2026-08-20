@@ -52,7 +52,7 @@ Spotify **text search** is an optional advanced feature that currently needs a s
 
 Most users do not need to know the proxy API. The technical operator documentation is in [`spotify-proxy-api.md`](spotify-proxy-api.md).
 
-There is currently no BananaFlow-operated public Spotify Search Proxy. A future BananaFlow-owned matching/database service may replace this setup, but it is not part of the current product.
+There is currently no BananaFlow-operated public Spotify Search Proxy. Use only a self-hosted endpoint you trust and configure yourself.
 
 ## 5. Formats and quality
 
@@ -175,7 +175,7 @@ For help:
 - official website Help/FAQ/support;
 - [`../../SUPPORT.md`](../../SUPPORT.md);
 - GitHub Issues for reproducible bugs;
-- GitHub Discussions for questions and pre-release testing.
+- the closest GitHub Issue form for reproducible bugs, feature requests and pre-release build feedback.
 
 Use BananaFlow only for material you are entitled to access, download and store. See [`../legal/acceptable-use.md`](../legal/acceptable-use.md).
 

@@ -15,24 +15,13 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Windows is the release platform and the blocking gate. The ubuntu leg is
-    # kept for quick feedback but is NON-BLOCKING: the test suite is written
-    # Windows-first, and a handful of pre-existing tests assume Windows
-    # semantics that do not hold on Linux — hardcoded C:\ path literals
-    # (test_tag_editor_navigation_phase3), a case-insensitive filesystem for
-    # case-swap renames (test_tag_action_engine_phase9), and OS-specific file
-    # identity for own-operation classification (test_own_operation_suppression
-    # _phase13). These never ran on ubuntu before, because the single-process
-    # suite always crashed earlier (finding F-16); the isolated runner surfaced
-    # them. Porting the suite to Linux is real work, but separate from the
-    # v0.2.0 release closure, so it must not block it. The failures stay VISIBLE
-    # in the ubuntu logs and evidence artifact rather than being skipped.
-    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
+    # Windows packages and Linux source installs are both supported product
+    # paths, so failures on either runner block the gate.
     strategy:
       fail-fast: false
       matrix:
-        # Windows is the release target and the blocking gate; ubuntu is
-        # non-blocking feedback (see continue-on-error above).
+        # Ubuntu is the executable support contract for Linux source installs;
+        # Windows is the primary packaged release target.
         os: [windows-latest, ubuntu-latest]
         # pyproject.toml requires-python = ">=3.10"; cover the lower bound
         # and current stable versions.

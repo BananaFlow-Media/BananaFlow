@@ -44,7 +44,7 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I searched existing Issues and Discussions first
+        - label: I searched existing Issues first
           required: true
         - label: I understand generic-site support is best-effort, not guaranteed (see docs/legal/acceptable-use.md)
           required: true

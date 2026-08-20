@@ -111,19 +111,13 @@ def test_macos_release_cannot_publish_the_shared_release():
     )
 
 
-def test_macos_dmg_is_not_attached_to_a_prerelease_tag():
-    """RELEASE_STRATEGY.md section 5 makes Windows the only official Beta
-    target and marks macOS "Experimental; not a supported public Beta
-    target". v0.2.1-beta.2 attached a macOS DMG anyway, contradicting the
-    approved platform policy. The DMG stays a CI artifact for testers until
-    macOS graduates (Developer ID + notarization), which is a HUMAN GATE."""
+def test_macos_dmg_is_attached_to_supported_release_tags():
+    """macOS Apple Silicon is supported for stable and pre-release builds."""
     text = MACOS_WORKFLOW.read_text(encoding="utf-8")
     condition = pytest.importorskip("yaml").safe_load(text)["jobs"]["publish-draft"]["if"]
 
-    assert "!contains(github.ref_name, '-')" in condition, (
-        "a SemVer pre-release tag (e.g. v0.2.1-beta.2) carries a hyphen; the "
-        "macOS attach job must exclude those so a Beta release never ships a "
-        "macOS DMG as a public asset"
+    assert "contains(github.ref_name, '-')" not in condition, (
+        "supported macOS artifacts must not be excluded from pre-release tags"
     )
 
     # The DMG must still reach testers as a CI artifact, not vanish entirely.
@@ -372,16 +366,12 @@ def test_ci_uploads_evidence_on_every_platform_even_on_failure():
     assert "runner.os" not in upload, "evidence must upload on every leg, red or green"
 
 
-def test_windows_is_the_blocking_gate_and_ubuntu_is_non_blocking():
-    """Windows is the release platform, so it blocks; the Windows-first suite
-    has pre-existing Linux-only failures, so ubuntu is feedback, not a gate."""
+def test_windows_and_ubuntu_are_blocking_supported_platform_gates():
+    """Linux source-install support requires Ubuntu failures to block CI."""
     text = TESTS_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}" in text, (
-        "ubuntu must be non-blocking while Windows stays a required gate"
-    )
-    # The reason must be documented in the workflow, not just here.
-    assert "Windows-first" in text and "F-16" in text
+    assert "continue-on-error" not in text
+    assert "Linux source installs are both supported" in text
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ This directory is the documentation entry point. It distinguishes **current norm
 | Need | Authoritative document |
 |---|---|
 | End-user overview/download | [`README.md`](../README.md) and the official website |
+| User-documentation index | [`user-guide/README.md`](user-guide/README.md) |
 | Full English user reference | [`user-guide/user-manual.md`](user-guide/user-manual.md) |
 | Full Hebrew user reference | [`user-guide/user-guide-he.md`](user-guide/user-guide-he.md) |
 | CLI reference | [`user-guide/cli.md`](user-guide/cli.md) |
@@ -32,17 +33,23 @@ This directory is the documentation entry point. It distinguishes **current norm
 - [`architecture/tag-editor-safety.md`](architecture/tag-editor-safety.md) — binding Tag Editor disk-safety invariants.
 - [`architecture/tag-editor-undo-rollback-guarantees.md`](architecture/tag-editor-undo-rollback-guarantees.md) — contributor-facing undo/restore summary.
 - [`architecture/tag-editor-persistence-migrations.md`](architecture/tag-editor-persistence-migrations.md) — persisted Tag Editor migrations.
-- [`design/tag-editor/implementation-plan.md`](design/tag-editor/implementation-plan.md) — current Tag Editor design decisions and completed redesign record.
+- [`architecture/secure-component-updater.md`](architecture/secure-component-updater.md) — accepted security bar for any future independently downloaded component updater.
+- [`design/tag-editor/current-design.md`](design/tag-editor/current-design.md) — current Tag Editor design decisions and completed redesign record.
 
 ## Decision records and historical evidence
 
-Some documents were originally produced during release-readiness phases. They remain valuable evidence but must not silently override current code or normative documentation. Such documents carry an explicit status banner and date. Examples include browser packaging research, component-updater design, PO-token distribution research and package/runtime measurements.
+Some documents were originally produced during release-readiness phases. They remain valuable evidence but must not silently override current code or normative documentation. Such documents carry an explicit status banner and date:
+
+- [`architecture/browser-component-decision.md`](architecture/browser-component-decision.md) — accepted browser-packaging decision and its historical evidence;
+- [`legal/po-token-provider-distribution.md`](legal/po-token-provider-distribution.md) — July 2026 legal/policy research plus the accepted distribution decision;
+- [`performance/PACKAGE_AND_RUNTIME_PROFILE.md`](performance/PACKAGE_AND_RUNTIME_PROFILE.md) — dated package/runtime measurement snapshot; and
+- [`design/tag-editor/_reference/README.md`](design/tag-editor/_reference/README.md) — retired HTML-prototype context and its archived parity report.
 
 Historical documents are useful for **why** a decision was made; current normative documents define **what the project promises now**.
 
 ## QA and verification
 
-Manual visual/platform checks live under [`qa/`](qa/). They complement automated tests; they are not end-user instructions.
+Manual visual/platform checks live under [`qa/`](qa/). The reusable matrices currently cover the [`Metadata Explorer`](metadata_explorer_verification_matrix.md) and [`YouTube Doctor`](user-guide/youtube-doctor-qa.md). They complement automated tests; they are not end-user instructions.
 
 ## Documentation rule
 

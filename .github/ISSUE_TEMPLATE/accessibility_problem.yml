@@ -40,5 +40,5 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I searched existing Issues and Discussions first
+        - label: I searched existing Issues first
           required: true

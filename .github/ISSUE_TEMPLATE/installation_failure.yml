@@ -21,7 +21,7 @@ body:
       options:
         - Windows 10/11
         - macOS
-        - Linux (unsupported/experimental)
+        - Linux (supported from source; no official package)
     validations:
       required: true
   - type: dropdown
@@ -51,7 +51,7 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I searched existing Issues and Discussions first
+        - label: I searched existing Issues first
           required: true
         - label: I verified the download's SHA-256 against the release page (for installer/ZIP)
           required: false
