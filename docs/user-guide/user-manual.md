@@ -1,256 +1,190 @@
 # BananaFlow User Manual
 
-Status: **Current user reference**
+Status: **Current end-user reference**
 
-BananaFlow is a Windows-first desktop application for downloading, converting and organizing audio/video from YouTube, YouTube Music and Spotify metadata workflows, with a full batch Tag Editor, searchable history and a headless CLI.
+This manual is for people who want to **use BananaFlow**, not develop it. No programming knowledge is assumed.
 
 Official website: <https://bananaflow.bananaflow-media.workers.dev/> — downloads, Help, FAQ and support are available there in English and Hebrew.
 
-## 1. What BananaFlow includes
+## 1. Supported systems
 
-| Area | What it does |
-|---|---|
-| Queue / downloads | Resolve URLs, inspect playlists/albums/channels and download audio/video through the shared yt-dlp-based engine |
-| Search | YouTube, YouTube Music, and optional Spotify text search |
-| History | Searchable SQLite-backed record of completed downloads |
-| Converter | Convert local media to supported target formats with output verification |
-| Tag Editor | Proposal-first batch metadata editing with review, backup, journal, undo/redo, artwork/lyrics/ReplayGain/tools and safe Apply/restore |
-| Cookie Wizard / YouTube Doctor | Isolated sign-in helper plus local readiness diagnostics |
-| CLI | Headless access to the same core download engine |
-| Languages | English and Hebrew with RTL-aware layout |
-| Touch/accessibility | Keyboard/screen-reader/high-DPI/touch-aware behavior across supported UI surfaces |
+- **Windows 10/11 x64** — supported. Use the installer or portable package.
+- **macOS Apple Silicon** — supported. Use the macOS app/DMG from the official release. Because signing/notarization is currently limited, macOS may ask for an extra first-run approval; follow the release/website instructions if Gatekeeper blocks the first launch.
+- **Linux** — supported when running from source. BananaFlow is expected to work normally once its dependencies are installed, but there is no official Linux installer/package yet.
 
-## 2. Supported platforms
+For most users, the easiest path is the official download page. You do **not** need to install Python separately when using the Windows or macOS packaged release.
 
-- **Windows 10/11 x64** — primary supported packaged platform; installer and portable builds.
-- **macOS Apple Silicon** — experimental packaged support as described by current release notes; signing/notarization limitations may apply.
-- **Linux** — source/developer use only unless a release explicitly says otherwise.
+## 2. What BananaFlow does
 
-Packaged users do not need a separate Python installation. Source developers need the dependencies described in `README.md`/`CONTRIBUTING.md`.
+BananaFlow gives you one desktop app for:
 
-## 3. The main workflow
+- downloading audio/video from YouTube and YouTube Music;
+- importing Spotify track/album/playlist/artist links and finding a separate downloadable source;
+- searching YouTube/YouTube Music and, optionally, Spotify text search;
+- converting local media files;
+- editing music tags in batches;
+- keeping a searchable download history;
+- signing in to YouTube only when a video really requires it; and
+- diagnosing YouTube problems with YouTube Doctor.
 
-1. Paste a supported URL into the Queue screen or choose a result from Search.
-2. Fetch/resolve the URL so BananaFlow can build the item list.
-3. Choose media type, format/quality and output behavior.
+## 3. Normal download workflow
+
+1. Paste a link into BananaFlow, or choose a result from Search.
+2. Let BananaFlow load the item or collection.
+3. Choose audio/video, format, quality and output folder.
 4. Review the queue.
-5. Start the batch. Progress, completion/failure state and available ETA/speed information are shown while the backend works.
-6. Successful downloads are persisted in History and written under the configured output directory.
+5. Start the download.
+6. Follow the progress until the item finishes or BananaFlow shows an error/recommendation.
 
-Batch inputs can include playlists/albums and other supported collection URLs. Duplicate handling can skip, warn or overwrite according to settings and the applicable workflow.
+Completed downloads are written to your chosen folder and added to History.
 
-## 4. YouTube and YouTube Music
+## 4. Spotify: link import and text search are different
 
-BananaFlow uses yt-dlp for extraction/download and `ytmusicapi`/supporting logic for structured YouTube Music discovery where appropriate. YouTube sites change frequently, so current yt-dlp/runtime/provider health matters more than a permanently frozen list of supported page details.
+### Pasting a Spotify link
 
-### Reliability mode
+You can paste a Spotify track, album, playlist or artist link directly into BananaFlow. This does **not** require the optional Spotify Search Proxy.
 
-YouTube conservative reliability mode is the default. It limits YouTube request concurrency/cooldowns more aggressively than general downloads to reduce avoidable rate-limit/authentication challenges. A Fast mode is an explicit opt-in and may increase the chance of 403/rate-limit/sign-in/PO-token challenges.
+BananaFlow does not download Spotify's protected audio stream. It reads the descriptive information and resolves a separate downloadable source, normally from YouTube/YouTube Music.
 
-Run **YouTube Doctor** when YouTube behavior changes unexpectedly.
+### Typing a Spotify search
 
-## 5. Spotify: URL import is not Spotify search
+Spotify **text search** is an optional advanced feature that currently needs a self-hosted Spotify Search Proxy configured in Settings. If you do not run one, pasted Spotify links can still work even when Spotify text search does not.
 
-This distinction is important.
+Most users do not need to know the proxy API. The technical operator documentation is in [`spotify-proxy-api.md`](spotify-proxy-api.md).
 
-### Spotify URL import
+There is currently no BananaFlow-operated public Spotify Search Proxy. A future BananaFlow-owned matching/database service may replace this setup, but it is not part of the current product.
 
-Pasting a Spotify track, album, playlist or artist URL uses BananaFlow's browser-backed Spotify metadata scraper/resolver. It does **not** require the optional Spotify text-search proxy.
+## 5. Formats and quality
 
-BananaFlow does not download Spotify audio streams. It reads descriptive metadata, then resolves a separate media source (normally YouTube/YouTube Music) and downloads that source.
+Current audio outputs include MP3, M4A, FLAC and Opus. Video output is MP4.
 
-### Spotify text search
+A higher bitrate cannot restore quality that was already missing from the original source. FLAC avoids another lossy conversion step, but it cannot turn a lossy source into true lossless audio.
 
-Searching Spotify by typing a query in the **Search** screen uses the configured Spotify search proxy. The proxy API contract is [`spotify-proxy-api.md`](spotify-proxy-api.md). If no usable proxy is running/configured, Spotify text search will not return usable proxy results even though pasted Spotify URLs can still be imported.
+## 6. Output folders and duplicates
 
-## 6. Search
+The default output location is under `Downloads/BananaFlow`, unless you change it in Settings. Collections such as playlists/albums can be organized into subfolders and numbered automatically.
 
-- **YouTube Music** — structured songs/albums/artists/playlists.
-- **YouTube** — videos plus available playlist/channel categories.
-- **Spotify** — optional proxy-backed text search.
+When BananaFlow finds an existing file, the duplicate policy can skip, warn or overwrite according to your settings and the current workflow. Read the prompt before confirming an overwrite.
 
-Search results can be added to the queue. A track result resolves to a downloadable source; collection results preserve enough source information for the normal import workflow.
+## 7. Search
 
-## 7. Audio/video formats and quality
+The Search screen supports:
 
-Audio output supports MP3, M4A, FLAC and Opus. Video output is MP4 in the current product contract. Quality is selected through stable preset IDs/labels; fixed-resolution video presets act as caps while Auto/Best can select higher available resolution.
+- **YouTube Music** — songs, albums, artists and playlists;
+- **YouTube** — videos and supported collection results;
+- **Spotify** — optional text search through the self-hosted proxy described above.
 
-Higher output bitrate cannot restore source quality that was already lost. FLAC avoids another lossy encoding step; it does not make a lossy source lossless.
+Choose a result to add it to the normal BananaFlow workflow.
 
-FFmpeg is required for conversion/post-processing paths. Packaged releases stage the required reviewed FFmpeg component; source installs need an available FFmpeg as described by setup documentation.
+## 8. History
 
-## 8. Output organization
+History keeps a local record of completed downloads. You can search it, remove history records and export information to CSV.
 
-The default output root is `~/Downloads/BananaFlow` unless changed. Single items can land directly in the output root; collections/discographies may use named subfolders and track-index prefixes according to the workflow/settings.
+Deleting a history record does not automatically delete the media file unless you deliberately choose a separate file-deletion action.
 
-Filename cleaning removes common presentation noise while preserving meaningful variants where the matching/filename policy treats them as identity-relevant. Do not rely on a prose example as a stronger contract than the current filename/matching tests.
+## 9. Converter
 
-## 9. History
+The Converter works with local files. Add the files, choose the target format/quality/output location and start the conversion.
 
-History is stored locally in `downloads.db` under the BananaFlow app-data directory. The History screen supports recent-record browsing, full-text search, record deletion and CSV export; current UI actions also refresh from committed history while the application is running.
+BananaFlow checks the produced output before reporting success. Use copies when experimenting with unusual or unsupported media.
 
-Clearing a history record does not itself delete the downloaded media file unless a separate explicit file action says so.
+## 10. Tag Editor
 
-## 10. Converter
+The Tag Editor lets you edit many music files together without immediately writing every click to disk.
 
-The Converter works on local files and does not require an online service for the conversion itself. Add files, choose a target format/quality/output destination and start conversion. BananaFlow writes to a controlled output path and verifies the produced output rather than treating an FFmpeg exit alone as proof of success.
+The safe workflow is:
 
-Use disposable copies when testing unusual/unsupported media. Conversion should not silently destroy the source file.
+1. Open/scan a folder.
+2. Make the changes you want.
+3. Review the pending changes.
+4. Exclude anything you do not want to apply yet.
+5. Press **Apply** only when the review is correct.
 
-## 11. Tag Editor
+BananaFlow creates recovery information before disk-changing operations and verifies the write before replacing the original file. Undo/restore tools are available for supported operations.
 
-The Tag Editor is an offline-first metadata workspace. Network access occurs only for explicitly selected online metadata/artwork/lyrics features.
+The Tag Editor also includes artwork, lyrics, ReplayGain, duplicate tools, MusicBrainz/Cover Art lookup, CSV/report/playlist tools, actions/templates/workflows and file-management helpers.
 
-### Proposal-first model
+## 11. YouTube sign-in and cookies
 
-- Scanning loads original file state.
-- Edits/actions create **proposals**; they do not immediately change media files.
-- Row selection controls the scope of editing actions.
-- Apply scope is based on pending, non-excluded, non-blocked proposals — not simply current selection/filter.
-- Review Changes shows what will be written.
-- Undo/redo before Apply works on proposals in memory.
+Do not sign in unless the video actually requires authenticated access.
 
-### Apply safety
+The preferred method is BananaFlow's **Sign in** / Cookie Wizard flow in Settings. It opens an isolated BananaFlow-controlled browser session instead of silently taking cookies from your normal browser profile.
 
-A disk-changing Apply uses the documented safety path: validate backup target → write/validate backup and durable operation plan/journal → write each file through a same-filesystem temporary copy → read back/verify intended fields → atomically replace the original → perform validated rename steps → report per-file outcomes.
+If you manually use a `cookies.txt` file, treat it like a password. Never post it in an Issue, Discussion or screenshot.
 
-A failed verification leaves the original untouched. Rename failures do not get counted as complete success and their proposal remains recoverable/retryable. Incomplete journals can trigger recovery on a later launch.
+Settings also provides **Delete stored sign-in data** for BananaFlow-owned sign-in state.
 
-The detailed invariants are in `docs/architecture/tag-editor-safety.md`.
+## 12. YouTube Doctor
 
-### Tools
+If YouTube suddenly stops working, open **YouTube Doctor** in Settings. It checks the local download environment and gives a recommendation without showing your cookie values.
 
-The current Tag Editor includes fields, artwork, lyrics, ReplayGain, file properties, auto-arrange/actions/templates/workflows, duplicate handling, online MusicBrainz/Cover Art review, pending-change/problem/external-change review, CSV/report/playlist import/export flows and safe file-management actions.
+Useful examples:
 
-## 12. Authentication and cookies
+- outdated/broken downloader component;
+- missing JavaScript/runtime support;
+- sign-in/cookie problem;
+- PO Token Provider problem;
+- conservative/fast reliability mode state.
 
-Only configure cookies for content that genuinely requires authenticated access.
+You normally do not need to understand the implementation behind those checks — follow the recommendation shown by the app.
 
-### Preferred sign-in helper
+## 13. Updates
 
-Settings provides a sign-in helper that opens a BananaFlow-owned isolated Playwright browser profile. It does not silently reuse your normal Chrome/Edge profile. BananaFlow stores only the session material required by its documented YouTube flow and protects the BananaFlow-owned store to the current user where supported; Windows uses DPAPI for the protected cookie store.
+When update checks are enabled, BananaFlow checks for a newer official release. Packaged users should normally update **BananaFlow itself** rather than manually replacing individual bundled components.
 
-### Manual cookie file
+The app does not silently install a new application release without your approval.
 
-A Netscape-format `cookies.txt` can be configured where supported. Treat it like a password. Never attach it to a public issue or paste its values into logs.
+## 14. Common problems
 
-Live normal-browser extraction can be limited/disabled on platforms where browser locks/encryption make it unsafe or unreliable; use the isolated helper/manual export path documented by the current Settings UI instead of trying to bypass browser protections.
+### YouTube fails suddenly
 
-### Delete stored sign-in data
+Run YouTube Doctor and check whether a newer BananaFlow release exists.
 
-The Settings action removes BananaFlow-owned cookie/profile state. It does not sign you out of your normal browser.
+### Rate limit / HTTP 429
 
-## 13. YouTube Doctor
+Stop creating more requests, leave Conservative Mode enabled and try again after the service has had time to recover. More parallel downloads are not always faster.
 
-YouTube Doctor is a local readiness diagnostic available from Settings and through:
+### 403 / sign-in required
 
-```bash
-bananaflow-cli --doctor
-```
+Follow the exact BananaFlow/YouTube Doctor recommendation. Cookies are not the answer to every 403.
 
-It checks relevant downloader/runtime/cookie/provider/reliability state and gives recommendations without printing cookie values. The CLI diagnostic output is developer/support oriented and intentionally uses a stable console format; the GUI is the localized end-user surface.
+### Spotify link works but Spotify Search does not
 
-## 14. Runtime components
+That usually means the optional self-hosted Spotify Search Proxy is not configured/running. Link import and text search are separate systems.
 
-Packaged Windows releases can stage yt-dlp support components, a JavaScript runtime (Deno), Playwright Chromium and the configured PO Token Provider stack so a clean machine does not require manual runtime assembly. Exact versions/licenses/source information belong in `THIRD_PARTY_NOTICES.md`, `SOURCE_OFFER.md` and the release SBOM.
+### Windows SmartScreen warning
 
-BananaFlow itself does not manually scrape/store/inject live PO-token values; yt-dlp obtains them through its provider mechanism when needed.
+Current Windows packages are not Authenticode-signed. Download only from the official website/GitHub release and verify the published release information before proceeding.
 
-## 15. Settings and important defaults
+### macOS blocks the first launch
 
-`config.py` is the source of truth. Important current defaults include:
+The supported macOS package may require the current Gatekeeper first-run approval while signing/notarization is limited. Use the official release/help instructions rather than disabling system security globally.
 
-| Setting | Default |
-|---|---|
-| Output directory | `~/Downloads/BananaFlow` |
-| Media type | audio |
-| Audio format | MP3 |
-| Video format | MP4 |
-| Theme | light |
-| Accent | BananaFlow green (`#10A37F`) |
-| Language | detected from system (Hebrew when detected, otherwise English) |
-| Clipboard monitor | off |
-| Update checks | on |
-| Max general parallel downloads | 3 |
-| YouTube reliability mode | conservative |
-| Duplicate action | warn |
-| Embed thumbnail / metadata | on |
-| Square thumbnails | on |
-| MusicBrainz enrichment | on |
-| Lyrics / ReplayGain / SponsorBlock | off by default |
-| Spotify search proxy URL | `http://localhost:8000` until the user changes/disables it |
+### Linux has no installer
 
-The Settings UI is organized into user-facing groups/pages; rely on the labels in your installed version rather than old screenshots from pre-release development.
+Linux is supported from source, but an official packaged installer is not published yet. The source-install instructions live in the repository README for users comfortable with that setup.
 
-## 16. Updates
+## 15. Privacy and support
 
-When update checks are enabled, BananaFlow checks the public GitHub release feed. Packaged users normally update BananaFlow as a whole so the app and bundled components stay on a tested combination. Component-version checks can provide advanced/source-install guidance, but the normal packaged path is the official BananaFlow release/download page.
+BananaFlow does not automatically upload desktop usage telemetry to the maintainer. Some features contact third-party services because that is how the feature works. See [`../../PRIVACY.md`](../../PRIVACY.md) for the full data/network list.
 
-The current product does not silently install an unapproved application update in the background.
+Never share cookies, passwords, tokens or private media/log details publicly.
 
-## 17. CLI
+For help:
 
-See [`cli.md`](cli.md). The exact option list is always available through:
+- official website Help/FAQ/support;
+- [`../../SUPPORT.md`](../../SUPPORT.md);
+- GitHub Issues for reproducible bugs;
+- GitHub Discussions for questions and pre-release testing.
 
-```bash
-bananaflow-cli --help
-```
+Use BananaFlow only for material you are entitled to access, download and store. See [`../legal/acceptable-use.md`](../legal/acceptable-use.md).
 
-Common flags include output directory, media type, audio format, quality preset, parallelism, cookies, list-only, quiet/debug, `--doctor` and `--version`.
+## 16. Advanced users
 
-## 18. Local data and privacy
+The ordinary user manual intentionally stops here. Advanced/technical material is kept separately so it does not make basic help harder to read:
 
-BananaFlow desktop telemetry is not automatically uploaded to the maintainer. Local application state includes configuration, history, update state, logs, optional sign-in data/browser profile and Tag Editor recovery/workflow data. The complete current inventory and network-service table are in [`../../PRIVACY.md`](../../PRIVACY.md).
-
-The official website is a separate project with its own privacy/consent notice.
-
-## 19. Troubleshooting
-
-### YouTube suddenly fails
-
-Run YouTube Doctor. Update BananaFlow if a newer release exists. Distinguish sign-in/cookie failures from PO-token/runtime failures and from permanent video availability/geo/copyright errors; repeatedly retrying a permanent failure is not a fix.
-
-### HTTP 429 / rate limit
-
-Stop creating additional request bursts, allow the service to recover and keep conservative reliability mode enabled. More parallelism is not necessarily faster when a remote service is throttling.
-
-### HTTP 403 / sign-in required
-
-Follow the error/Doctor recommendation. Do not assume every 403 is fixed by cookies; provider/runtime, availability and service-side policy can produce different permanent failures.
-
-### Spotify URL works but Spotify Search does not
-
-This is expected when the optional search proxy is not running/configured. URL import and text search are separate systems.
-
-### FFmpeg missing in source install
-
-Install a recent FFmpeg and put it on `PATH`. Packaged release builds stage their reviewed FFmpeg input.
-
-### Playwright/browser component missing in source install
-
-Install the repository's documented Playwright Chromium dependency. Packaged builds include the browser payload expected by the release.
-
-### Logs
-
-Use debug output only when needed and inspect it before sharing. Never post cookies/tokens/private URLs or unredacted configuration publicly.
-
-## 20. Current limitations
-
-- Windows is the primary supported packaged platform; other platforms have the status described above.
-- Windows binaries are currently unsigned, so SmartScreen may warn on first run; verify official release provenance/checksums.
-- Third-party sites can change without notice; generic-site extraction is best effort and intentionally does not promise DRM bypass.
-- Spotify text search depends on the optional configured proxy, while Spotify URL import does not.
-- Update checks do not mean silent background installation.
-
-## 21. Developer/release documentation
-
-End users normally do not need build internals. Contributors should use:
-
-- `CONTRIBUTING.md`
-- `docs/testing/TESTING.md`
-- `docs/architecture/overview.md`
-- `PROJECT_STRUCTURE.md`
-- `docs/release/RELEASING.md`
-- `SECURITY.md` / `PRIVACY.md`
-
-License: GPL-3.0-or-later; third-party notices and source availability are documented in the repository's license/source bundle.
+- [`cli.md`](cli.md) — command-line use;
+- [`spotify-proxy-api.md`](spotify-proxy-api.md) — self-hosted Spotify text-search proxy;
+- [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) — development;
+- [`../testing/TESTING.md`](../testing/TESTING.md) — testing;
+- [`../architecture/overview.md`](../architecture/overview.md) — architecture.

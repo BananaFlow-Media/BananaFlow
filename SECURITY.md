@@ -11,7 +11,7 @@ Security reports are accepted for:
 
 Older releases are not guaranteed to receive backports. Users should normally upgrade to the latest public release when a security fix is published. `version.py` is the source of truth for the version being built; do not copy a hard-coded “latest version” into this policy.
 
-Windows 10/11 x64 is the primary supported packaged platform. Other platform support is described in the README and user manual and may be experimental or source-only.
+Platform support is product support, not a signing claim: Windows 10/11 x64 and macOS Apple Silicon are supported packaged targets. Linux is a supported source-install platform and is expected to work normally when its dependencies are installed; an official Linux installer/package is not published yet.
 
 ## Reporting a vulnerability
 
@@ -69,7 +69,7 @@ Downloads offered elsewhere are not official BananaFlow releases.
 
 BananaFlow checks public release metadata when update checks are enabled. Packaged users are directed to the official release/download path; the app does not silently replace itself with an unverified build.
 
-Windows packages are currently unsigned with Authenticode. macOS support/signing status is described by the release documentation. A checksum detects mismatch/corruption relative to a separately trusted published value, but it is not a substitute for publisher identity or code signing.
+Windows packages are currently unsigned with Authenticode. The supported macOS package can also have signing/notarization limitations documented in the release notes. A checksum detects mismatch/corruption relative to a separately trusted published value, but it is not a substitute for publisher identity or code signing.
 
 Published release assets are immutable evidence: security fixes ship as new versioned releases rather than silently replacing previously published binaries.
 

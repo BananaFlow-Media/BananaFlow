@@ -10,13 +10,13 @@
 
 **Official website: <https://bananaflow.bananaflow-media.workers.dev/>** — downloads, Help, FAQ and support in [English](https://bananaflow.bananaflow-media.workers.dev/en/) and [Hebrew](https://bananaflow.bananaflow-media.workers.dev/he/). This repository is the application source; the website is maintained separately.
 
-BananaFlow is a Windows-first desktop application for downloading audio/video from **YouTube** and **YouTube Music**, resolving **Spotify metadata to separate downloadable sources**, converting local media, and managing music metadata with a full batch **Tag Editor**. Hebrew is a first-class RTL interface alongside English.
+BananaFlow is a cross-platform desktop application for downloading audio/video from **YouTube** and **YouTube Music**, resolving **Spotify metadata to separate downloadable sources**, converting local media, and managing music metadata with a full batch **Tag Editor**. Hebrew is a first-class RTL interface alongside English.
 
 ## Download
 
 Use the official [download page](https://bananaflow.bananaflow-media.workers.dev/en/download/) ([Hebrew](https://bananaflow.bananaflow-media.workers.dev/he/download/)) or this repository's [GitHub Releases](https://github.com/BananaFlow-Media/BananaFlow/releases). Release assets include published SHA-256 checksums and an SBOM.
 
-> **Signing:** current Windows binaries are not Authenticode-signed. SmartScreen may warn on first run. macOS packaged support is experimental and its current signing/notarization status is stated in release notes. See [`SECURITY.md`](SECURITY.md) before running an artifact from an unfamiliar source.
+> **Signing:** current Windows binaries are not Authenticode-signed, so SmartScreen may warn on first run. The supported macOS Apple Silicon package may also require the documented Gatekeeper first-run override while signing/notarization remains limited. See [`SECURITY.md`](SECURITY.md) before running an artifact from an unfamiliar source.
 
 ## Features
 
@@ -31,11 +31,16 @@ Use the official [download page](https://bananaflow.bananaflow-media.workers.dev
 - **Bilingual / accessible UI** — English + Hebrew RTL, keyboard/screen-reader/high-DPI/touch-aware behavior.
 - **CLI** — headless download/list/diagnostic access to the shared backend.
 
-Complete user references:
+Complete end-user references:
 
 - [English User Manual](docs/user-guide/user-manual.md)
 - [מדריך משתמש בעברית](docs/user-guide/user-guide-he.md)
+
+Advanced/technical references:
+
 - [CLI Reference](docs/user-guide/cli.md)
+- [Contributor guide](CONTRIBUTING.md)
+- [Documentation index](docs/README.md)
 
 ## Source-development requirements
 
@@ -63,7 +68,8 @@ python cli.py --help
 ## Building distributable packages
 
 - **Windows:** `scripts/build_windows.ps1` produces the application folder/portable package and release inputs; `packaging/bananaflow.iss` defines the Inno Setup installer.
-- **macOS:** `scripts/build_macos.sh` produces the current Apple Silicon app/DMG path.
+- **macOS:** `scripts/build_macos.sh` produces the supported Apple Silicon app/DMG path.
+- **Linux:** supported from source; no official Linux installer/package is published yet.
 
 Bundled component staging, license/source review, SBOM/checksums and manual acceptance are defined by [`docs/release/RELEASING.md`](docs/release/RELEASING.md) and [`docs/security/supply-chain.md`](docs/security/supply-chain.md).
 
@@ -106,9 +112,9 @@ Key contributor references:
 
 | Platform | Status |
 |---|---|
-| **Windows 10/11 x64** | Primary supported packaged target — installer + portable package |
-| **macOS Apple Silicon** | Experimental packaged support; see current release notes |
-| **Linux** | Source/developer use unless a release explicitly says otherwise |
+| **Windows 10/11 x64** | Supported packaged target — installer + portable package; primary packaging target |
+| **macOS Apple Silicon** | Supported packaged target — app/DMG; current signing/notarization limitations are documented per release |
+| **Linux** | Supported source-install platform; expected to run normally when dependencies are installed, but no official installer/package is published yet |
 
 ## License, third parties and brand
 
