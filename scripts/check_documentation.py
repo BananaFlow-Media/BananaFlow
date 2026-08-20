@@ -46,6 +46,8 @@ CURRENT_DOCS = (
     "SUPPORT.md",
     "CONTRIBUTING.md",
     "docs/README.md",
+    "docs/AI_CONTEXT.md",
+    "docs/DOCUMENTATION_POLICY.md",
     "docs/user-guide/user-manual.md",
     "docs/user-guide/user-guide-he.md",
     "docs/release/RELEASING.md",
@@ -59,6 +61,17 @@ STABLE_FORBIDDEN_PHRASES = (
     "v0.1.0 is the latest public release",
     "no public project website is currently operated",
     "a project website, winget",
+)
+
+PLATFORM_FORBIDDEN_PHRASES = (
+    "macos packaged support is experimental",
+    "macos is experimental",
+    "experimental packaged support",
+    "source/developer use unless a release explicitly says otherwise",
+    "source install only, unsupported",
+    "source-install-only, unsupported",
+    "linux remains source/developer-oriented",
+    "linux remains source-install-only",
 )
 
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
@@ -147,8 +160,6 @@ def _resolve_reference(source: Path, target: str) -> Path | None:
     if source_relative.is_file():
         return source_relative
 
-    # Backticked repository paths are often written from repo root even inside
-    # nested docs. Accept that form when the root-relative target exists.
     root_relative = (ROOT / rel).resolve()
     if _inside_root(root_relative) and root_relative.is_file():
         return root_relative
@@ -190,6 +201,25 @@ def check_stale_release_language() -> list[str]:
         for phrase in STABLE_FORBIDDEN_PHRASES:
             if phrase in lowered:
                 errors.append(f"{path}: stale Stable/Beta wording contains {phrase!r}")
+    return errors
+
+
+def check_platform_support_language() -> list[str]:
+    """Reject the retired platform-status wording in current documents.
+
+    Historical evidence is deliberately not scanned here. Current product
+    policy is: Windows 10/11 x64 + macOS Apple Silicon are supported packaged
+    targets; Linux is supported from source but has no official package yet.
+    """
+    errors: list[str] = []
+    for path in CURRENT_DOCS:
+        file = ROOT / path
+        if not file.exists():
+            continue
+        lowered = file.read_text(encoding="utf-8").casefold()
+        for phrase in PLATFORM_FORBIDDEN_PHRASES:
+            if phrase in lowered:
+                errors.append(f"{path}: stale platform-support wording contains {phrase!r}")
     return errors
 
 
@@ -369,6 +399,7 @@ def run(base: str | None = None, head: str | None = None) -> list[str]:
         check_required_files,
         check_markdown_references,
         check_stale_release_language,
+        check_platform_support_language,
         check_provider_consistency,
         check_ytdlp_consistency,
         check_ai_adapters,

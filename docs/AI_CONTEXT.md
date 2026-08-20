@@ -6,9 +6,11 @@ This is a compact project map for coding agents. It deliberately links to detail
 
 ## Product
 
-BananaFlow is a Windows-first PySide6 desktop application with a headless CLI. It downloads and organizes media from YouTube/YouTube Music and resolves Spotify metadata to separate downloadable sources; it also includes search, history, a format converter and a safety-oriented batch Tag Editor. English and Hebrew/RTL are first-class UI languages.
+BananaFlow is a cross-platform PySide6 desktop application with a headless CLI. Windows 10/11 x64 and macOS Apple Silicon are supported packaged targets; Linux is supported from source even though no official Linux installer/package is published yet. It downloads and organizes media from YouTube/YouTube Music and resolves Spotify metadata to separate downloadable sources; it also includes search, history, a format converter and a safety-oriented batch Tag Editor. English and Hebrew/RTL are first-class UI languages.
 
 The official website is a separate project. This repository contains the application, CLI, tests, packaging and application documentation.
+
+The main English/Hebrew user manuals are written for ordinary non-programmer users. Developer/build/architecture details belong in contributor/testing/architecture/release documentation instead of being duplicated into the user manual.
 
 ## Architecture in one minute
 
@@ -52,6 +54,7 @@ Before modifying code, locate the matching row in [`DOCUMENTATION_POLICY.md`](DO
 ## Common references
 
 - User behavior: [`user-guide/user-manual.md`](user-guide/user-manual.md), [`user-guide/user-guide-he.md`](user-guide/user-guide-he.md)
+- Platform support/distribution: [`../README.md`](../README.md), [`release/RELEASING.md`](release/RELEASING.md)
 - CLI: [`user-guide/cli.md`](user-guide/cli.md)
 - Privacy: [`../PRIVACY.md`](../PRIVACY.md)
 - Security: [`../SECURITY.md`](../SECURITY.md)

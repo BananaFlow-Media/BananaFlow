@@ -10,7 +10,8 @@ The purpose of this policy is to prevent documentation drift. Code, tests and af
 2. **Current vs historical is explicit.** Current normative documents describe what BananaFlow promises now. Historical research records why a decision was made at a point in time and carries a date/status banner.
 3. **Behavior changes include documentation review.** A PR that changes externally observable behavior, architecture, persistence, security/privacy, packaging or developer workflow must update the mapped documents or explicitly explain why none changed.
 4. **English/Hebrew parity is a product requirement.** User-facing behavior documented in one full user guide must be reflected in the other; wording can differ naturally but capability and safety guidance must agree.
-5. **Do not encode “latest” as a hard-coded version unless the file owns that policy.** `version.py` owns the application version; `CHANGELOG.md` owns release history.
+5. **End-user docs are for end users.** The main user manuals assume no programming knowledge. Build/architecture/test internals belong in contributor documentation unless a technical detail is genuinely needed to solve a user task.
+6. **Do not encode “latest” as a hard-coded version unless the file owns that policy.** `version.py` owns the application version; `CHANGELOG.md` owns release history.
 
 ## Source-of-truth matrix
 
@@ -19,6 +20,7 @@ The purpose of this policy is to prevent documentation drift. Code, tests and af
 | Application version/product metadata | `version.py` |
 | Release history | `CHANGELOG.md` |
 | Release procedure | `docs/release/RELEASING.md` |
+| Platform support/distribution status | `README.md` + `docs/release/RELEASING.md`; user manuals must agree |
 | Security support/reporting | `SECURITY.md` |
 | Privacy/network/local data | `PRIVACY.md` |
 | Architecture boundaries | `docs/architecture/overview.md` + `PROJECT_STRUCTURE.md` |
@@ -49,11 +51,12 @@ Review every matching row. “Review” means either update the document or reco
 | `ui/**` visible behavior | user manual EN+HE; accessibility; translation rules; screenshots in PR for visible changes |
 | `cli.py` | `user-guide/cli.md`; README/user manual when discoverability or behavior changes |
 | Dependency/`requirements`/`pyproject` | `THIRD_PARTY_NOTICES.md`; supply-chain doc if process changes; release docs when packaging impact exists |
-| `packaging/**`, release workflows/build scripts | `docs/release/RELEASING.md`; `SOURCE_OFFER.md`; `THIRD_PARTY_NOTICES.md`; supply-chain doc; packaging README(s) |
+| `packaging/**`, release workflows/build scripts | `docs/release/RELEASING.md`; `SOURCE_OFFER.md`; `THIRD_PARTY_NOTICES.md`; supply-chain doc; packaging README(s); platform support text if distribution changes |
 | Update checker/updater/component updates | user manual; security; privacy if new network calls/data; updater architecture doc; threat model |
 | New external service or endpoint | `PRIVACY.md`; user manual; threat model; acceptable-use if user responsibility changes |
 | New persisted file/cache/log | `PRIVACY.md`; migration docs; architecture; deletion/retention guidance |
 | Version/release channel | `CHANGELOG.md`; `SECURITY.md` policy review; release notes/docs; avoid hard-coded copies elsewhere |
+| Platform/package support status | `README.md`; `docs/release/RELEASING.md`; `SECURITY.md`; EN+HE user manuals; AI context |
 | New user-facing text | `ui/i18n.py` EN+HE; relevant user guide if behavior/instruction changes |
 | Documentation layout/ownership | `docs/README.md`; this policy; AI context/adapters if navigation changes |
 

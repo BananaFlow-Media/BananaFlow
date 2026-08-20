@@ -22,6 +22,10 @@ def test_stable_release_detection_uses_version_source_of_truth():
     assert mod._is_stable() is True
 
 
+def test_current_platform_support_wording_has_no_retired_status():
+    assert mod.check_platform_support_language() == []
+
+
 def test_provider_version_sources_agree():
     values = mod._provider_versions()
     assert len(values) >= 2
