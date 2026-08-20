@@ -92,6 +92,6 @@ tqdm==4.67.3
 typing_extensions==4.15.0
 urllib3==2.7.0
 websockets==16.0
-yt-dlp==2026.7.4
+yt-dlp==2026.8.19
 yt-dlp-ejs==0.8.0
 ytmusicapi==1.12.1
