@@ -28,5 +28,20 @@ def test_provider_version_sources_agree():
     assert len(set(values.values())) == 1
 
 
+def test_ytdlp_compatibility_floor_and_reviewed_pin_agree():
+    floors = mod._ytdlp_floor_sources()
+    assert set(floors) == {
+        "pyproject.toml",
+        "core/youtube_doctor.py",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+    }
+    assert len(set(floors.values())) == 1
+    exact = mod._ytdlp_exact_release_pins()
+    assert set(exact) == {"requirements.txt", "pyproject.toml dev extra"}
+    assert len(set(exact.values())) == 1
+    assert mod.check_ytdlp_consistency() == []
+
+
 def test_ai_adapters_point_to_canonical_context():
     assert mod.check_ai_adapters() == []

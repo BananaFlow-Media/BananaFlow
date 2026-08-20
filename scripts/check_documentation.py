@@ -148,9 +148,7 @@ def _resolve_reference(source: Path, target: str) -> Path | None:
         return source_relative
 
     # Backticked repository paths are often written from repo root even inside
-    # nested docs (for example `docs/architecture/...`). Accept that form when
-    # the root-relative target actually exists; otherwise report the original
-    # source-relative candidate as broken.
+    # nested docs. Accept that form when the root-relative target exists.
     root_relative = (ROOT / rel).resolve()
     if _inside_root(root_relative) and root_relative.is_file():
         return root_relative
@@ -198,17 +196,17 @@ def check_stale_release_language() -> list[str]:
 def _provider_versions() -> dict[str, str]:
     values: dict[str, str] = {}
     stage = _read("packaging/stage_pot_provider.py")
-    m = re.search(r'^PROVIDER_VERSION\s*=\s*["\']([^"\']+)', stage, re.M)
-    if m:
-        values["packaging/stage_pot_provider.py"] = m.group(1)
+    match = re.search(r'^PROVIDER_VERSION\s*=\s*["\']([^"\']+)', stage, re.M)
+    if match:
+        values["packaging/stage_pot_provider.py"] = match.group(1)
     pyproject = _read("pyproject.toml")
-    m = re.search(r"bgutil-ytdlp-pot-provider==([0-9][^\"']*)", pyproject)
-    if m:
-        values["pyproject.toml"] = m.group(1)
+    match = re.search(r"bgutil-ytdlp-pot-provider==([0-9][^\"']*)", pyproject)
+    if match:
+        values["pyproject.toml"] = match.group(1)
     readme = _read("packaging/yt-dlp-plugins/README.md")
-    m = re.search(r"bgutil-ytdlp-pot-provider==([0-9][0-9A-Za-z.\-+]*)", readme)
-    if m:
-        values["packaging/yt-dlp-plugins/README.md"] = m.group(1)
+    match = re.search(r"bgutil-ytdlp-pot-provider==([0-9][0-9A-Za-z.\-+]*)", readme)
+    if match:
+        values["packaging/yt-dlp-plugins/README.md"] = match.group(1)
     return values
 
 
@@ -222,6 +220,81 @@ def check_provider_consistency() -> list[str]:
     version = next(iter(values.values()))
     if version not in _read("THIRD_PARTY_NOTICES.md"):
         errors.append(f"THIRD_PARTY_NOTICES.md does not mention staged provider version {version}")
+    return errors
+
+
+def _ytdlp_floor_sources() -> dict[str, str]:
+    values: dict[str, str] = {}
+    pyproject = _read("pyproject.toml")
+    match = re.search(r"yt-dlp\[default\]>=([0-9]+(?:\.[0-9]+){2})", pyproject)
+    if match:
+        values["pyproject.toml"] = match.group(1)
+
+    doctor = _read("core/youtube_doctor.py")
+    match = re.search(r'^MIN_YT_DLP_VERSION\s*=\s*["\']([^"\']+)', doctor, re.M)
+    if match:
+        values["core/youtube_doctor.py"] = match.group(1)
+
+    readme = _read("README.md")
+    match = re.search(r"Compatibility floor\s+\*\*≥\s*([0-9]+(?:\.[0-9]+){2})\*\*", readme)
+    if match:
+        values["README.md"] = match.group(1)
+
+    notices = _read("THIRD_PARTY_NOTICES.md")
+    match = re.search(r"yt-dlp\[default\]>=([0-9]+(?:\.[0-9]+){2})", notices)
+    if match:
+        values["THIRD_PARTY_NOTICES.md"] = match.group(1)
+    return values
+
+
+def _version_numbers(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", value))
+
+
+def _ytdlp_exact_release_pins() -> dict[str, str]:
+    values: dict[str, str] = {}
+    requirements = _read("requirements.txt")
+    match = re.search(r"^yt-dlp\[default\]==([^\s#]+)", requirements, re.M)
+    if match:
+        values["requirements.txt"] = match.group(1)
+    pyproject = _read("pyproject.toml")
+    exact = re.findall(r"yt-dlp\[default\]==([^\"']+)", pyproject)
+    if exact:
+        values["pyproject.toml dev extra"] = exact[0]
+    return values
+
+
+def check_ytdlp_consistency() -> list[str]:
+    floors = _ytdlp_floor_sources()
+    expected_floor_sources = {
+        "pyproject.toml",
+        "core/youtube_doctor.py",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+    }
+    errors: list[str] = []
+    missing = expected_floor_sources - set(floors)
+    if missing:
+        errors.append("could not read yt-dlp compatibility floor from: " + ", ".join(sorted(missing)))
+        return errors
+    if len(set(floors.values())) != 1:
+        errors.append("yt-dlp compatibility-floor drift: " + ", ".join(f"{k}={v}" for k, v in floors.items()))
+        return errors
+
+    exact = _ytdlp_exact_release_pins()
+    if {"requirements.txt", "pyproject.toml dev extra"} - set(exact):
+        errors.append("could not read reviewed exact yt-dlp release/test pin from requirements.txt and pyproject dev extra")
+        return errors
+    if len(set(exact.values())) != 1:
+        errors.append("yt-dlp exact release/test pin drift: " + ", ".join(f"{k}={v}" for k, v in exact.items()))
+        return errors
+
+    floor_tuple = _version_numbers(next(iter(floors.values())))
+    exact_tuple = _version_numbers(next(iter(exact.values())))
+    if exact_tuple[:3] < floor_tuple[:3]:
+        errors.append(
+            f"reviewed exact yt-dlp pin {next(iter(exact.values()))} is older than compatibility floor {next(iter(floors.values()))}"
+        )
     return errors
 
 
@@ -279,7 +352,7 @@ def check_pr_impact(base: str, head: str) -> list[str]:
         )
 
     for rule in IMPACT_RULES:
-        matched = [f for f in files if any(re.search(p, f, re.I) for p in rule.path_patterns)]
+        matched = [f for f in files if any(re.search(pattern, f, re.I) for pattern in rule.path_patterns)]
         if not matched or no_docs:
             continue
         if not (changed_md & set(rule.docs_any)):
@@ -297,6 +370,7 @@ def run(base: str | None = None, head: str | None = None) -> list[str]:
         check_markdown_references,
         check_stale_release_language,
         check_provider_consistency,
+        check_ytdlp_consistency,
         check_ai_adapters,
     ):
         errors.extend(checker())
