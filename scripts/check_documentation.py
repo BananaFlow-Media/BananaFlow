@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -57,7 +58,7 @@ STABLE_FORBIDDEN_PHRASES = (
     "road from the current beta",
     "v0.1.0 is the latest public release",
     "no public project website is currently operated",
-    "a project website" + ", winget",  # catches old roadmap wording only
+    "a project website, winget",
 )
 
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
@@ -113,7 +114,6 @@ def _is_stable() -> bool:
 def _clean_link(raw: str) -> str:
     raw = raw.strip()
     if " " in raw and not raw.startswith("<"):
-        # Markdown target may contain an optional quoted title.
         raw = raw.split(" ", 1)[0]
     return raw.strip("<>")
 
@@ -124,8 +124,15 @@ def _looks_like_local_markdown(target: str) -> bool:
     parsed = urlsplit(target)
     if parsed.scheme or parsed.netloc:
         return False
-    path = unquote(parsed.path)
-    return path.lower().endswith(".md")
+    return unquote(parsed.path).lower().endswith(".md")
+
+
+def _inside_root(candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(ROOT.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _resolve_reference(source: Path, target: str) -> Path | None:
@@ -133,14 +140,21 @@ def _resolve_reference(source: Path, target: str) -> Path | None:
     rel = unquote(parsed.path)
     if not rel:
         return source
-    candidate = (source.parent / rel).resolve()
-    try:
-        candidate.relative_to(ROOT.resolve())
-    except ValueError:
-        # Some root community docs use ../../issues or discussions links; only
-        # actual Markdown file references are considered local documentation.
+
+    source_relative = (source.parent / rel).resolve()
+    if not _inside_root(source_relative):
         return None
-    return candidate
+    if source_relative.is_file():
+        return source_relative
+
+    # Backticked repository paths are often written from repo root even inside
+    # nested docs (for example `docs/architecture/...`). Accept that form when
+    # the root-relative target actually exists; otherwise report the original
+    # source-relative candidate as broken.
+    root_relative = (ROOT / rel).resolve()
+    if _inside_root(root_relative) and root_relative.is_file():
+        return root_relative
+    return source_relative
 
 
 def check_required_files() -> list[str]:
@@ -200,10 +214,9 @@ def _provider_versions() -> dict[str, str]:
 
 def check_provider_consistency() -> list[str]:
     values = _provider_versions()
-    errors: list[str] = []
     if len(values) < 2:
-        errors.append("could not read PO Token Provider version from expected sources")
-        return errors
+        return ["could not read PO Token Provider version from expected sources"]
+    errors: list[str] = []
     if len(set(values.values())) != 1:
         errors.append("PO Token Provider version drift: " + ", ".join(f"{k}={v}" for k, v in values.items()))
     version = next(iter(values.values()))
@@ -236,7 +249,7 @@ def changed_files(base: str, head: str) -> list[str]:
 
 
 def _pr_body() -> str:
-    event_path = Path(str(__import__("os").environ.get("GITHUB_EVENT_PATH", "")))
+    event_path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
     if not event_path.is_file():
         return ""
     try:
@@ -256,8 +269,7 @@ def check_pr_impact(base: str, head: str) -> list[str]:
     files = changed_files(base, head)
     codeish = [f for f in files if f.endswith((".py", ".toml", ".txt", ".yml", ".yaml", ".ps1", ".sh", ".iss", ".spec"))]
     changed_md = {f for f in files if f.lower().endswith(".md")}
-    body = _pr_body()
-    no_docs = _no_docs_impact_declared(body)
+    no_docs = _no_docs_impact_declared(_pr_body())
     errors: list[str] = []
 
     if codeish and not changed_md and not no_docs:
