@@ -52,7 +52,7 @@ BananaFlow לא מורידה את זרם האודיו המוגן של Spotify. �
 
 רוב המשתמשים לא צריכים להתעסק עם חוזה ה־API. המסמך הטכני נמצא ב־[`spotify-proxy-api.md`](spotify-proxy-api.md).
 
-כרגע אין שרת Spotify Search Proxy ציבורי שמופעל על ידי BananaFlow. בעתיד ייתכן שמערכת התאמות/מסד נתונים של BananaFlow תחליף את ההגדרה הזאת, אבל זה לא חלק מהמוצר הנוכחי.
+כרגע אין שרת Spotify Search Proxy ציבורי שמופעל על ידי BananaFlow. יש להשתמש רק בשרת self-hosted שהגדרתם בעצמכם ושאתם סומכים עליו.
 
 ## 5. פורמטים ואיכות
 
@@ -175,7 +175,7 @@ BananaFlow לא שולחת אוטומטית למתחזק טלמטריית שימ
 - אתר BananaFlow — Help / FAQ / Support;
 - [`../../SUPPORT.md`](../../SUPPORT.md);
 - GitHub Issues לבאג שאפשר לשחזר;
-- GitHub Discussions לשאלות ולבדיקת גרסאות מוקדמות.
+- טופס ה־Issue המתאים ב־GitHub לדיווח שניתן לשחזר, לבקשת תכונה או למשוב על גרסת בדיקה.
 
 השתמשו ב־BananaFlow רק בתוכן שיש לכם זכות לגשת אליו, להוריד ולשמור. ראו [`../legal/acceptable-use.md`](../legal/acceptable-use.md).
 

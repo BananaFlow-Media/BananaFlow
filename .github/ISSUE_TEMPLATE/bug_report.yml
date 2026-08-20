@@ -17,7 +17,7 @@ body:
     id: version
     attributes:
       label: BananaFlow version
-      placeholder: e.g. 0.2.0 (Help → About, or `bananaflow-cli --version`)
+      placeholder: e.g. x.y.z (use Help → About, or `bananaflow-cli --version`)
     validations:
       required: true
   - type: dropdown
@@ -27,7 +27,7 @@ body:
       options:
         - Windows 10/11
         - macOS
-        - Linux (unsupported/experimental)
+        - Linux (supported from source; no official package)
     validations:
       required: true
   - type: dropdown
@@ -77,7 +77,7 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I searched existing Issues and Discussions first
+        - label: I searched existing Issues first
           required: true
         - label: I did not include any cookies, tokens, passwords, or a live PO Token value
           required: true

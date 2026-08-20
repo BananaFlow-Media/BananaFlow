@@ -14,18 +14,19 @@ The repository user manual is [`docs/user-guide/user-manual.md`](docs/user-guide
 
 1. Check the website Help/FAQ and the user manual troubleshooting section.
 2. Run **YouTube Doctor** from Settings or `bananaflow-cli --doctor` for download-environment problems.
-3. Search existing Issues/Discussions.
+3. Search existing Issues.
 4. Reproduce with the current public release when practical.
 
 ## Where to ask
 
-- Usage/how-to questions → [Discussions / Help](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/help) after checking the website Help/FAQ.
+- Usage/how-to questions → the official website [Support page](https://bananaflow.bananaflow-media.workers.dev/en/support/) after checking Help/FAQ.
 - Reproducible bug → the closest Issue template (general bug, install/download/converter/Tag Editor/site compatibility, etc.).
-- Accessibility/RTL/translation problem → the dedicated Issue form or [Discussions / Translations](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations).
-- Feature idea → [Discussions / Ideas](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/ideas) first for broad proposals; a scoped issue once behavior is clear.
-- Pre-release/nightly/build testing feedback → [Discussions / Beta Testing](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/beta-testing). The category remains useful even while the normal product line is Stable.
-- Architecture/contribution question → `CONTRIBUTING.md` and [Discussions / Development](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development).
+- Accessibility/RTL/translation problem → the dedicated Issue form.
+- Feature idea or architecture proposal → the Feature Request form; read `CONTRIBUTING.md` first for implementation proposals.
+- Pre-release/nightly/build testing feedback → the closest Issue form, with the exact build identifier and reproduction details.
 - Security vulnerability → **never a public issue**; follow `SECURITY.md`.
+
+GitHub Discussions are not currently enabled for this repository. If they are enabled later, the support routes above must be reviewed before documentation starts linking to discussion categories again.
 
 ## What not to post publicly
 

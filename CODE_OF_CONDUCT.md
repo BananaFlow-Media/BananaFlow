@@ -46,18 +46,24 @@ inappropriate, threatening, offensive, or harmful.
 ## Scope
 
 This Code of Conduct applies within all community spaces (Issues, Pull
-Requests, Discussions, and any other official communication channel), and
+Requests, the official support site, and any other official communication channel), and
 also applies when an individual is officially representing the community
 in public spaces.
 
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainers listed in `MAINTAINERS.md` via GitHub private
-vulnerability reporting's contact path or a direct message on the
-platform where the behavior occurred, if no other private channel is
-available. All complaints will be reviewed and investigated promptly and
-fairly.
+reported privately to **bananaflow.media@gmail.com** with the subject
+“Code of Conduct report”. Include only the information needed to understand
+and investigate the incident. This address is also published on the official
+BananaFlow website so reporters can verify that it belongs to the project.
+
+If the report concerns the sole maintainer, use the hosting platform's abuse
+or safety-reporting process, or ask a trusted intermediary to help. The project
+does not currently have an independent moderation body, and does not present
+security vulnerability reporting as a conduct-reporting channel.
+
+All complaints will be reviewed and investigated promptly and fairly.
 
 Maintainers are obligated to respect the privacy and security of the
 reporter of any incident.

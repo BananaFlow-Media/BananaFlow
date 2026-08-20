@@ -36,33 +36,41 @@ The purpose of this policy is to prevent documentation drift. Code, tests and af
 
 ## Code → Documentation impact map
 
-Review every matching row. “Review” means either update the document or record in the PR why the behavior described there did not change.
+Review every matching row. A path listed under **review** is satisfied when the
+document changes in the PR or its exact repository path is listed under
+“Relevant documentation updated/reviewed” in the PR body. **Update all** paths
+must change. **Update one** requires at least one listed path to change. The
+machine gate verifies that every executable rule below exists here and names
+the same documents, so the policy and CI map cannot silently lose a domain.
 
-| Changed area | Required documentation review |
+| CI rule / changed area | Enforced documentation impact |
 |---|---|
-| `core/downloader.py`, `core/download_orchestrator.py`, retry/reliability/options | User manual EN+HE; `architecture/overview.md`; troubleshooting/reliability sections; tests |
-| Spotify/YTM/YouTube scraping, matching, search | User manual EN+HE; `PRIVACY.md` when network/data flow changes; architecture; Spotify proxy contract when applicable |
-| `core/search_engine.py` Spotify proxy | `user-guide/spotify-proxy-api.md`; user manual EN+HE; privacy if transmitted fields/headers change |
-| Cookies/auth/browser profile/YouTube Doctor | `SECURITY.md`; `PRIVACY.md`; user manual EN+HE; threat model; tests |
-| `config.py`, `config_migrate.py` | User manual settings; migration docs when persisted schema/default/meaning changes; tests |
-| History/queue persistence/databases | user manual if behavior changes; migration docs for schema/path changes; privacy for retained data changes |
-| Tag Editor apply/restore/rename/delete | Tag Editor safety + undo/rollback docs; user manual EN+HE; migration docs if persistence changes; tests |
-| Tag Editor UI/actions | user manual EN+HE; current design document; accessibility/i18n when relevant |
-| `ui/**` visible behavior | user manual EN+HE; accessibility; translation rules; screenshots in PR for visible changes |
-| `cli.py` | `user-guide/cli.md`; README/user manual when discoverability or behavior changes |
-| Dependency/`requirements`/`pyproject` | `THIRD_PARTY_NOTICES.md`; supply-chain doc if process changes; release docs when packaging impact exists |
-| `packaging/**`, release workflows/build scripts | `docs/release/RELEASING.md`; `SOURCE_OFFER.md`; `THIRD_PARTY_NOTICES.md`; supply-chain doc; packaging README(s); platform support text if distribution changes |
-| Update checker/updater/component updates | user manual; security; privacy if new network calls/data; updater architecture doc; threat model |
-| New external service or endpoint | `PRIVACY.md`; user manual; threat model; acceptable-use if user responsibility changes |
-| New persisted file/cache/log | `PRIVACY.md`; migration docs; architecture; deletion/retention guidance |
-| Version/release channel | `CHANGELOG.md`; `SECURITY.md` policy review; release notes/docs; avoid hard-coded copies elsewhere |
-| Platform/package support status | `README.md`; `docs/release/RELEASING.md`; `SECURITY.md`; EN+HE user manuals; AI context |
-| New user-facing text | `ui/i18n.py` EN+HE; relevant user guide if behavior/instruction changes |
-| Documentation layout/ownership | `docs/README.md`; this policy; AI context/adapters if navigation changes |
+| <!-- impact-rule: downloader/reliability --> Downloader, orchestration, retry and yt-dlp options | Review `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/architecture/overview.md`, `docs/testing/TESTING.md`. |
+| <!-- impact-rule: CLI --> `cli.py` | Update one of `docs/user-guide/cli.md`, `docs/user-guide/user-manual.md`; review both `docs/user-guide/cli.md`, `docs/user-guide/user-manual.md`. |
+| <!-- impact-rule: authentication/privacy --> Cookies, authentication, browser sessions and YouTube Doctor | Review `SECURITY.md`, `PRIVACY.md`, `docs/security/threat-model.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`. No global no-impact bypass. |
+| <!-- impact-rule: Spotify/search --> Spotify, YouTube Music and search integration | Review `docs/user-guide/spotify-proxy-api.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `PRIVACY.md`, `docs/architecture/overview.md`. |
+| <!-- impact-rule: Tag Editor safety --> Tag Editor apply, restore, rename, delete, drafts and backups | Review `docs/architecture/tag-editor-safety.md`, `docs/architecture/tag-editor-undo-rollback-guarantees.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/design/tag-editor/current-design.md`. No global no-impact bypass. |
+| <!-- impact-rule: Tag Editor UI/actions --> Tag Editor panels and actions | Review `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/design/tag-editor/current-design.md`, `docs/accessibility/ACCESSIBILITY.md`, `docs/i18n/TRANSLATING.md`. |
+| <!-- impact-rule: persistence/config --> Configuration, migrations, history, queues, caches, stores and journals | Review `docs/migrations/README.md`, `PRIVACY.md`, `docs/architecture/overview.md`, `docs/user-guide/user-manual.md`. No global no-impact bypass. |
+| <!-- impact-rule: visible UI --> Visible `ui/**` behavior | Review `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/accessibility/ACCESSIBILITY.md`, `docs/i18n/TRANSLATING.md`. |
+| <!-- impact-rule: user-facing translations --> English/Hebrew string tables | Review `docs/i18n/TRANSLATING.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`. |
+| <!-- impact-rule: dependency inventory --> `requirements*.txt` and constraints | Update all of `THIRD_PARTY_NOTICES.md`; review `docs/security/supply-chain.md`, `docs/release/RELEASING.md`. No global no-impact bypass. |
+| <!-- impact-rule: packaging/dependencies --> Packaging, `pyproject.toml`, release workflows and build/staging scripts | Update one of `docs/release/RELEASING.md`, `docs/security/supply-chain.md`; review `docs/release/RELEASING.md`, `THIRD_PARTY_NOTICES.md`, `SOURCE_OFFER.md`, `docs/security/supply-chain.md`. No global no-impact bypass. |
+| <!-- impact-rule: updaters/components --> Update checker and runtime component updates | Review `docs/user-guide/user-manual.md`, `SECURITY.md`, `PRIVACY.md`, `docs/architecture/secure-component-updater.md`, `docs/security/threat-model.md`. No global no-impact bypass. |
+| <!-- impact-rule: external metadata services --> Metadata APIs, clients and scrapers | Review `PRIVACY.md`, `docs/user-guide/user-manual.md`, `docs/security/threat-model.md`, `docs/legal/acceptable-use.md`. No global no-impact bypass. |
+| <!-- impact-rule: version/release channel --> `version.py` | Update all of `CHANGELOG.md`; review `SECURITY.md`, `docs/release/RELEASING.md`. No global no-impact bypass. |
+| <!-- impact-rule: platform/package support --> Test/release workflows and platform packaging | Review `README.md`, `docs/release/RELEASING.md`, `SECURITY.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/AI_CONTEXT.md`, `docs/testing/TESTING.md`. No global no-impact bypass. |
+| <!-- impact-rule: documentation ownership/layout --> Documentation entry points, policy, enforcement and AI adapters | Update one of `docs/README.md`, `docs/DOCUMENTATION_POLICY.md`, `docs/AI_CONTEXT.md`; review all three paths. |
 
 ## Pull-request documentation declaration
 
-Every PR must select at least one documentation-impact category in the PR template. “No documentation impact” is acceptable only with a short reason. CI applies conservative path-based checks to high-risk areas; the declaration does not override a failed hard consistency check.
+Every PR must select at least one documentation-impact category in the PR
+template. “No documentation impact” is accepted only when the checkbox is
+selected and the reason line contains a meaningful explanation (not the
+template comment or a placeholder). It cannot bypass the sensitive rules
+marked above. For all other mapped changes, list every reviewed path exactly;
+an unrelated Markdown edit does not satisfy the map. The declaration never
+overrides a hard consistency failure.
 
 ## Document lifecycle
 

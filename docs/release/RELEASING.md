@@ -23,7 +23,7 @@ Do not hard-code the new “latest version” into unrelated manuals/security po
 
 ### Code/test gates
 
-- Blocking test matrices are green on the supported CI platforms; any advisory/non-blocking platform feedback is understood.
+- The blocking Windows and Ubuntu test matrices are green across the supported Python versions.
 - Security/repository scan workflows are green or any advisory/non-blocking result is understood.
 - `python scripts/run_isolated_tests.py` passes on the release candidate.
 - `python scripts/run_network_tests.py` is run from a normal network before release for live third-party compatibility evidence.
@@ -60,7 +60,7 @@ Then explicitly verify:
 1. Create an annotated tag `v<FULL_VERSION>` on the release commit and push it.
 2. Release workflows reject a tag/version mismatch.
 3. Windows CI builds the one-folder application, portable ZIP, installer, checksums, SBOM/attestation evidence and smoke tests, then attaches assets to a **draft** release.
-4. macOS release workflow builds the supported Apple Silicon package/artifacts for the same release. Signing/notarization status is a separate release property and does not by itself make the product experimental.
+4. macOS release workflow builds and attaches the supported Apple Silicon package/artifacts for the same stable or pre-release tag. Signing/notarization status is a separate release property and does not by itself make the product experimental.
 5. Linux is a supported source-install platform; there is currently no official Linux installer/package artifact to attach.
 
 ## Manual acceptance — blocking

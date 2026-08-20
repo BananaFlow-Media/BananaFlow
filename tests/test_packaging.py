@@ -25,7 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # (returncode -11, before the smoke writes any result) — a PySide6/Qt
 # offscreen-platform limitation on macOS, not a product defect: real macOS users
 # run the cocoa platform with a real display, and the frozen .app is verified on
-# macOS by the release workflow's packaged `bananaflow-cli --version` (== 0.2.0) and
+# macOS by the release workflow's packaged `bananaflow-cli --version` (which
+# must match `version.FULL_VERSION`) and
 # `--doctor` steps. Reaching the Tag Editor GUI on a real macOS display is a
 # manual acceptance item (docs/release/RELEASING.md). This is
 # a targeted, documented skip of two tests whose offscreen premise does not hold
