@@ -88,6 +88,11 @@ class HistoryPanel(QWidget):
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
+    def showEvent(self, event) -> None:  # noqa: N802 – Qt override
+        """Refresh history from DB every time the panel becomes visible."""
+        super().showEvent(event)
+        self.reload()
+
     def reload(self) -> None:
         """Re-fetch all records from DB and repopulate the list."""
         self._all_records = self._db.fetch_all(limit=500)
