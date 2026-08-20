@@ -49,7 +49,7 @@ Review every matching row. “Review” means either update the document or reco
 | `ui/**` visible behavior | user manual EN+HE; accessibility; translation rules; screenshots in PR for visible changes |
 | `cli.py` | `user-guide/cli.md`; README/user manual when discoverability or behavior changes |
 | Dependency/`requirements`/`pyproject` | `THIRD_PARTY_NOTICES.md`; supply-chain doc if process changes; release docs when packaging impact exists |
-| `packaging/**`, release workflows/build scripts | `RELEASING.md`; `SOURCE_OFFER.md`; `THIRD_PARTY_NOTICES.md`; supply-chain doc; packaging README(s) |
+| `packaging/**`, release workflows/build scripts | `docs/release/RELEASING.md`; `SOURCE_OFFER.md`; `THIRD_PARTY_NOTICES.md`; supply-chain doc; packaging README(s) |
 | Update checker/updater/component updates | user manual; security; privacy if new network calls/data; updater architecture doc; threat model |
 | New external service or endpoint | `PRIVACY.md`; user manual; threat model; acceptable-use if user responsibility changes |
 | New persisted file/cache/log | `PRIVACY.md`; migration docs; architecture; deletion/retention guidance |
