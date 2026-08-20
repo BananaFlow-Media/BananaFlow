@@ -1,6 +1,6 @@
 # Contributing to BananaFlow
 
-BananaFlow is a Windows-first open-source desktop application. This repository contains the application, CLI, tests, packaging and application documentation; the official website is maintained separately.
+BananaFlow is an open-source desktop application. This repository contains the application, CLI, tests, packaging and application documentation; the official website is maintained separately at <https://bananaflow.bananaflow-media.workers.dev/>.
 
 ## Start here
 
@@ -9,7 +9,7 @@ Before changing code:
 1. Read [`AGENTS.md`](AGENTS.md) if you are using an AI coding agent.
 2. Read [`docs/README.md`](docs/README.md) and the subsystem documentation.
 3. Review the Code → Documentation map in [`docs/DOCUMENTATION_POLICY.md`](docs/DOCUMENTATION_POLICY.md).
-4. For large/architecture-changing work, align in an Issue/Discussion before investing in a large diff.
+4. For large/architecture-changing work, align in an Issue or [Development discussion](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development) before investing in a large diff.
 
 ## Development setup
 
@@ -68,7 +68,13 @@ Documentation gate:
 python scripts/check_documentation.py
 ```
 
-Real-network tests are separate and are not a substitute for deterministic unit/component coverage.
+Real-network compatibility tests:
+
+```bash
+python scripts/run_network_tests.py
+```
+
+The real-network suite is intentionally separate from deterministic CI because third-party sites can challenge CI egress. **Run `scripts/run_network_tests.py` from a normal network before cutting a release.** The scheduled workflow is supporting evidence, not a substitute for the maintainer pre-release run.
 
 ## Documentation is part of the change
 
@@ -89,6 +95,8 @@ Do not create a new source of truth when an existing one can be linked.
 Read [`docs/i18n/TRANSLATING.md`](docs/i18n/TRANSLATING.md) and [`docs/accessibility/ACCESSIBILITY.md`](docs/accessibility/ACCESSIBILITY.md).
 
 Every new user-facing string must exist in both language tables. New/custom interactive widgets need keyboard access and meaningful accessible semantics. Technical paths/URLs/identifiers must remain readable in RTL layouts.
+
+Translation-specific discussion belongs in [Discussions / Translations](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations); pre-release testing feedback belongs in [Discussions / Beta Testing](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/beta-testing).
 
 ## Dependencies and third-party code
 

@@ -4,6 +4,8 @@ Status: **Current / normative maintainer procedure**
 
 Every public release is built from a versioned tag by CI, assembled as a draft release, manually verified, and only then published by the maintainer.
 
+Official website: <https://bananaflow.bananaflow-media.workers.dev/>.
+
 ## Version model
 
 `version.py` is the source of truth for the semantic version core, optional prerelease suffix, public `FULL_VERSION`, PEP 440 form and Windows product metadata. Tests enforce consistency with project metadata/updater/application version fields.
@@ -11,7 +13,7 @@ Every public release is built from a versioned tag by CI, assembled as a draft r
 When cutting a version:
 
 1. update `version.py` (and `pyproject.toml` representation required by the version gate);
-2. update `THIRD_PARTY_NOTICES.md` release/version references where exact release inventory is recorded;
+2. update `THIRD_PARTY_NOTICES.md` release/version reference so its shipped compliance snapshot matches `FULL_VERSION`;
 3. add/update `CHANGELOG.md`;
 4. run all release gates below.
 
@@ -21,7 +23,7 @@ Do not hard-code the new “latest version” into unrelated manuals/security po
 
 ### Code/test gates
 
-- Windows blocking test matrix is green; non-blocking platform feedback reviewed.
+- Blocking test matrices are green on the supported CI platforms; any advisory/non-blocking platform feedback is understood.
 - Security/repository scan workflows are green or any advisory/non-blocking result is understood.
 - `python scripts/run_isolated_tests.py` passes on the release candidate.
 - `python scripts/run_network_tests.py` is run from a normal network before release for live third-party compatibility evidence.
@@ -58,15 +60,17 @@ Then explicitly verify:
 1. Create an annotated tag `v<FULL_VERSION>` on the release commit and push it.
 2. Release workflows reject a tag/version mismatch.
 3. Windows CI builds the one-folder application, portable ZIP, installer, checksums, SBOM/attestation evidence and smoke tests, then attaches assets to a **draft** release.
-4. macOS release workflow contributes its current experimental package/artifacts to the same release when applicable.
+4. macOS release workflow builds the supported Apple Silicon package/artifacts for the same release. Signing/notarization status is a separate release property and does not by itself make the product experimental.
+5. Linux is a supported source-install platform; there is currently no official Linux installer/package artifact to attach.
 
 ## Manual acceptance — blocking
 
-Download the **CI-produced draft artifacts** onto a clean/representative machine and verify at minimum:
+Download the **CI-produced draft artifacts** onto clean/representative machines and verify at minimum:
 
 - published SHA-256 values match downloaded artifacts;
-- installer installs/launches/uninstalls; portable build runs;
-- `bananaflow-cli --version` prints the release version;
+- Windows installer installs/launches/uninstalls and the portable build runs;
+- macOS Apple Silicon package opens and the main application workflow launches successfully; document any current Gatekeeper/signing first-run requirement;
+- `bananaflow-cli --version` prints the release version where the CLI is part of the tested install;
 - `bananaflow-cli --doctor` passes its blocking checks on the packaged build;
 - a real download succeeds;
 - a conversion succeeds and output verifies;
@@ -74,6 +78,8 @@ Download the **CI-produced draft artifacts** onto a clean/representative machine
 - expected product/version/publisher metadata appears in the executable/package;
 - app data is created only in documented per-user locations;
 - critical Hebrew/English UI and the YouTube Doctor/manual QA surfaces render correctly when changed by the release.
+
+For Linux source support, the CI matrix plus a source-install smoke on a representative Linux environment are the release evidence until an official Linux package is introduced.
 
 ## Release notes
 
@@ -91,7 +97,7 @@ Include:
 
 Publication is a maintainer action after the draft passes manual acceptance. Do not auto-publish merely because build CI is green.
 
-After publication, confirm the official website's verified release snapshot/download page has picked up the new version and matching checksums before announcement. A lagging/failed website snapshot is a website-project issue, not a reason to retag an unchanged application release.
+After publication, confirm <https://bananaflow.bananaflow-media.workers.dev/> and its verified release snapshot/download page have picked up the new version and matching checksums before announcement. A lagging/failed website snapshot is a website-project issue, not a reason to retag an unchanged application release.
 
 ## Rollback / bad release
 

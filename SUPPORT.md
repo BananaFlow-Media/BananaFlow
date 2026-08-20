@@ -19,11 +19,12 @@ The repository user manual is [`docs/user-guide/user-manual.md`](docs/user-guide
 
 ## Where to ask
 
-- Usage/how-to questions → website Help/FAQ, then Discussions/Help if needed.
+- Usage/how-to questions → [Discussions / Help](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/help) after checking the website Help/FAQ.
 - Reproducible bug → the closest Issue template (general bug, install/download/converter/Tag Editor/site compatibility, etc.).
-- Accessibility/RTL/translation problem → the dedicated template/category when available.
-- Feature idea → Discussions/Ideas first for broad proposals; a scoped issue once behavior is clear.
-- Architecture/contribution question → `CONTRIBUTING.md` and Development discussions.
+- Accessibility/RTL/translation problem → the dedicated Issue form or [Discussions / Translations](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations).
+- Feature idea → [Discussions / Ideas](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/ideas) first for broad proposals; a scoped issue once behavior is clear.
+- Pre-release/nightly/build testing feedback → [Discussions / Beta Testing](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/beta-testing). The category remains useful even while the normal product line is Stable.
+- Architecture/contribution question → `CONTRIBUTING.md` and [Discussions / Development](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development).
 - Security vulnerability → **never a public issue**; follow `SECURITY.md`.
 
 ## What not to post publicly

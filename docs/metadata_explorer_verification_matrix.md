@@ -10,9 +10,9 @@ See [`qa/README.md`](qa/README.md) for manual-QA rules.
 
 Create a temporary music folder containing:
 
-- English, Hebrew and mixed-direction supported audio filenames;
+- English, Hebrew and mixed-direction **supported audio** filenames;
 - a very long filename;
-- at least one unsupported/read-only format relevant to the current product;
+- at least one **unsupported** or read-only format relevant to the current product;
 - a subfolder with a supported file;
 - disposable collision targets for move/rename checks.
 
@@ -22,20 +22,33 @@ Never perform destructive QA on a personal library.
 
 | Area | States/actions | Expected evidence |
 |---|---|---|
-| Empty | no scan / empty folder | clear empty state; no stale selection |
-| Small/large lists | 1–3 rows and 1,000+ rows | geometry remains stable; scrolling stays usable |
-| Selection | click, Ctrl/Shift selection, Ctrl+A, Escape | current/selected state matches documented behavior |
-| Focus | active/inactive window | focus/selection remains distinguishable without color-only meaning |
-| Keyboard | F2, Enter, Delete, Space, Menu/Shift+F10 as supported | actions route through safe product flows |
-| Header | resize/best-fit/reorder/sort/context | order/visibility/width persistence behaves correctly |
-| Icons/status | supported/read-only/error/folder | appropriate icon/text semantics |
-| Drag/drop | valid move plus invalid/collision/descendant targets | valid operations only; unsafe targets refused |
-| Accessibility | keyboard + screen-reader names | tree/table/header/zoom/action controls expose semantics |
-| RTL/LTR | Hebrew UI + mixed filenames/paths | shell layout RTL; technical filename/path editing remains readable |
-| Theme | light/dark/accent | selection/focus/hover remain visible |
-| DPI | 100/125/150/200% | no clipped rows/header/checkbox/text |
-| High contrast | Windows high-contrast/accessibility mode | state is not color-only |
+| Empty | **empty** / no scan / empty folder | clear empty state; no stale selection |
+| Small list | exactly **1 row** and a 2–3 row folder | geometry and single-row selection remain correct |
+| Large list | **1,000+ rows** | scrolling, virtualization/refresh and selection remain usable |
+| Selection | click, **Ctrl+Click**, **Shift+Click**, **Ctrl+A**, **Escape** | current/selected state matches documented behavior |
+| Focus | active window and **inactive selection** | focus/selection remains distinguishable without color-only meaning |
+| Hover | row hover and **checkbox hover** | hover affordance is visible and does not change selection by itself |
+| Keyboard | **F2**, Enter, **Delete**, **Shift+Delete**, Space, Menu/Shift+F10 as supported | actions route through safe product flows and confirmations |
+| Header | resize, **double-click best fit**, reorder, sort and **context menu** | order/visibility/width persistence behaves correctly |
+| Icons/status | **supported audio**, unsupported/read-only/error/folder | appropriate icon/text semantics |
+| **drag/drop** | valid move plus invalid/collision/descendant targets | valid operations only; unsafe targets refused |
+| **accessibility** | keyboard + screen-reader names | tree/table/header/zoom/action controls expose semantics |
+| **RTL/LTR** | Hebrew UI + mixed filenames/paths | shell layout RTL; technical filename/path editing remains readable |
+| Theme | **dark**, **light**, accent | selection/focus/hover remain visible |
+| **DPI** | 100/125/150/200% | no clipped rows/header/checkbox/text |
+| **high contrast** | Windows high-contrast/accessibility mode | state is not color-only |
 | Touch | scroll/tap/press-and-hold/selection/zoom where supported | touch does not trigger destructive action accidentally |
+
+## GUI safety workflow
+
+When visual verification is driven by automation or a remote-control tool, preserve this exact safety order:
+
+1. `list_windows` and identify the BananaFlow window from title/process/context.
+2. **activate only** the clearly identified BananaFlow window; do not click through by guessed coordinates.
+3. Capture **screenshot/OCR** evidence only after the correct window is active.
+4. **If the app window is not clearly identified, stop.** Do not continue with destructive or state-changing input.
+
+This workflow is intentionally explicit because the Explorer checks include Delete/Shift+Delete, drag/drop and rename paths.
 
 ## Automated coverage to run first
 

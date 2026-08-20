@@ -2,11 +2,13 @@
 
 Status: **Current release-compliance inventory**
 
+Version reference: BananaFlow `1.0.0` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
+
 BananaFlow is licensed as GPL-3.0-or-later. This document records third-party packages, staged binaries/components, their license families, source locations and release-handling obligations. It is a best-effort open-source compliance document, not legal advice.
 
 **Exact-version rule:** do not treat a developer's current virtual environment as the release inventory. Exact versions actually shipped belong to the **release constraints/requirements, staged binary inspection and generated CycloneDX SBOM**. This file records intentional pins when BananaFlow itself stages a component explicitly and records the license/source obligation that must remain true across versions.
 
-BananaFlow release version is owned by [`version.py`](version.py). Do not hand-maintain a duplicate “latest BananaFlow version” here unless a release checklist explicitly needs a point-in-time compliance snapshot.
+`version.py` owns the application version. The version-reference line above exists because this compliance document is shipped with releases and is automatically checked for drift; do not copy a separate “latest release” claim into unrelated prose.
 
 ## 1. Explicitly staged/bundled runtime components
 
@@ -105,6 +107,8 @@ A newer reviewed exact release pin does not change the minimum compatibility flo
 | `certifi` | MPL-2.0 | Preserve MPL notice for the unmodified CA bundle/file |
 | `keyboard` | MIT | Windows-only optional runtime dependency |
 | `playwright` | Apache-2.0 | Browser payload obligations are separate |
+| `pytest` | MIT | Development/test dependency; normally not part of the application runtime bundle |
+| `pytest-mock` | MIT | Development/test dependency; normally not part of the application runtime bundle |
 
 The release SBOM can contain additional **transitive** packages (for example HTTP stacks, image/scientific/native libraries, packaging helpers and platform bindings). Their exact names/versions/licenses must be reviewed from the SBOM/wheel metadata for the release rather than copied from a developer venv into this evergreen table.
 
@@ -126,7 +130,18 @@ Exact build-tool versions belong to the release environment/workflow evidence, n
 
 Network services are not “bundled dependencies”, but maintainers must review their privacy/terms impact when integration changes. The canonical desktop-app data-flow inventory is [`PRIVACY.md`](PRIVACY.md); user responsibilities are in [`docs/legal/acceptable-use.md`](docs/legal/acceptable-use.md).
 
-Current categories include GitHub Releases/API, PyPI version checks, YouTube/YouTube Music, Spotify web pages, the user-configured Spotify search proxy, MusicBrainz, Cover Art Archive, optional lyrics providers, SponsorBlock and user-selected sites handled by yt-dlp/generic extraction.
+Current categories include:
+
+- GitHub Releases/update metadata via `https://api.github.com/repos/BananaFlow-Media/BananaFlow/releases/latest`;
+- PyPI version checks;
+- YouTube/YouTube Music;
+- Spotify web pages;
+- the **user-configured, self-hosted** Spotify search proxy;
+- MusicBrainz and Cover Art Archive;
+- optional lyrics/SponsorBlock services; and
+- user-selected sites handled by yt-dlp/generic extraction.
+
+There is currently no BananaFlow-operated public Spotify Search Proxy. If a future BananaFlow service replaces the self-hosted setting, Privacy/Security/threat-model/API documentation must be updated as part of that service launch.
 
 ## 5. Source availability and license texts
 
