@@ -22,12 +22,12 @@ classifiers = [
 ]
 
 dependencies = [
-    # yt-dlp recommends its nightly channel for regular users because stable
-    # releases can go stale as sites change. Pin the latest reviewed published
-    # nightly instead of floating to future builds; 2026.8.4 includes the
-    # July 20 YouTube player-client maintenance that post-dates stable 2026.7.4.
-    # [default] also installs yt-dlp's exact compatible EJS dependency.
-    "yt-dlp[default]==2026.8.4.234419.dev0",
+    # 2026.7.4 is the first yt-dlp release patched for
+    # GHSA-6v4j-43gg-vj32. Keep project metadata as a safe compatibility
+    # floor so source installs can receive later upstream fixes. CI and the
+    # packaged release still exercise one reviewed nightly exactly (see the
+    # dev extra and constraints-release.txt).
+    "yt-dlp[default]>=2026.7.4",
     "ffmpeg-python>=0.2.0",
     "pyloudnorm>=0.1.1",
     "soundfile>=0.12.1",
@@ -73,6 +73,10 @@ Changelog = "https://github.com/BananaFlow-Media/BananaFlow/blob/main/CHANGELOG.
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    # tests.yml installs .[dev], so CI exercises the same reviewed yt-dlp
+    # nightly that release installs through constraints-release.txt while the
+    # normal project dependency remains an upgradeable security floor.
+    "yt-dlp[default]==2026.8.4.234419.dev0",
 ]
 # Source/venv opt-in for the same GPL v3 bgutil provider plugin pinned
 # by the public Windows build. The packaged build also stages the upstream

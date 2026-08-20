@@ -4,10 +4,6 @@ ui/workers/thumbnail_worker.py  –  Async thumbnail image fetcher
 Fetches a single thumbnail image from a remote URL on a background thread
 and emits validated image bytes so the UI thread can decode and display them
 without network I/O on the main thread.
-
-One ThumbnailWorker is spawned per track card immediately after the card is
-added to the queue panel. Workers are discarded after they emit or silently
-fail; thumbnail failures are cosmetic and never surface a user dialog.
 """
 
 from __future__ import annotations
@@ -25,9 +21,6 @@ import requests
 from utils.artwork_cleaner import extract_youtube_video_id, get_youtube_thumbnail_candidates
 
 
-# Bound the cache by both count and bytes. A count-only cache can retain
-# hundreds of multi-megabyte max-resolution covers and quietly consume a very
-# large amount of RAM in a long-running session.
 _CACHE_MAX_ITEMS = 256
 _CACHE_MAX_BYTES = 32 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -50,13 +43,11 @@ _HEADERS = {
 
 
 def _cache_key(url: str) -> str:
-    """Share cache entries across thumbnail variants of the same YouTube ID."""
     video_id = extract_youtube_video_id(url)
     return f"youtube:{video_id}" if video_id else url
 
 
 def clear_thumbnail_cache() -> None:
-    """Clear the process-local thumbnail cache (also useful for tests)."""
     global _THUMBNAIL_CACHE_BYTES
     with _CACHE_LOCK:
         _THUMBNAIL_CACHE.clear()
@@ -64,7 +55,6 @@ def clear_thumbnail_cache() -> None:
 
 
 def get_cached_thumbnail(url: str) -> bytes | None:
-    """Retrieve validated thumbnail bytes from the memory cache."""
     key = _cache_key(url)
     with _CACHE_LOCK:
         data = _THUMBNAIL_CACHE.get(key)
@@ -74,7 +64,6 @@ def get_cached_thumbnail(url: str) -> bytes | None:
 
 
 def store_cached_thumbnail(url: str, data: bytes) -> None:
-    """Store validated bytes in a byte-bounded, thread-safe LRU cache."""
     global _THUMBNAIL_CACHE_BYTES
     if not url or not data or len(data) > _CACHE_MAX_BYTES:
         return
@@ -98,14 +87,6 @@ def store_cached_thumbnail(url: str, data: bytes) -> None:
 
 
 def _normalise_image_bytes(raw: bytes) -> bytes | None:
-    """Validate image bytes and convert formats Qt may not decode reliably.
-
-    The former worker accepted any HTTP 200 body larger than 200 bytes. An
-    HTML error page could therefore be cached and emitted as a thumbnail.
-    Pillow is already a required BananaFlow dependency, so use a real decoder
-    as the trust boundary instead of a size heuristic. Decompression-bomb
-    warnings are promoted to errors because remote artwork is untrusted input.
-    """
     if not raw:
         return None
 
@@ -119,8 +100,6 @@ def _normalise_image_bytes(raw: bytes) -> bytes | None:
             if image_format in {"JPEG", "PNG"}:
                 return raw
 
-            # Qt installations on Windows do not always ship every image-format
-            # plugin. Convert other valid still images (notably WebP) to JPEG.
             with Image.open(io.BytesIO(raw)) as image:
                 image.seek(0)
                 converted = image.convert("RGB")
@@ -138,48 +117,71 @@ def _normalise_image_bytes(raw: bytes) -> bytes | None:
         return None
 
 
-def _download_candidate(url: str, timeout: float) -> bytes | None:
-    """Fetch one bounded, TLS-verified candidate and return validated bytes."""
+def _remaining(deadline: float) -> float:
+    return deadline - time.monotonic()
+
+
+def _download_candidate(url: str, deadline: float) -> bytes | None:
+    """Fetch one candidate within an absolute total deadline.
+
+    The deadline covers contention for the global fetch slot, connection/read
+    waits and streamed body processing. requests' timeout is an inactivity
+    timeout, so the explicit monotonic checks are required for a real total
+    budget when a server keeps trickling chunks.
+    """
     response = None
+    acquired = False
     try:
-        # Do not pass verify=False: requests' default certificate validation is
-        # intentional. A cosmetic thumbnail is never worth weakening TLS.
-        with _FETCH_SLOTS:
-            response = requests.get(
-                url,
-                timeout=max(0.1, timeout),
-                headers=_HEADERS,
-                stream=True,
-                allow_redirects=True,
-            )
-            if response.status_code != 200:
-                return None
+        wait_budget = _remaining(deadline)
+        if wait_budget <= 0:
+            return None
+        acquired = _FETCH_SLOTS.acquire(timeout=wait_budget)
+        if not acquired:
+            return None
 
-            content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-            if content_type and not (
-                content_type.startswith("image/")
-                or content_type == "application/octet-stream"
-            ):
-                return None
+        request_budget = _remaining(deadline)
+        if request_budget <= 0:
+            return None
 
-            content_length = response.headers.get("Content-Length")
-            if content_length:
-                try:
-                    if int(content_length) > _MAX_RESPONSE_BYTES:
-                        return None
-                except (TypeError, ValueError):
-                    pass
+        response = requests.get(
+            url,
+            timeout=max(0.1, request_budget),
+            headers=_HEADERS,
+            stream=True,
+            allow_redirects=True,
+        )
+        if response.status_code != 200 or _remaining(deadline) <= 0:
+            return None
 
-            chunks: list[bytes] = []
-            total = 0
-            for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > _MAX_RESPONSE_BYTES:
+        content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type and not (
+            content_type.startswith("image/")
+            or content_type == "application/octet-stream"
+        ):
+            return None
+
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > _MAX_RESPONSE_BYTES:
                     return None
-                chunks.append(chunk)
+            except (TypeError, ValueError):
+                pass
 
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+            if _remaining(deadline) <= 0:
+                return None
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_RESPONSE_BYTES:
+                return None
+            chunks.append(chunk)
+
+        if _remaining(deadline) <= 0:
+            return None
         return _normalise_image_bytes(b"".join(chunks))
     except requests.RequestException:
         return None
@@ -189,6 +191,18 @@ def _download_candidate(url: str, timeout: float) -> bytes | None:
                 response.close()
             except Exception:  # noqa: BLE001 - close is best effort
                 pass
+        if acquired:
+            _FETCH_SLOTS.release()
+
+
+def _candidate_order(url: str) -> list[str]:
+    """Prefer extractor-provided artwork for fast UI, then quality fallbacks."""
+    video_id = extract_youtube_video_id(url)
+    if not video_id:
+        return [url] if url else []
+
+    fallback = get_youtube_thumbnail_candidates(url)
+    return list(dict.fromkeys([url, *fallback]))
 
 
 class ThumbnailWorker(QThread):
@@ -217,29 +231,17 @@ class ThumbnailWorker(QThread):
             self.thumbnail_ready.emit(self._index, cached)
             return
 
-        video_id = extract_youtube_video_id(self._url)
-        candidates = (
-            get_youtube_thumbnail_candidates(self._url)
-            if video_id
-            else [self._url]
-        )
-
-        # The timeout is a budget for the whole fallback chain, not five
-        # independent waits. A missing max-res thumbnail must not turn an
-        # 8-second cosmetic fetch into a 40-second worker.
+        candidates = _candidate_order(self._url)
         deadline = time.monotonic() + max(0.1, float(self._timeout))
+
         for candidate_url in candidates:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if _remaining(deadline) <= 0:
                 break
 
-            raw = _download_candidate(candidate_url, remaining)
+            raw = _download_candidate(candidate_url, deadline)
             if raw is None:
                 continue
 
-            # Cache by canonical YouTube ID when possible, so hq/maxres/etc.
-            # variants of one video share one entry instead of duplicating the
-            # same payload in memory.
             store_cached_thumbnail(self._url, raw)
             self.thumbnail_ready.emit(self._index, raw)
             return

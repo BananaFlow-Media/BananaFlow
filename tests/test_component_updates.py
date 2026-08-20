@@ -31,6 +31,7 @@ class TestVersionComparison:
     def test_parse_calver_and_semver(self):
         assert parse_version_tuple("2026.07.04") == (2026, 7, 4)
         assert parse_version_tuple("2026.7.4") == (2026, 7, 4)
+        assert parse_version_tuple("2026.8.4.234419.dev0") == (2026, 8, 4, 234419, 0)
         assert parse_version_tuple("0.8.0") == (0, 8, 0)
         assert parse_version_tuple("v1.2.3") == (1, 2, 3)
         assert parse_version_tuple("1.0.0-beta.1") == (1, 0, 0)
@@ -38,9 +39,11 @@ class TestVersionComparison:
         assert parse_version_tuple("") == ()
 
     def test_zero_padded_calver_equals_plain(self):
-        # yt-dlp publishes "2026.07.04" while comparisons may see "2026.7.4"
         assert not is_newer_version("2026.07.04", "2026.7.4")
         assert not is_newer_version("2026.7.4", "2026.07.04")
+
+    def test_nightly_sorts_after_older_stable(self):
+        assert is_newer_version("2026.8.4.234419.dev0", "2026.7.4")
 
     def test_strictly_newer(self):
         assert is_newer_version("2026.7.5", "2026.07.04")
@@ -77,8 +80,8 @@ class TestComponentUpdateChecker:
 
     def test_up_to_date_environment(self):
         report = _checker(
-            latest={"yt-dlp": "2026.7.4", "yt-dlp-ejs": "0.8.0"},
-            installed={"yt-dlp": "2026.07.04", "yt-dlp-ejs": "0.8.0"},
+            latest={"yt-dlp": "2026.8.4.234419.dev0", "yt-dlp-ejs": "0.8.0"},
+            installed={"yt-dlp": "2026.8.4.234419.dev0", "yt-dlp-ejs": "0.8.0"},
         ).check()
         assert report.all_checks_ok
         assert not report.has_updates
@@ -86,14 +89,14 @@ class TestComponentUpdateChecker:
 
     def test_outdated_component_detected(self):
         report = _checker(
-            latest={"yt-dlp": "2026.8.1", "yt-dlp-ejs": "0.8.0"},
+            latest={"yt-dlp": "2026.8.4.234419.dev0", "yt-dlp-ejs": "0.8.0"},
             installed={"yt-dlp": "2026.07.04", "yt-dlp-ejs": "0.8.0"},
         ).check()
         assert report.has_updates
         assert [c.key for c in report.updates] == ["yt-dlp"]
         yt = report.updates[0]
         assert yt.installed_version == "2026.07.04"
-        assert yt.latest_version == "2026.8.1"
+        assert yt.latest_version == "2026.8.4.234419.dev0"
         assert yt.check_ok
 
     def test_network_failure_is_absorbed_not_raised(self):
@@ -107,22 +110,21 @@ class TestComponentUpdateChecker:
         assert not report.has_updates
         assert not report.all_checks_ok
         assert all(not c.check_ok for c in report.components)
-        # Installed versions were still resolved — the failure was remote.
         assert all(c.installed_version for c in report.components)
 
     def test_missing_installed_package_marks_check_not_ok(self):
         report = _checker(
-            latest={"yt-dlp": "2026.8.1", "yt-dlp-ejs": "0.9.0"},
-            installed={},   # nothing importable / no metadata
+            latest={"yt-dlp": "2026.8.4.234419.dev0", "yt-dlp-ejs": "0.9.0"},
+            installed={},
         ).check()
-        assert not report.has_updates          # no comparison possible
+        assert not report.has_updates
         assert all(not c.check_ok for c in report.components)
         assert all(c.latest_version for c in report.components)
 
     def test_partial_failure_still_reports_the_working_component(self):
         def latest(name: str) -> str:
             if name == "yt-dlp":
-                return "2026.9.1"
+                return "2026.8.4.234419.dev0"
             raise TimeoutError("pypi slow")
 
         report = ComponentUpdateChecker(
@@ -134,16 +136,26 @@ class TestComponentUpdateChecker:
         assert report.any_check_ok
 
     def test_never_downgrades(self):
-        # Installed is ahead of PyPI (e.g. nightly / dev install)
         report = _checker(
-            latest={"yt-dlp": "2026.6.9", "yt-dlp-ejs": "0.8.0"},
-            installed={"yt-dlp": "2026.07.04", "yt-dlp-ejs": "0.9.0"},
+            latest={"yt-dlp": "2026.7.4", "yt-dlp-ejs": "0.8.0"},
+            installed={"yt-dlp": "2026.8.4.234419.dev0", "yt-dlp-ejs": "0.9.0"},
         ).check()
         assert not report.has_updates
 
     def test_pypi_url(self):
         status = ComponentStatus(key="yt-dlp", display_name="yt-dlp")
         assert status.pypi_url == "https://pypi.org/project/yt-dlp/"
+
+    def test_nightly_selector_ignores_yanked_and_empty_releases(self):
+        data = {
+            "releases": {
+                "2026.7.4": [{"yanked": False}],
+                "2026.8.4.234419.dev0": [{"yanked": False}],
+                "2026.9.1.1.dev0": [{"yanked": True}],
+                "2026.10.1.1.dev0": [],
+            }
+        }
+        assert ComponentUpdateChecker._latest_non_yanked_release(data) == "2026.8.4.234419.dev0"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -157,8 +169,7 @@ class TestInPlaceUpgrade:
         assert cmd[0] == sys.executable
         assert cmd[1:4] == ["-m", "pip", "install"]
         assert "--upgrade" in cmd
-        # Must go through the [default] extra so yt-dlp-ejs stays the
-        # exact pinned match — never a bare/unpaired upgrade.
+        assert "--pre" in cmd
         assert cmd[-1] == "yt-dlp[default]"
 
     def test_all_specs_upgrade_through_the_same_requirement(self):
