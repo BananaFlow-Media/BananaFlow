@@ -1,93 +1,104 @@
 # Releasing BananaFlow
 
-The maintainer's guide to cutting a BananaFlow release. Every release is
-built by CI from a tag, attached to a **draft** GitHub Release, manually
-verified, and only then published by the maintainer.
+Status: **Current / normative maintainer procedure**
+
+Every public release is built from a versioned tag by CI, assembled as a draft release, manually verified, and only then published by the maintainer.
 
 ## Version model
 
-`version.py` is the single source of truth:
+`version.py` is the source of truth for the semantic version core, optional prerelease suffix, public `FULL_VERSION`, PEP 440 form and Windows product metadata. Tests enforce consistency with project metadata/updater/application version fields.
 
-| Constant | Example | Used by |
-|---|---|---|
-| `__version__` | `1.0.0` | Numeric SemVer core; Windows `FixedFileInfo`; macOS `CFBundleVersion` |
-| `PRERELEASE` | `"beta.1"` / `None` | Pre-release suffix |
-| `FULL_VERSION` | `1.0.0-beta.1` | Git tag (`v` + this), artifact names, updater, About, `--version` |
-| `PEP440_VERSION` | `1.0.0b1` | `pyproject.toml` |
+When cutting a version:
 
-`tests/test_p0_gates.py::TestVersionConsistency` fails the build if any
-representation drifts. To bump a version:
+1. update `version.py` (and `pyproject.toml` representation required by the version gate);
+2. update `THIRD_PARTY_NOTICES.md` release/version references where exact release inventory is recorded;
+3. add/update `CHANGELOG.md`;
+4. run all release gates below.
 
-1. Edit `__version__` and/or `PRERELEASE` in `version.py`.
-2. Set `pyproject.toml` `version` to the new `PEP440_VERSION`.
-3. Update the `Version reference: BananaFlow \`…\`` line in
-   `THIRD_PARTY_NOTICES.md`.
-4. Add the new section to `CHANGELOG.md`.
-5. Run `python scripts/run_isolated_tests.py` — the drift guard must pass.
+Do not hard-code the new “latest version” into unrelated manuals/security policy. Those documents should point to release/version sources so they do not immediately drift.
 
-## Release procedure
+## Release pre-flight
 
-1. **Pre-flight (on `main`, green CI):**
-   - Tests, Security and Repository scans workflows are all green.
-   - `THIRD_PARTY_NOTICES.md` names the component versions the build
-     will actually stage (FFmpeg, Deno, PO Token Provider, Python deps).
-   - `CHANGELOG.md` has an entry for this version.
-2. **Tag:** create an annotated tag `v<FULL_VERSION>` (e.g.
-   `v1.0.0-beta.1`) on the release commit and push it. Both release
-   workflows refuse to build if the tag does not exactly match
-   `version.FULL_VERSION`.
-3. **CI builds:**
-   - *Build Windows release* — PyInstaller one-folder build, smoke tests
-     (`--version`, `--doctor`, GUI launch), portable ZIP, Inno Setup
-     installer, SHA-256 checksums, SBOM, build attestations; attaches
-     everything to a draft release.
-   - *Build macOS release* — arm64 `BananaFlow.app` + DMG, ad-hoc
-     signed, attested; attaches to the same draft.
-4. **Manual acceptance (blocking):** download the built artifacts from
-   the draft release onto a clean machine and verify:
-   - checksums match `SHA256SUMS*.txt`;
-   - installer installs, launches, uninstalls cleanly; portable ZIP
-     runs; DMG mounts and the app opens (right-click → Open the first
-     time — ad-hoc signature);
-   - `bananaflow-cli --version` prints the release version;
-     `bananaflow-cli --doctor` passes its blocking checks;
-   - a real download, a conversion and a tag-editor apply/undo cycle
-     succeed;
-   - the EXE properties / `Info.plist` show the correct product,
-     publisher, version and copyright;
-   - app data is created only under the BananaFlow app-data directory.
-5. **Release notes:** highlights, known limitations, the unsigned-binary
-   guidance (SmartScreen / Gatekeeper), checksum verification
-   instructions, and a link to the corresponding source (the tag).
-   Prereleases are marked **pre-release**.
-6. **Publish:** the maintainer presses Publish. Nothing publishes
-   automatically.
-7. **Website follow-up (after publishing):** the official website —
-   <https://bananaflow.bananaflow-media.workers.dev/> — builds its
-   download pages from a verified snapshot of *this* repository's
-   GitHub Releases. The snapshot is refreshed by a scheduled job in the
-   website project and only promotes a release once at least one
-   channel verifies (asset names, sizes and published SHA-256 values
-   must match), so a freshly published release does not appear on the
-   site instantly. Before announcing a release, confirm that
-   <https://bananaflow.bananaflow-media.workers.dev/en/download/> offers
-   the new version and that its checksum matches `SHA256SUMS*.txt`. If
-   it still shows the previous version some hours later, the snapshot
-   refresh failed verification — that is a website-project issue, not a
-   reason to re-tag here.
+### Code/test gates
 
-## Rollback
+- Windows blocking test matrix is green; non-blocking platform feedback reviewed.
+- Security/repository scan workflows are green or any advisory/non-blocking result is understood.
+- `python scripts/run_isolated_tests.py` passes on the release candidate.
+- `python scripts/run_network_tests.py` is run from a normal network before release for live third-party compatibility evidence.
 
-- Before the tag: nothing public exists — fix and re-run.
-- After the tag, before publish: delete the draft release and the tag,
-  fix, re-tag.
-- After publish: never delete a published release's assets (the source
-  offer references them). Mark the release as a pre-release if it must
-  be de-emphasized, and publish a superseding patch release.
+### Documentation gate
+
+Run:
+
+```bash
+python scripts/check_documentation.py
+```
+
+Then explicitly verify:
+
+- `CHANGELOG.md` has the release entry and no misleading future/past status;
+- `SECURITY.md` still describes the intended support policy without a stale hard-coded latest version;
+- `PRIVACY.md` matches current network services, retained local data, sign-in behavior and official-site separation;
+- English/Hebrew user manuals agree on capabilities, setup, Spotify search vs URL import, authentication and limitations;
+- no current document says Stable is still a future milestone when `PRERELEASE` is `None`;
+- internal Markdown file references resolve;
+- `THIRD_PARTY_NOTICES.md`, `SOURCE_OFFER.md`, packaging README files and the SBOM/release inputs describe the actual staged components;
+- any persisted schema/path changes have migration documentation/tests;
+- AI/context/documentation maps still point to current sources of truth.
+
+### Packaging/license inputs
+
+- Review staged FFmpeg, Deno, PO-provider, browser/runtime and Python dependency versions against release documentation.
+- Ensure no generated/staged binary was accidentally committed.
+- Verify required license/source bundle files are packaged.
+- Generate/verify SBOM and checksum assets.
+
+## Tag and CI build
+
+1. Create an annotated tag `v<FULL_VERSION>` on the release commit and push it.
+2. Release workflows reject a tag/version mismatch.
+3. Windows CI builds the one-folder application, portable ZIP, installer, checksums, SBOM/attestation evidence and smoke tests, then attaches assets to a **draft** release.
+4. macOS release workflow contributes its current experimental package/artifacts to the same release when applicable.
+
+## Manual acceptance — blocking
+
+Download the **CI-produced draft artifacts** onto a clean/representative machine and verify at minimum:
+
+- published SHA-256 values match downloaded artifacts;
+- installer installs/launches/uninstalls; portable build runs;
+- `bananaflow-cli --version` prints the release version;
+- `bananaflow-cli --doctor` passes its blocking checks on the packaged build;
+- a real download succeeds;
+- a conversion succeeds and output verifies;
+- a Tag Editor Apply + Undo Applied Batch cycle succeeds on disposable fixtures;
+- expected product/version/publisher metadata appears in the executable/package;
+- app data is created only in documented per-user locations;
+- critical Hebrew/English UI and the YouTube Doctor/manual QA surfaces render correctly when changed by the release.
+
+## Release notes
+
+Include:
+
+- user-visible highlights/fixes;
+- known limitations;
+- supported-platform/signing status;
+- checksum verification guidance;
+- corresponding source/tag link;
+- migration/action-required notes when applicable;
+- prerelease marking when `PRERELEASE` is not `None`.
+
+## Publish
+
+Publication is a maintainer action after the draft passes manual acceptance. Do not auto-publish merely because build CI is green.
+
+After publication, confirm the official website's verified release snapshot/download page has picked up the new version and matching checksums before announcement. A lagging/failed website snapshot is a website-project issue, not a reason to retag an unchanged application release.
+
+## Rollback / bad release
+
+- Before tagging: fix and rerun.
+- Tagged but unpublished draft: delete the draft/tag if appropriate, fix and create the corrected tag.
+- Published: do not silently replace uploaded assets. Publish a superseding patch/security release and clearly mark/de-emphasize the bad release as appropriate.
 
 ## Signing status
 
-Windows binaries are currently unsigned and macOS builds are ad-hoc
-signed, not notarized. Checksums and GitHub build attestations are the
-verification story until code signing is procured. Release notes must
-state this plainly.
+Current signing/notarization status must be stated in release notes and user documentation. Checksums/build attestations provide useful integrity/provenance evidence but are not a substitute for platform code-signing identity.

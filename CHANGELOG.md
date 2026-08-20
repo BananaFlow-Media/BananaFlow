@@ -1,75 +1,35 @@
 # Changelog
 
-All notable changes to BananaFlow are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
-follow [Semantic Versioning](https://semver.org/).
+All notable BananaFlow changes are recorded here. The format follows Keep a Changelog principles and versions follow Semantic Versioning.
+
+## [Unreleased]
+
+### Changed
+
+- Documentation was reorganized around explicit sources of truth, current-vs-historical status and a Code → Documentation impact map.
+- Added repository AI-agent entry points (`AGENTS.md`, Claude/Gemini/Copilot adapters and path-specific instructions) so coding agents load architecture, safety, test and documentation context before editing.
+- Added a documentation CI gate for broken internal Markdown references, stale release-status wording, provider-version drift and PR documentation impact.
+- Reconciled Security, Privacy, English/Hebrew user manuals and the Spotify Search Proxy contract with the current Stable product behavior.
 
 ## [1.0.0] — 2026-08-09
 
-First public BananaFlow release.
+First public BananaFlow stable release.
 
 ### Added
 
-* **Download engine** for YouTube, YouTube Music and Spotify: playlists,
-  albums, artist discographies and channels; parallel downloads (1–6);
-  retry policy with rate-limit politeness; a conservative YouTube
-  reliability mode; and a bundled PO Token Provider + JavaScript runtime
-  in packaged builds so downloads work out of the box.
-* **Search** across YouTube Music, YouTube and Spotify.
-* **Batch Tag Editor**: proposal-first editing with preview and guarded
-  apply, undo/redo, JSON backups with restore and a backup manager,
-  MusicBrainz enrichment, ReplayGain, artwork handling, CSV
-  import/export, playlists export and action presets.
-* **Format Converter** with per-format quality presets and output
-  verification.
-* **Cookie Wizard**: YouTube sign-in through an isolated Playwright
-  browser profile — the app never reads your real browser's cookie
-  store.
-* **YouTube Doctor** diagnostics (GUI panel and `bananaflow-cli
-  --doctor`).
-* **Download History** with search and per-item actions.
-* **Bilingual UI**: English and Hebrew with complete RTL mirroring,
-  number/date isolation and a Fluent design system (light/dark themes,
-  accent colors).
-* **CLI** (`bananaflow-cli`): headless downloading, track listing and
-  diagnostics.
-* **Packaging**: Windows installer (Inno Setup) and portable ZIP; macOS
-  arm64 DMG; SHA-256 checksums; CycloneDX SBOM; GitHub build
-  attestations.
-* **Update check** against the BananaFlow GitHub Releases feed.
-* **Touch screen support**: drag to scroll any list, table or panel with
-  flick-to-coast; press and hold in place of a right-click for context
-  menus, and in place of a hover to read a control's tooltip without
-  activating it. The download queue's remove button no longer requires a
-  hover to appear, and queue reordering — previously drag-only — is
-  available from a card's menu. In the Tag Editor's file table a drag
-  scrolls rather than selecting, and a tap chooses a row only when the
-  finger stayed put. Several rows are selected the way File Explorer
-  does it — press, pause briefly, then drag a selection box — while
-  dragging straight away still scrolls and holding still opens the menu.
-  The Tag Editor's file list zooms by
-  pinching — on a touch screen, on a precision touchpad, or with Ctrl +
-  mouse wheel. An optional **Touch-Friendly Sizing**
-  setting enlarges controls, scrollbars and menu rows to finger-sized
-  targets.
-
-* **Official website** at
-  <https://bananaflow.bananaflow-media.workers.dev/> — bilingual
-  (English/Hebrew) download, help, FAQ, support and legal pages. The app
-  links to it from **Settings ▸ About ▸ Official website** in the
-  language the UI is running in; `bananaflow-cli --help` and
-  `--doctor` print it; the Windows installer registers it as the
-  publisher and support URL and adds a Start-menu shortcut; and it is
-  the `Homepage` in the Python package metadata. `utils/website.py` is
-  the single source of truth for the address.
+- Download engine for YouTube, YouTube Music and Spotify metadata/resolution workflows, including playlists/albums/discographies/channels, parallel execution and YouTube-specific reliability policy.
+- Search across YouTube Music, YouTube and optional proxy-backed Spotify text search.
+- Batch Tag Editor with proposal-first editing, Review/Undo/Redo, safe Apply/backup/journal/recovery, artwork/lyrics/ReplayGain, MusicBrainz, duplicate tools, CSV/report/playlist/workflow features.
+- Format Converter with per-format quality presets and output verification.
+- Isolated Cookie Wizard and YouTube Doctor diagnostics.
+- Searchable download History and CLI (`bananaflow-cli`).
+- English/Hebrew UI with complete RTL mirroring, accessibility/high-DPI/touch-oriented behavior.
+- Windows installer + portable package, experimental macOS package, SHA-256 checksums, CycloneDX SBOM and GitHub build-attestation evidence.
+- Application/component update checking with packaged users directed to full BananaFlow releases.
+- Official bilingual BananaFlow website for downloads, Help, FAQ, support and legal information.
 
 ### Known limitations
 
-* Binaries are unsigned: Windows SmartScreen warns on first run; macOS
-  requires right-click → Open. Verify downloads against the published
-  checksums (see `SECURITY.md`).
-* macOS support is experimental; Linux is source-install only.
-* This release starts with a fresh application-data directory. It does not
-  read or migrate configuration, download history, tag backups, presets
-  or cookies created by any software previously installed on the
-  machine.
+- Windows packages are currently unsigned with Authenticode, so SmartScreen can warn on first run; verify official release provenance/checksums.
+- macOS packaged support is experimental and Linux remains source/developer-oriented unless a release says otherwise.
+- Third-party sites can change independently of BananaFlow; generic extraction remains best effort.

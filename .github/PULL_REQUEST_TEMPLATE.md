@@ -1,43 +1,56 @@
 ## What does this PR do?
 
-<!-- One or two sentences. Link an Issue if one exists: "Fixes #123" -->
+<!-- One or two sentences. Link an Issue when applicable. -->
 
 ## Type of change
 
 - [ ] Bug fix
 - [ ] New feature
-- [ ] Refactor / internal change (no user-visible behavior change)
+- [ ] Refactor / internal change
 - [ ] Documentation
-- [ ] Translation (Hebrew/English)
+- [ ] Translation / RTL
 - [ ] CI / build / packaging
-- [ ] Security-relevant change (see `SECURITY.md` if this is a
-      vulnerability *report* instead of a fix — do not describe an
-      unpatched vulnerability here)
+- [ ] Security-relevant change
+
+## Documentation impact
+
+<!-- Review docs/DOCUMENTATION_POLICY.md. Select every category that applies. -->
+
+- [ ] User behavior / user guide
+- [ ] CLI
+- [ ] Architecture / design
+- [ ] Configuration / persistence / migration
+- [ ] Security / privacy / trust boundary
+- [ ] Packaging / release / dependencies / licenses
+- [ ] Accessibility / RTL / translation
+- [ ] Historical/QA evidence only
+- [ ] No documentation impact
+
+No documentation impact reason: <!-- required when the last box is checked; write a real reason after the colon -->
+
+Relevant documentation updated/reviewed:
+
+<!-- List paths or explain why mapped documents remain accurate. -->
 
 ## Screenshots / recording
 
-<!-- Required for any visible UI change. Before/after, or just after for
-     a new element. Delete this section if there is no UI change. -->
+<!-- Required for visible UI changes when practical. Delete if no visible UI change. -->
 
 ## How was this tested?
 
-<!-- What you ran, not just "it works." Include the isolated gate result
-     if you ran it: `python scripts/run_isolated_tests.py` -->
+<!-- Exact commands/evidence, not just “works”. -->
 
-- [ ] Added or updated tests for the changed behavior
-- [ ] `QT_QPA_PLATFORM=offscreen pytest tests/ -q` passes locally
-- [ ] `python scripts/run_isolated_tests.py` passes locally (or CI is
-      expected to cover it)
+- [ ] Added/updated focused tests where behavior changed
+- [ ] `python scripts/check_documentation.py` passes
+- [ ] `python scripts/run_isolated_tests.py` passes locally or CI provides the full gate
+- [ ] Real-network/manual QA performed when required by `docs/testing/TESTING.md`
 
 ## Checklist
 
-- [ ] No secrets, credentials, cookies, or tokens (real or
-      realistic-looking) are included anywhere in this diff
-- [ ] No generated files or staged release inputs are committed (see
-      `CONTRIBUTING.md`'s "Third-Party Code" section)
-- [ ] New user-facing strings are added to **both** language tables in
-      `ui/i18n.py` (English and Hebrew)
-- [ ] `core/`/`utils/` changes still import no Qt/PySide6
-- [ ] Documentation updated if setup, behavior, or architecture changed
-- [ ] Third-party license notice added to `THIRD_PARTY_NOTICES.md` if a
-      new dependency was introduced
+- [ ] No secrets, credentials, cookies or tokens (real or realistic-looking) are included
+- [ ] No generated files or staged release inputs are committed
+- [ ] New user-facing strings exist in both English and Hebrew tables
+- [ ] `core/`/`utils/` remain free of Qt/PySide6 symbols except the documented i18n lookup exception
+- [ ] Persisted-state changes include migration/failure-path handling and tests
+- [ ] Security-sensitive changes explicitly review `SECURITY.md`, `PRIVACY.md` and the threat model where applicable
+- [ ] New/changed dependencies review `THIRD_PARTY_NOTICES.md` and supply-chain/release impact
