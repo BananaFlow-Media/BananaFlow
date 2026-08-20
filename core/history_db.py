@@ -6,6 +6,7 @@ Responsibilities
 * Persist a permanent, searchable log of every completed download.
 * Provide fast read access for the HistoryPanel (last 500 records by default).
 * Support full-text search, single-record deletion, bulk clear, and CSV export.
+* Notify interested views after a record has committed, without importing Qt.
 * Be completely UI-agnostic and safe to call from any thread.
 
 Design decisions
@@ -16,6 +17,9 @@ Design decisions
   prevents interleaved write transactions from background download threads.
 * The database connection is opened once in __init__ and kept open for the
   lifetime of the object (WAL journal mode keeps readers non-blocking).
+* Insert subscribers are notified after the transaction lock is released, so a
+  listener can safely read the DB; bound-method listeners are held weakly so a
+  panel is not kept alive by the persistence layer.
 * All SQL uses parameterised queries – no string interpolation anywhere.
 * DownloadRecord is a plain dataclass: safe to pickle, queue, or copy.
 
@@ -36,10 +40,11 @@ import logging
 import shutil
 import sqlite3
 import threading
-from dataclasses import dataclass, field, fields, asdict
+import weakref
+from dataclasses import dataclass, field, fields, asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +200,7 @@ LIMIT  ?
 _DELETE_SQL  = "DELETE FROM downloads WHERE id = ?"
 _CLEAR_SQL   = "DELETE FROM downloads"
 _COUNT_SQL   = "SELECT COUNT(*) FROM downloads"
+_EXISTS_SQL  = "SELECT 1 FROM downloads WHERE id = ? LIMIT 1"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -222,6 +228,7 @@ class HistoryDB:
 
         self._path = db_path
         self._lock = threading.Lock()
+        self._insert_listeners: list[object] = []
 
         # Create parent directory if needed (not for :memory:)
         if db_path != ":memory:":
@@ -264,6 +271,63 @@ class HistoryDB:
                     + _CREATE_TRIGGERS_SQL
                 )
 
+    # ── Live insert observers ─────────────────────────────────────────────────
+
+    def subscribe_inserts(
+        self,
+        callback: Callable[[DownloadRecord], None],
+    ) -> Callable[[], None]:
+        """Subscribe to records after their INSERT transaction has committed.
+
+        Bound methods are held weakly so the DB cannot keep a destroyed UI
+        object alive. Plain functions are kept strongly: callers should not
+        have to retain a separate reference merely to keep a subscription
+        active. The returned callable explicitly unsubscribes either kind.
+        """
+        if getattr(callback, "__self__", None) is not None:
+            stored: object = weakref.WeakMethod(callback)  # type: ignore[arg-type]
+        else:
+            stored = callback
+
+        with self._lock:
+            self._insert_listeners.append(stored)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                try:
+                    self._insert_listeners.remove(stored)
+                except ValueError:
+                    pass
+
+        return unsubscribe
+
+    def _notify_insert(self, record: DownloadRecord) -> None:
+        """Notify subscribers outside the write transaction/connection lock."""
+        with self._lock:
+            listeners = list(self._insert_listeners)
+
+        dead: list[object] = []
+        for stored in listeners:
+            if isinstance(stored, weakref.ReferenceType):
+                callback = stored()
+                if callback is None:
+                    dead.append(stored)
+                    continue
+            else:
+                callback = stored
+            try:
+                callback(record)  # type: ignore[operator]
+            except Exception:
+                logger.exception("[HistoryDB] Insert subscriber failed")
+
+        if dead:
+            with self._lock:
+                for stored in dead:
+                    try:
+                        self._insert_listeners.remove(stored)
+                    except ValueError:
+                        pass
+
     # ── Write operations ──────────────────────────────────────────────────────
 
     def insert(self, record: DownloadRecord) -> int:
@@ -271,7 +335,9 @@ class HistoryDB:
         Persist a new download record and return its auto-assigned integer id.
 
         The record's `downloaded_at` field is filled with the current UTC
-        timestamp if it is empty.  The record object is not mutated.
+        timestamp if it is empty. The input object is not mutated. Subscribers
+        receive a copied record carrying the committed id/timestamp, and are
+        invoked only after the database lock has been released.
         """
         downloaded_at = record.downloaded_at or _utc_now()
 
@@ -292,7 +358,13 @@ class HistoryDB:
                         record.platform,
                     ),
                 )
-                return cursor.lastrowid or 0
+                record_id = int(cursor.lastrowid or 0)
+
+        if record_id:
+            self._notify_insert(
+                replace(record, id=record_id, downloaded_at=downloaded_at)
+            )
+        return record_id
 
     def delete(self, record_id: int) -> None:
         """
@@ -325,6 +397,13 @@ class HistoryDB:
         with self._lock:
             cursor = self._conn.execute(_FETCH_ALL_SQL, (limit,))
             return [_row_to_record(row) for row in cursor.fetchall()]
+
+    def exists(self, record_id: int) -> bool:
+        """Return whether a record still exists in the committed history."""
+        if not record_id:
+            return False
+        with self._lock:
+            return self._conn.execute(_EXISTS_SQL, (record_id,)).fetchone() is not None
 
     def search(
         self,

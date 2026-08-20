@@ -11,7 +11,8 @@ Responsibilities
 ----------------
 * Look up the installed version of each monitored component
   (importlib.metadata, with a yt_dlp module fallback for frozen builds).
-* Query PyPI's public JSON API for the latest published version.
+* Query PyPI's public JSON API for the latest published version. For yt-dlp,
+  inspect non-yanked release entries as well so nightly builds are visible.
 * Compare using numeric tuple ordering (handles yt-dlp's zero-padded
   CalVer like "2026.07.04" == "2026.7.4" as well as yt-dlp-ejs SemVer).
 * Never raise: any network/parsing failure is expressed per component as
@@ -128,9 +129,9 @@ class ComponentUpdateReport:
 def parse_version_tuple(version_str: str) -> tuple[int, ...]:
     """Extract every integer run from a version string.
 
-    Works for yt-dlp CalVer ("2026.07.04" → (2026, 7, 4)) and plain
-    SemVer ("0.8.0" → (0, 8, 0)). Pre-release/local suffixes after '-'
-    or '+' are ignored. Garbage yields an empty tuple.
+    Works for yt-dlp CalVer ("2026.07.04" → (2026, 7, 4)), yt-dlp nightly
+    CalVer ("2026.8.4.234419.dev0"), and plain SemVer. Hyphen/local suffixes
+    are ignored so existing semantic-pre-release comparisons stay unchanged.
     """
     clean = (version_str or "").strip().lstrip("vV")
     clean = clean.split("-")[0].split("+")[0]
@@ -144,6 +145,8 @@ def is_newer_version(remote: str, local: str) -> bool:
     "1.2" == "1.2.0". Two unparseable strings compare as equal (False).
     """
     r, l = parse_version_tuple(remote), parse_version_tuple(local)
+    if not r or not l:
+        return False
     width = max(len(r), len(l))
     return r + (0,) * (width - len(r)) > l + (0,) * (width - len(l))
 
@@ -178,13 +181,7 @@ def installed_component_version(pypi_name: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ComponentUpdateChecker:
-    """
-    Query PyPI for the latest version of each monitored component.
-
-    PyPI's JSON API (GET https://pypi.org/pypi/<name>/json) is public,
-    unauthenticated, and returns ``info.version`` as the latest
-    non-yanked release — one request per component per check.
-    """
+    """Query PyPI for the latest appropriate version of each component."""
 
     _USER_AGENT = f"BananaFlow/{_APP_VERSION} (component-update-checker; httpx)"
 
@@ -221,13 +218,24 @@ class ComponentUpdateChecker:
         except Exception:
             status.latest_version = ""
 
-        # A meaningful comparison needs both sides.
         status.check_ok = bool(status.installed_version and status.latest_version)
         if status.check_ok:
             status.update_available = is_newer_version(
                 status.latest_version, status.installed_version,
             )
         return status
+
+    @staticmethod
+    def _latest_non_yanked_release(data: dict) -> str:
+        """Newest parseable release that has at least one non-yanked file."""
+        candidates: list[str] = []
+        for version, files in (data.get("releases") or {}).items():
+            if not parse_version_tuple(str(version)) or not files:
+                continue
+            if all(bool(file_info.get("yanked")) for file_info in files):
+                continue
+            candidates.append(str(version))
+        return max(candidates, key=parse_version_tuple, default="")
 
     def _fetch_latest_pypi(self, pypi_name: str) -> str:
         url = f"https://pypi.org/pypi/{pypi_name}/json"
@@ -236,6 +244,15 @@ class ComponentUpdateChecker:
             response = client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
+
+        if pypi_name == "yt-dlp":
+            # info.version follows PyPI's normal stable view. yt-dlp also
+            # publishes an upstream-recommended nightly channel, so inspect the
+            # release map and choose the newest non-yanked build deliberately.
+            newest = self._latest_non_yanked_release(data)
+            if newest:
+                return newest
+
         version = data.get("info", {}).get("version", "")
         return str(version) if version else ""
 
@@ -256,7 +273,11 @@ def can_update_in_place() -> bool:
 def pip_upgrade_command() -> list[str]:
     """The exact command an approved in-place component update runs.
 
-    Upgrading ``yt-dlp[default]`` refreshes yt-dlp *and* pulls the
-    matching pinned yt-dlp-ejs, keeping the pair consistent.
+    ``--pre`` is required for pip to consider yt-dlp's nightly builds.
+    Upgrading ``yt-dlp[default]`` refreshes yt-dlp *and* pulls the matching
+    pinned yt-dlp-ejs, keeping the pair consistent.
     """
-    return [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp[default]"]
+    return [
+        sys.executable, "-m", "pip", "install", "--upgrade", "--pre",
+        "yt-dlp[default]",
+    ]

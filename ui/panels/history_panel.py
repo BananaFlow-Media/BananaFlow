@@ -10,8 +10,7 @@ Features
     the DB on every keystroke — uses a 300 ms debounce timer).
   - "Export CSV" button that triggers a QFileDialog save-as.
   - "Clear History" button with a confirmation MessageBox.
-  - Responds to HistoryDB updates from AppWindow: add_record() inserts a
-    new row at the top without a full reload.
+  - Responds to committed HistoryDB inserts immediately without a full reload.
 
 Signals emitted upward
 ----------------------
@@ -59,6 +58,7 @@ class HistoryPanel(QWidget):
 
     redownload_requested  = Signal(object)   # DownloadRecord
     open_folder_requested = Signal(object)   # DownloadRecord
+    _record_committed     = Signal(object)   # cross-thread DB -> Qt bridge
 
     def __init__(
         self,
@@ -80,6 +80,15 @@ class HistoryPanel(QWidget):
 
         self._build()
 
+        # HistoryDB inserts can happen on worker threads. The DB observer is a
+        # weak bound-method subscription and this Qt signal queues the actual
+        # widget work onto the panel's thread. Subscribe after _build() so even
+        # a same-thread insert can safely touch the already-created controls.
+        self._record_committed.connect(self._on_record_committed)
+        subscribe_inserts = getattr(self._db, "subscribe_inserts", None)
+        if callable(subscribe_inserts):
+            subscribe_inserts(self._queue_committed_record)
+
         tm = ThemeManager.instance()
         if tm is not None:
             tm.theme_changed.connect(self._apply_theme)
@@ -88,27 +97,51 @@ class HistoryPanel(QWidget):
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def showEvent(self, event) -> None:  # noqa: N802 – Qt override
-        """Refresh history from DB every time the panel becomes visible."""
-        super().showEvent(event)
-        self.reload()
-
     def reload(self) -> None:
-        """Re-fetch all records from DB and repopulate the list."""
+        """Re-fetch all records from DB while preserving an active search."""
         self._all_records = self._db.fetch_all(limit=500)
-        self._populate(self._all_records)
+        if self._search_box.text().strip():
+            self._apply_filter()
+        else:
+            self._populate(self._all_records)
 
     def add_record(self, record: DownloadRecord) -> None:
-        """
-        Prepend one new record to the top of the list without a full reload.
-        Called by AppWindow after each successful download.
-        """
+        """Prepend a committed record without rebuilding the whole list."""
+        if record.id:
+            self._all_records = [r for r in self._all_records if r.id != record.id]
         self._all_records.insert(0, record)
+        del self._all_records[500:]
+
+        # Keep a live search truthful instead of silently clearing its filter.
+        if self._search_box.text().strip():
+            self._apply_filter()
+            return
+
+        if record.id:
+            for row in list(self._rows):
+                if row.record_id() == record.id:
+                    self._rows.remove(row)
+                    row.deleteLater()
+                    break
+
         self._empty_widget.setVisible(False)
         row = self._create_row(record)
         self._rows_layout.insertWidget(0, row)
         self._rows.insert(0, row)
+        if len(self._rows) > 500:
+            self._rows.pop().deleteLater()
         self._update_count()
+
+    def _queue_committed_record(self, record: DownloadRecord) -> None:
+        """HistoryDB subscriber; safe to call from a download worker thread."""
+        self._record_committed.emit(record)
+
+    def _on_record_committed(self, record: DownloadRecord) -> None:
+        # Clear/delete can race a queued cross-thread signal. A cheap existence
+        # check prevents a stale record from reappearing after the user removed it.
+        if not record.id or not self._db.exists(record.id):
+            return
+        self.add_record(record)
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -350,11 +383,8 @@ class HistoryPanel(QWidget):
 
     def _on_delete_row(self, record: DownloadRecord) -> None:
         self._db.delete(record.id)
-        try:
-            self._all_records.remove(record)
-        except ValueError:
-            pass
-        for row in self._rows:
+        self._all_records = [r for r in self._all_records if r.id != record.id]
+        for row in list(self._rows):
             if row.record_id() == record.id:
                 self._rows.remove(row)
                 row.deleteLater()

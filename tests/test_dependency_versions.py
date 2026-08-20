@@ -1,10 +1,11 @@
 """
 tests/test_dependency_versions.py  –  Dependency-version drift guard
 ========================================================================
-requirements.txt and pyproject.toml must agree on BananaFlow's yt-dlp
-release requirement. YouTube Doctor has a separate concept: the oldest
-version it considers locally usable. The product release may deliberately
-pin a newer reviewed nightly, so those two values must not be forced equal.
+pyproject.toml defines BananaFlow's oldest supported/safe yt-dlp source
+version. requirements.txt is the reproducible application/release install and
+may deliberately pin a newer reviewed nightly. YouTube Doctor must never call
+a known-vulnerable version healthy and must remain compatible with the source
+floor.
 """
 
 from __future__ import annotations
@@ -31,39 +32,44 @@ def _calver_date(version: str) -> tuple[int, int, int]:
     return int(parts[0]), int(parts[1]), int(parts[2])
 
 
-def test_requirements_and_pyproject_agree_on_yt_dlp_requirement():
+def test_pyproject_is_safe_floor_and_release_pin_is_not_older():
     requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
     pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     requirements_spec = _extract_yt_dlp_requirement(requirements_text)
     pyproject_spec = _extract_yt_dlp_requirement(pyproject_text)
 
-    assert requirements_spec == pyproject_spec, (
-        f"requirements.txt requires yt-dlp[default]{requirements_spec[0]}{requirements_spec[1]} "
-        f"but pyproject.toml requires yt-dlp[default]{pyproject_spec[0]}{pyproject_spec[1]} — "
-        "keep the release requirement in sync."
+    assert pyproject_spec[0] == ">=", (
+        "pyproject.toml must express the safe source compatibility floor"
+    )
+    assert requirements_spec[0] == "==", (
+        "requirements.txt must pin the reviewed yt-dlp used by release builds"
+    )
+    assert _calver_date(requirements_spec[1]) >= _calver_date(pyproject_spec[1]), (
+        f"release pin {requirements_spec[1]} is older than source floor {pyproject_spec[1]}"
     )
 
 
-def test_release_requirement_is_at_least_security_patched_2026_7_4():
-    requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
-    _operator, release_version = _extract_yt_dlp_requirement(requirements_text)
+def test_source_floor_is_at_least_security_patched_2026_7_4():
+    pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    _operator, floor_version = _extract_yt_dlp_requirement(pyproject_text)
 
-    assert _calver_date(release_version) >= (2026, 7, 4), (
-        "BananaFlow must not release with a yt-dlp requirement older than "
-        "2026.7.4, which is the first patched release for GHSA-6v4j-43gg-vj32."
+    assert _calver_date(floor_version) >= (2026, 7, 4), (
+        "BananaFlow must not support a yt-dlp baseline older than 2026.7.4, "
+        "the first patched release for GHSA-6v4j-43gg-vj32."
     )
 
 
-def test_youtube_doctor_minimum_is_not_newer_than_release_requirement():
+def test_youtube_doctor_minimum_is_secure_and_not_newer_than_source_floor():
     from core.youtube_doctor import MIN_YT_DLP_VERSION
 
-    requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
-    _operator, release_version = _extract_yt_dlp_requirement(requirements_text)
+    pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    _operator, floor_version = _extract_yt_dlp_requirement(pyproject_text)
 
-    assert _calver_date(MIN_YT_DLP_VERSION) <= _calver_date(release_version), (
+    assert _calver_date(MIN_YT_DLP_VERSION) >= (2026, 7, 4)
+    assert _calver_date(MIN_YT_DLP_VERSION) <= _calver_date(floor_version), (
         f"YouTube Doctor requires {MIN_YT_DLP_VERSION}, which is newer than "
-        f"the product's yt-dlp release requirement {release_version}."
+        f"the source compatibility floor {floor_version}."
     )
 
 
@@ -78,8 +84,6 @@ def test_pot_provider_is_not_a_source_tree_hard_dependency():
     requirements_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
     pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    # Only real (non-comment) requirement lines matter — the package name
-    # legitimately appears in an explanatory comment about why it's absent.
     requirement_lines = [
         line for line in requirements_text.splitlines()
         if line.strip() and not line.strip().startswith("#")
@@ -90,7 +94,6 @@ def test_pot_provider_is_not_a_source_tree_hard_dependency():
         "provider stack explicitly."
     )
 
-    # Only the po-token optional-dependencies group may reference it.
     dependencies_block = re.search(
         r"^dependencies\s*=\s*\[(.*?)^\]", pyproject_text, re.S | re.M,
     )
@@ -109,11 +112,8 @@ def test_pot_provider_is_not_a_source_tree_hard_dependency():
 
 
 def test_pot_provider_version_pin_matches_the_staging_script():
-    """pyproject.toml's po-token extra and
-    packaging/stage_pot_provider.py both hardcode the bgutil-ytdlp-pot-
-    provider version independently (the packaging script downloads its
-    own pinned source archive rather than reading it from an installed
-    package). Nothing else cross-checked them (issue #30)."""
+    """pyproject.toml's po-token extra and packaging/stage_pot_provider.py
+    must pin the same provider version."""
     pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'bgutil-ytdlp-pot-provider==(\S+?)"', pyproject_text)
     assert match, "could not find pyproject.toml's bgutil-ytdlp-pot-provider== pin"
@@ -126,7 +126,6 @@ def test_pot_provider_version_pin_matches_the_staging_script():
 
     assert pyproject_version == stage_script_version, (
         f"pyproject.toml pins bgutil-ytdlp-pot-provider=={pyproject_version} but "
-        f"packaging/stage_pot_provider.py's PROVIDER_VERSION={stage_script_version!r} "
-        f"— keep them in sync (the staged plugin/backend must match what a "
-        f"source/venv install of the po-token extra provides)."
+        f"packaging/stage_pot_provider.py's PROVIDER_VERSION={stage_script_version!r} — "
+        "keep them in sync."
     )

@@ -396,7 +396,7 @@ class YoutubeDoctorReport:
 # Keep in sync with requirements.txt's `yt-dlp[default]>=...` pin. This is
 # the known *minimum*, not an attempt to track "latest" — there is no
 # existing safe (offline, no-network) mechanism in this codebase for that.
-MIN_YT_DLP_VERSION = "2026.6.9"
+MIN_YT_DLP_VERSION = "2026.7.4"
 
 
 def _parse_calver(version_str: str) -> tuple[int, int, int]:
