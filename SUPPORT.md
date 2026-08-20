@@ -1,81 +1,49 @@
 # Support
 
-This document explains where to get help with BananaFlow, and
-where **not** to post certain kinds of information.
+This document explains where to get help with BananaFlow and where **not** to post sensitive information.
 
-The official website — <https://bananaflow.bananaflow-media.workers.dev/> —
-is the first stop for anyone using the app rather than developing it. It
-carries the end-user
-[Help](https://bananaflow.bananaflow-media.workers.dev/en/help/),
-[FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) and
-[Support](https://bananaflow.bananaflow-media.workers.dev/en/support/)
-pages in English and Hebrew. This document covers the developer-facing
-channels in this repository.
+For ordinary application use, start with the official website:
+
+- Help: <https://bananaflow.bananaflow-media.workers.dev/en/help/> (Hebrew equivalent under `/he/`)
+- FAQ: <https://bananaflow.bananaflow-media.workers.dev/en/faq/>
+- Support: <https://bananaflow.bananaflow-media.workers.dev/en/support/>
+
+The repository user manual is [`docs/user-guide/user-manual.md`](docs/user-guide/user-manual.md); Hebrew: [`docs/user-guide/user-guide-he.md`](docs/user-guide/user-guide-he.md).
 
 ## Before asking
 
-1. Check the website's
-   [Help](https://bananaflow.bananaflow-media.workers.dev/en/help/) and
-   [FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) pages,
-   and `README.md`'s "Troubleshooting" section, for the most common
-   issues (FFmpeg not found, Playwright/Chromium missing, PO Token
-   errors).
-2. Run `bananaflow-cli --doctor` (or the in-app "YouTube Doctor" from
-   Settings) — it diagnoses the most common environment problems
-   (missing FFmpeg, missing Playwright browser, missing PO Token
-   provider) and suggests the fix.
-3. Search existing [Issues](../../issues) and
-   [Discussions](../../discussions) — your question may already be
-   answered.
+1. Check the website Help/FAQ and the user manual troubleshooting section.
+2. Run **YouTube Doctor** from Settings or `bananaflow-cli --doctor` for download-environment problems.
+3. Search existing Issues/Discussions.
+4. Reproduce with the current public release when practical.
 
 ## Where to ask
 
-* **"How do I...?" / usage questions** → the website's
-  [Help](https://bananaflow.bananaflow-media.workers.dev/en/help/) and
-  [FAQ](https://bananaflow.bananaflow-media.workers.dev/en/faq/) pages
-  first, then [Discussions → Help](../../discussions/categories/help).
-* **Something is broken** → open an Issue using the *Bug Report* template
-  (or a more specific template — *Installation Failure*, *Download
-  Failure*, *Site Compatibility*, *Converter Problem*, *Tag Editor
-  Problem* — if it fits).
-* **A specific site or URL doesn't work** → the *Site Compatibility*
-  Issue template; include the URL type (not necessarily the exact URL if
-  it's private) and the YouTube Doctor / `--doctor` output.
-* **Accessibility problem** (screen reader, keyboard navigation, RTL
-  layout, contrast) → the *Accessibility Problem* Issue template.
-* **Hebrew translation issue** → the *Hebrew/Translation* Issue template
-  for a specific wrong or missing string;
-  [Discussions → Translations](../../discussions/categories/translations)
-  for broader wording, terminology or RTL-convention coordination.
-* **Feature idea, not a bug** → [Discussions → Ideas](../../discussions/categories/ideas)
-  first, or the *Feature Request* Issue template once it's reasonably
-  well-scoped.
-* **Beta feedback** (once a public Beta exists) →
-  [Discussions → Beta Testing](../../discussions/categories/beta-testing).
-  Anything reproducible still belongs in an Issue — the Discussion is for
-  impressions, setup notes and "is this expected?" questions.
-* **Contributing / architecture questions** →
-  [Discussions → Development](../../discussions/categories/development),
-  and see `CONTRIBUTING.md`.
-* **Security vulnerability** → **do not** open a public Issue or
-  Discussion. See `SECURITY.md` — GitHub private vulnerability reporting
-  is the official channel.
+- Usage/how-to questions → [Discussions / Help](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/help) after checking the website Help/FAQ.
+- Reproducible bug → the closest Issue template (general bug, install/download/converter/Tag Editor/site compatibility, etc.).
+- Accessibility/RTL/translation problem → the dedicated Issue form or [Discussions / Translations](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/translations).
+- Feature idea → [Discussions / Ideas](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/ideas) first for broad proposals; a scoped issue once behavior is clear.
+- Pre-release/nightly/build testing feedback → [Discussions / Beta Testing](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/beta-testing). The category remains useful even while the normal product line is Stable.
+- Architecture/contribution question → `CONTRIBUTING.md` and [Discussions / Development](https://github.com/BananaFlow-Media/BananaFlow/discussions/categories/development).
+- Security vulnerability → **never a public issue**; follow `SECURITY.md`.
 
 ## What not to post publicly
 
-Never include, in an Issue, Discussion, PR, or log paste:
+Never post:
 
-* cookies, session tokens, or authentication data;
-* API keys, passwords, or other credentials;
-* another person's private information;
-* a live PO Token value; or
-* an unredacted `config.json` or full application log without first
-  reviewing it (the app applies centralized redaction, but review before
-  sharing regardless — see `SECURITY.md`).
+- cookies/session values;
+- passwords/API keys/access tokens/proxy tokens;
+- live PO-token values;
+- another person's private information;
+- an unreviewed full `config.json` or log containing private paths/URLs/media/account details;
+- exploit details for an unpatched vulnerability.
+
+Central redaction reduces accidental disclosure but does not remove the need to review material before sharing.
+
+## Good bug evidence
+
+Include the BananaFlow version, OS/install type, exact steps, expected vs actual behavior and the smallest relevant Doctor/log excerpt after redaction. For UI bugs, include a screenshot/short recording when it does not expose private data.
 
 ## Response time
 
-This is a community-maintained open-source project (see `GOVERNANCE.md`
-and `MAINTAINERS.md`). There is no guaranteed response time or support
-SLA. Well-scoped, reproducible reports with the requested diagnostic
-information (Doctor output, OS/version, exact steps) get triaged fastest.
+BananaFlow is community-maintained open-source software. There is no guaranteed support SLA. Clear, reproducible reports with appropriate diagnostics are easier to triage.

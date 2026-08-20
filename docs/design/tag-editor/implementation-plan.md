@@ -1,66 +1,68 @@
-# עורך התגיות — מצב העיצוב והתוכנית
+# Tag Editor — current design decisions
 
-עודכן: 2 באוגוסט 2026
+Status: **Current design record**  
+Last major redesign review: 2026-08-02
 
-## מקור האמת
+The old HTML prototype under `_reference/` is historical inspiration, not the source of truth. Current product behavior and automated surface contracts take precedence.
 
-**העיצוב של עורך התגיות נקבע בתוך הפרויקט הזה.** אב־טיפוס ה־HTML שהנחה את
-העבודה עד יולי 2026 הועבר ל־`_reference/` ואינו חוזה יותר — הנימוקים
-מפורטים ב־`_reference/README.md`.
+## Current workspace rules
 
-הטוקנים החזותיים שמקורם באב־הטיפוס (פלטה, רדיוסים, מידות ב־`shared.py`)
-נשארים כברירת המחדל של המוצר. הם החלטה של המוצר, לא ציטוט.
+- **Include subfolders** affects the scan scope.
+- Incremental refresh and full rescan are separate actions.
+- Search/filter changes visible rows only; it does not change Apply scope.
+- Table selection controls the scope of editing actions.
+- Pending non-excluded/non-blocked proposals control Apply scope.
+- Every implemented/wired feature must have a discoverable UI/keyboard path; do not hide working functionality merely to match an obsolete prototype.
 
-## הכרעות מימוש שבתוקף
+## Inspector information architecture
 
-- מתג "כלול תתי־תיקיות" משפיע בפועל על הסריקה; ברירת המחדל מסומן.
-- refresh אינקרמנטלי ו־rescan מלא נשארים שתי פעולות נפרדות.
-- חיפוש מסנן תצוגה בלבד ואינו משנה את היקף Apply.
-- בחירה בטבלה אינה היקף Apply. רק proposals שלא הוחרגו ושאינם חסומים
-  נכתבים, ואחרי Review ההיקף מחושב מחדש.
-- כל פעולה בתוך האינספקטור פועלת על **הבחירה בטבלה** (`edit_scope()`).
-  מנוע הפעולות הוא היחיד שמציע היקפים אחרים, והוא אומר זאת במפורש.
-- שום פונקציה מיושמת לא מוסתרת מה־UI. אם היא מחווטת — יש אליה דרך.
+### Edit
 
-## ביקורת 30 ביולי 2026 — מה נמצא
+- Fields
+- Artwork
+- Lyrics
+- ReplayGain
+- File Properties
 
-ביקורת מלאה של שלושת מצבי האינספקטור ותתי־הקטגוריות מצאה:
+### Tools
 
-| קטגוריה | ממצא |
-|---|---|
-| נגישות | תשע שורות הפעולה (`OpRow`) היו עכבר־בלבד: ללא focus policy, ללא טיפול במקלדת וללא שם נגיש |
-| פונקציות חסומות | שש פונקציות מחווטות ללא דרך גישה, ביניהן "שנה שם קובץ לפי הכותרת" שכלל לא נבנה |
-| כלים קבורים | שבע פעולות ברישום (`core/tag_actions.py`) נגישות רק דרך combo שטוח בן 23 פריטים בתוך מודאל: חיפוש והחלפה, שינוי אותיות, מספור רצועות, שתי פעולות התבנית והגדרת ערך |
-| מצב מיושן | עטיפה, מילים, ReplayGain ומאפיינים המשיכו להציג את הקובץ הקודם אחרי ביטול בחירה, וכפתורי המאפיינים נשארו פעילים |
-| באג | תווית "הצג/הסתר שדות נוספים" נתקעה על "הסתר" |
-| ניווט | שורת הצ'יפים גולשת בכל מצב: עריכה 560px, כלים 1146px, בדיקה 546px — לתוך רצועה של 312px |
+- Auto Arrange
+- All Actions
+- Duplicates
+- Online Metadata
 
-## תוכנית
+### Check
 
-| שלב | תיאור | מצב |
-|---:|---|---|
-| 0 | ניתוק מאב־טיפוס ה־HTML | הושלם |
-| 1 | תיקוני נגישות, מצב מיושן ובאג התווית | הושלם |
-| 2 | שחרור שש הפונקציות החסומות | הושלם |
-| 4 | סגירת פערי תוכן: רשימת פעולות מובנות, סיכום כפילויות, הערות ניקוי | הושלם |
-| 5 | כלים חדשים: regex, פיצול שדה, העתקת תגיות, תיקון קידוד | הושלם |
-| 3 | איחוד ניווט הפעולות והכפילויות ל־12 יעדים | הושלם |
+- Pending Changes
+- Problems
+- External Changes
 
-## שלב 3 — המבנה שיושם
+Older shortcut pages for filename/cleanup/rename behavior were consolidated under **All Actions** rather than deleting capability. Duplicate scanning/results/management have a single discoverable tools surface.
 
-- **עריכה:** שדות, עטיפה, מילות שיר, ReplayGain ומאפייני קובץ.
-- **כלים:** סידור אוטומטי, כל הפעולות, כפילויות ומטא־דאטה מקוון.
-- **בדיקה:** שינויים ממתינים, בעיות ושינויים חיצוניים.
-- שלושת דפי הקיצור הישנים — לפי שם הקובץ, ניקוי ומחיקה ושינוי שם קובץ —
-  אוחדו תחת "כל הפעולות" בלי להסיר פעולות, הגדרות או תצוגות מקדימות.
-- סריקת כפילויות, התוצאות ופתיחת מנהל הכפילויות נמצאות בדף כלים אחד.
-- העיצוב החזותי, מצבי האינספקטור ושורת תתי־הקטגוריות נשארו ללא שינוי.
+## Safety boundaries
 
-## קריטריוני קבלה
+Design work must not bypass the Tag Editor disk-safety architecture:
 
-1. כל פונקציה מחווטת נגישה מה־UI ומהמקלדת.
-2. כל פקד באינספקטור מציג את מצב הבחירה הנוכחית או נוקה.
-3. RTL, נתיבים LTR, נגישות מקלדת ו־High DPI נשמרים.
-4. תהליכי Apply/Restore/Delete/Move אינם עוקפים את שכבות הבטיחות.
-5. `tests/test_tag_editor_surface_contract.py` עובר — הוא רשת הביטחון
-   היחידה שמונעת אובדן שקט של פונקציה.
+- proposal-first editing;
+- Review before Apply;
+- backup/journal/verify-before-replace;
+- external-change blocking/review;
+- safe move/rename/delete paths;
+- recovery/Undo Applied Batch semantics.
+
+See `docs/architecture/tag-editor-safety.md`.
+
+## Accessibility / RTL
+
+- Every interactive inspector/action row is keyboard reachable and exposes accessible semantics.
+- Inspector state clears/updates when selection changes; stale previous-file values/actions must not remain active.
+- Hebrew layout is RTL while technical file/path/identifier content stays readable.
+- High-DPI/high-contrast behavior remains part of the acceptance surface.
+
+## Surface regression protection
+
+The Tag Editor surface-contract tests exist to prevent quiet loss of implemented functions. New design changes should update the contract intentionally rather than disabling it to fit a mockup.
+
+## Historical prototype
+
+See [`_reference/README.md`](_reference/README.md) and the archived July parity report for the old HTML-prototype context. Those files explain what was built and why, but they do not decide current UI disputes.

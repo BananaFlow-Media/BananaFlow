@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""BananaFlow documentation consistency gate.
+
+Runs with the standard library only. Static mode checks the checked-out tree.
+PR mode (``--base``/``--head``) additionally checks Code → Documentation
+impact expectations using the pull-request body from ``GITHUB_EVENT_PATH``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+
+REQUIRED_DOCS = (
+    "AGENTS.md",
+    "docs/README.md",
+    "docs/AI_CONTEXT.md",
+    "docs/DOCUMENTATION_POLICY.md",
+    "docs/architecture/overview.md",
+    "docs/testing/TESTING.md",
+    "docs/security/threat-model.md",
+    "docs/security/supply-chain.md",
+    "docs/accessibility/ACCESSIBILITY.md",
+    "docs/i18n/TRANSLATING.md",
+    "docs/user-guide/user-manual.md",
+    "docs/user-guide/user-guide-he.md",
+    "docs/user-guide/cli.md",
+    "SECURITY.md",
+    "PRIVACY.md",
+    "CHANGELOG.md",
+)
+
+CURRENT_DOCS = (
+    "README.md",
+    "SECURITY.md",
+    "PRIVACY.md",
+    "SUPPORT.md",
+    "CONTRIBUTING.md",
+    "docs/README.md",
+    "docs/AI_CONTEXT.md",
+    "docs/DOCUMENTATION_POLICY.md",
+    "docs/user-guide/user-manual.md",
+    "docs/user-guide/user-guide-he.md",
+    "docs/release/RELEASING.md",
+)
+
+STABLE_FORBIDDEN_PHRASES = (
+    "no stable release yet",
+    "first stable release will be",
+    "current beta series",
+    "road from the current beta",
+    "v0.1.0 is the latest public release",
+    "no public project website is currently operated",
+    "a project website, winget",
+)
+
+PLATFORM_FORBIDDEN_PHRASES = (
+    "macos packaged support is experimental",
+    "macos is experimental",
+    "experimental packaged support",
+    "source/developer use unless a release explicitly says otherwise",
+    "source install only, unsupported",
+    "source-install-only, unsupported",
+    "linux remains source/developer-oriented",
+    "linux remains source-install-only",
+)
+
+MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+BACKTICK_MD_RE = re.compile(r"`([^`\n]+\.md(?:#[^`\n]+)?)`")
+
+
+@dataclass(frozen=True)
+class ImpactRule:
+    name: str
+    path_patterns: tuple[str, ...]
+    docs_any: tuple[str, ...]
+
+
+IMPACT_RULES = (
+    ImpactRule("CLI", (r"^cli\.py$",), ("docs/user-guide/cli.md", "docs/user-guide/user-manual.md")),
+    ImpactRule(
+        "authentication/privacy",
+        (r"cookie", r"auth", r"youtube_doctor", r"runtime_components", r"update_checker", r"component_updates"),
+        ("SECURITY.md", "PRIVACY.md", "docs/security/threat-model.md", "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md"),
+    ),
+    ImpactRule(
+        "Spotify/search",
+        (r"core/search_engine\.py$", r"core/scraper\.py$", r"spotify"),
+        ("docs/user-guide/spotify-proxy-api.md", "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md", "PRIVACY.md"),
+    ),
+    ImpactRule(
+        "Tag Editor safety",
+        (r"metadata_", r"tag_editor", r"undo_applied_batch", r"restore_preview", r"change_drafts", r"tag_actions"),
+        ("docs/architecture/tag-editor-safety.md", "docs/architecture/tag-editor-undo-rollback-guarantees.md", "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md"),
+    ),
+    ImpactRule(
+        "persistence/config",
+        (r"^config\.py$", r"^config_migrate\.py$", r"history_db", r"queue_persistence", r"update_state"),
+        ("docs/migrations/README.md", "PRIVACY.md", "docs/user-guide/user-manual.md"),
+    ),
+    ImpactRule(
+        "packaging/dependencies",
+        (r"^packaging/", r"^requirements\.txt$", r"^pyproject\.toml$", r"^constraints", r"^\.github/workflows/release-", r"^scripts/build_", r"^scripts/fetch_", r"generate_sbom"),
+        ("docs/release/RELEASING.md", "THIRD_PARTY_NOTICES.md", "SOURCE_OFFER.md", "docs/security/supply-chain.md"),
+    ),
+)
+
+
+def _read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def _is_stable() -> bool:
+    text = _read("version.py")
+    return bool(re.search(r"^PRERELEASE:\s*str\s*\|\s*None\s*=\s*None\s*$", text, re.M))
+
+
+def _clean_link(raw: str) -> str:
+    raw = raw.strip()
+    if " " in raw and not raw.startswith("<"):
+        raw = raw.split(" ", 1)[0]
+    return raw.strip("<>")
+
+
+def _looks_like_local_markdown(target: str) -> bool:
+    if not target or target.startswith("#"):
+        return False
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc:
+        return False
+    return unquote(parsed.path).lower().endswith(".md")
+
+
+def _inside_root(candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(ROOT.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_reference(source: Path, target: str) -> Path | None:
+    parsed = urlsplit(_clean_link(target))
+    rel = unquote(parsed.path)
+    if not rel:
+        return source
+
+    source_relative = (source.parent / rel).resolve()
+    if not _inside_root(source_relative):
+        return None
+    if source_relative.is_file():
+        return source_relative
+
+    root_relative = (ROOT / rel).resolve()
+    if _inside_root(root_relative) and root_relative.is_file():
+        return root_relative
+    return source_relative
+
+
+def check_required_files() -> list[str]:
+    return [f"required documentation file missing: {path}" for path in REQUIRED_DOCS if not (ROOT / path).is_file()]
+
+
+def check_markdown_references() -> list[str]:
+    errors: list[str] = []
+    for source in sorted(ROOT.rglob("*.md")):
+        if ".git" in source.parts:
+            continue
+        text = source.read_text(encoding="utf-8")
+        targets = [_clean_link(m.group(1)) for m in MARKDOWN_LINK_RE.finditer(text)]
+        targets.extend(m.group(1) for m in BACKTICK_MD_RE.finditer(text))
+        for target in targets:
+            if not _looks_like_local_markdown(target):
+                continue
+            resolved = _resolve_reference(source, target)
+            if resolved is None:
+                continue
+            if not resolved.is_file():
+                errors.append(f"{source.relative_to(ROOT)}: broken Markdown reference {target!r}")
+    return sorted(set(errors))
+
+
+def check_stale_release_language() -> list[str]:
+    if not _is_stable():
+        return []
+    errors: list[str] = []
+    for path in CURRENT_DOCS:
+        file = ROOT / path
+        if not file.exists():
+            continue
+        lowered = file.read_text(encoding="utf-8").casefold()
+        for phrase in STABLE_FORBIDDEN_PHRASES:
+            if phrase in lowered:
+                errors.append(f"{path}: stale Stable/Beta wording contains {phrase!r}")
+    return errors
+
+
+def check_platform_support_language() -> list[str]:
+    """Reject the retired platform-status wording in current documents.
+
+    Historical evidence is deliberately not scanned here. Current product
+    policy is: Windows 10/11 x64 + macOS Apple Silicon are supported packaged
+    targets; Linux is supported from source but has no official package yet.
+    """
+    errors: list[str] = []
+    for path in CURRENT_DOCS:
+        file = ROOT / path
+        if not file.exists():
+            continue
+        lowered = file.read_text(encoding="utf-8").casefold()
+        for phrase in PLATFORM_FORBIDDEN_PHRASES:
+            if phrase in lowered:
+                errors.append(f"{path}: stale platform-support wording contains {phrase!r}")
+    return errors
+
+
+def _provider_versions() -> dict[str, str]:
+    values: dict[str, str] = {}
+    stage = _read("packaging/stage_pot_provider.py")
+    match = re.search(r'^PROVIDER_VERSION\s*=\s*["\']([^"\']+)', stage, re.M)
+    if match:
+        values["packaging/stage_pot_provider.py"] = match.group(1)
+    pyproject = _read("pyproject.toml")
+    match = re.search(r"bgutil-ytdlp-pot-provider==([0-9][^\"']*)", pyproject)
+    if match:
+        values["pyproject.toml"] = match.group(1)
+    readme = _read("packaging/yt-dlp-plugins/README.md")
+    match = re.search(r"bgutil-ytdlp-pot-provider==([0-9][0-9A-Za-z.\-+]*)", readme)
+    if match:
+        values["packaging/yt-dlp-plugins/README.md"] = match.group(1)
+    return values
+
+
+def check_provider_consistency() -> list[str]:
+    values = _provider_versions()
+    if len(values) < 2:
+        return ["could not read PO Token Provider version from expected sources"]
+    errors: list[str] = []
+    if len(set(values.values())) != 1:
+        errors.append("PO Token Provider version drift: " + ", ".join(f"{k}={v}" for k, v in values.items()))
+    version = next(iter(values.values()))
+    if version not in _read("THIRD_PARTY_NOTICES.md"):
+        errors.append(f"THIRD_PARTY_NOTICES.md does not mention staged provider version {version}")
+    return errors
+
+
+def _ytdlp_floor_sources() -> dict[str, str]:
+    values: dict[str, str] = {}
+    pyproject = _read("pyproject.toml")
+    match = re.search(r"yt-dlp\[default\]>=([0-9]+(?:\.[0-9]+){2})", pyproject)
+    if match:
+        values["pyproject.toml"] = match.group(1)
+
+    doctor = _read("core/youtube_doctor.py")
+    match = re.search(r'^MIN_YT_DLP_VERSION\s*=\s*["\']([^"\']+)', doctor, re.M)
+    if match:
+        values["core/youtube_doctor.py"] = match.group(1)
+
+    readme = _read("README.md")
+    match = re.search(r"Compatibility floor\s+\*\*≥\s*([0-9]+(?:\.[0-9]+){2})\*\*", readme)
+    if match:
+        values["README.md"] = match.group(1)
+
+    notices = _read("THIRD_PARTY_NOTICES.md")
+    match = re.search(r"yt-dlp\[default\]>=([0-9]+(?:\.[0-9]+){2})", notices)
+    if match:
+        values["THIRD_PARTY_NOTICES.md"] = match.group(1)
+    return values
+
+
+def _version_numbers(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", value))
+
+
+def _ytdlp_exact_release_pins() -> dict[str, str]:
+    values: dict[str, str] = {}
+    requirements = _read("requirements.txt")
+    match = re.search(r"^yt-dlp\[default\]==([^\s#]+)", requirements, re.M)
+    if match:
+        values["requirements.txt"] = match.group(1)
+    pyproject = _read("pyproject.toml")
+    exact = re.findall(r"yt-dlp\[default\]==([^\"']+)", pyproject)
+    if exact:
+        values["pyproject.toml dev extra"] = exact[0]
+    return values
+
+
+def check_ytdlp_consistency() -> list[str]:
+    floors = _ytdlp_floor_sources()
+    expected_floor_sources = {
+        "pyproject.toml",
+        "core/youtube_doctor.py",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+    }
+    errors: list[str] = []
+    missing = expected_floor_sources - set(floors)
+    if missing:
+        errors.append("could not read yt-dlp compatibility floor from: " + ", ".join(sorted(missing)))
+        return errors
+    if len(set(floors.values())) != 1:
+        errors.append("yt-dlp compatibility-floor drift: " + ", ".join(f"{k}={v}" for k, v in floors.items()))
+        return errors
+
+    exact = _ytdlp_exact_release_pins()
+    if {"requirements.txt", "pyproject.toml dev extra"} - set(exact):
+        errors.append("could not read reviewed exact yt-dlp release/test pin from requirements.txt and pyproject dev extra")
+        return errors
+    if len(set(exact.values())) != 1:
+        errors.append("yt-dlp exact release/test pin drift: " + ", ".join(f"{k}={v}" for k, v in exact.items()))
+        return errors
+
+    floor_tuple = _version_numbers(next(iter(floors.values())))
+    exact_tuple = _version_numbers(next(iter(exact.values())))
+    if exact_tuple[:3] < floor_tuple[:3]:
+        errors.append(
+            f"reviewed exact yt-dlp pin {next(iter(exact.values()))} is older than compatibility floor {next(iter(floors.values()))}"
+        )
+    return errors
+
+
+def check_ai_adapters() -> list[str]:
+    errors: list[str] = []
+    for path in ("CLAUDE.md", "GEMINI.md", ".github/copilot-instructions.md"):
+        text = _read(path) if (ROOT / path).is_file() else ""
+        if "AGENTS.md" not in text or "docs/AI_CONTEXT.md" not in text:
+            errors.append(f"{path}: must point to AGENTS.md and docs/AI_CONTEXT.md")
+    return errors
+
+
+def changed_files(base: str, head: str) -> list[str]:
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...{head}"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode:
+        raise RuntimeError(f"git diff failed: {proc.stderr.strip()}")
+    return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _pr_body() -> str:
+    event_path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
+    if not event_path.is_file():
+        return ""
+    try:
+        data = json.loads(event_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str((data.get("pull_request") or {}).get("body") or "")
+
+
+def _no_docs_impact_declared(body: str) -> bool:
+    return bool(re.search(r"-\s*\[[xX]\]\s*No documentation impact", body)) and bool(
+        re.search(r"No documentation impact reason:\s*\S.+", body, re.I)
+    )
+
+
+def check_pr_impact(base: str, head: str) -> list[str]:
+    files = changed_files(base, head)
+    codeish = [f for f in files if f.endswith((".py", ".toml", ".txt", ".yml", ".yaml", ".ps1", ".sh", ".iss", ".spec"))]
+    changed_md = {f for f in files if f.lower().endswith(".md")}
+    no_docs = _no_docs_impact_declared(_pr_body())
+    errors: list[str] = []
+
+    if codeish and not changed_md and not no_docs:
+        errors.append(
+            "code/build behavior changed without any Markdown update; update affected docs or check "
+            "'No documentation impact' in the PR template and provide a reason"
+        )
+
+    for rule in IMPACT_RULES:
+        matched = [f for f in files if any(re.search(pattern, f, re.I) for pattern in rule.path_patterns)]
+        if not matched or no_docs:
+            continue
+        if not (changed_md & set(rule.docs_any)):
+            errors.append(
+                f"{rule.name} change ({', '.join(matched[:3])}) requires review/update of at least one mapped "
+                f"document: {', '.join(rule.docs_any)} (or an explicit no-impact reason)"
+            )
+    return errors
+
+
+def run(base: str | None = None, head: str | None = None) -> list[str]:
+    errors: list[str] = []
+    for checker in (
+        check_required_files,
+        check_markdown_references,
+        check_stale_release_language,
+        check_platform_support_language,
+        check_provider_consistency,
+        check_ytdlp_consistency,
+        check_ai_adapters,
+    ):
+        errors.extend(checker())
+    if base and head:
+        errors.extend(check_pr_impact(base, head))
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base")
+    parser.add_argument("--head")
+    args = parser.parse_args()
+    if bool(args.base) != bool(args.head):
+        parser.error("--base and --head must be supplied together")
+
+    errors = run(args.base, args.head)
+    if errors:
+        print("Documentation gate FAILED:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 1
+    print("Documentation gate passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

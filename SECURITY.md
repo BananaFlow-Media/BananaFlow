@@ -1,102 +1,78 @@
 # Security Policy
 
+Status: **Current / normative**
+
 ## Supported versions
 
-Security reports are accepted for the latest public BananaFlow release
-and for the current `main` development line. At the time this policy was
-written, `v0.1.0` is the latest public release. The `v0.2.0` draft and its
-artifacts are unpublished historical evidence and are not a supported release.
-When a newer public Beta or Stable release supersedes an older version, users
-should upgrade; fixes are not guaranteed to be backported.
+Security reports are accepted for:
 
-The official planned Beta platform is Windows 10/11 x64. Other platforms are
-experimental or unsupported as described in the release documentation.
+- the **latest public BananaFlow release**; and
+- the current `main` development line.
+
+Older releases are not guaranteed to receive backports. Users should normally upgrade to the latest public release when a security fix is published. `version.py` is the source of truth for the version being built; do not copy a hard-coded “latest version” into this policy.
+
+Platform support is product support, not a signing claim: Windows 10/11 x64 and macOS Apple Silicon are supported packaged targets. Linux is a supported source-install platform and is expected to work normally when its dependencies are installed; an official Linux installer/package is not published yet.
 
 ## Reporting a vulnerability
 
-Do not put credentials, cookies, personal data, exploit details, or an
-unpatched vulnerability in a public Issue, Discussion, log paste, or pull
-request.
+Do **not** put an unpatched vulnerability, exploit details, credentials, cookies, personal data or private diagnostics in a public Issue, Discussion, log paste or pull request.
 
-The official reporting channel is GitHub private vulnerability reporting for
-this repository: `Security` > `Advisories` > `Report a vulnerability`. It is
-enabled and owner-approved as the primary route. If the form is ever
-unavailable, open a public Issue containing only the title **Security contact
-requested** and no technical details; a maintainer will arrange a private
-channel. That fallback is intentionally not a place to submit the report
-itself.
+The official reporting channel is **GitHub private vulnerability reporting** for this repository:
 
-In a private report, include:
+**Security → Advisories → Report a vulnerability**.
 
-- affected version, commit, platform, and installation type;
-- a concise impact statement and reproducible steps;
+If that private form is unavailable, open a public issue containing only the title **Security contact requested** and no technical details. A maintainer will arrange a private channel; the public issue is not a place to submit the report itself.
+
+A useful private report includes:
+
+- affected BananaFlow version/commit, platform and install type;
+- concise impact and threat scenario;
+- reproducible steps using synthetic data;
 - the smallest safe proof of concept;
 - whether authentication or user interaction is required;
 - suggested mitigation, if known; and
-- a way to contact you privately.
+- a private way to contact the reporter.
 
-Use synthetic data. Never send a live account cookie, API key, access token,
-password, private media, or an unredacted `config.json`. Review logs before
-sharing them even though the app applies centralized redaction.
+Never send live cookies, passwords, access tokens, API keys or private media as reproduction data.
 
 ## What to expect
 
-Maintainers will acknowledge and investigate reports as capacity permits, may
-ask for clarification, and will coordinate disclosure for confirmed issues.
-This project does not promise a response or remediation SLA. Please avoid public
-disclosure until a fix or practical mitigation is available and coordinated.
+Maintainers review reports as capacity permits and may request clarification or additional safe evidence. The project does not promise a response/remediation SLA. For confirmed issues, please coordinate public disclosure until a fix or practical mitigation is available.
 
-## Security behavior
+## Security boundaries and current controls
 
-- No live credential is intended to be committed as a default. Optional
-  Spotify and YouTube API values can be supplied through the documented
-  environment variables or local configuration.
-- Log, diagnostic, error, and configuration-export paths use centralized
-  redaction for credentials, authorization headers, cookies, sensitive query
-  parameters, known token shapes, and local profile paths.
-- BananaFlow-owned cookie files and its dedicated sign-in browser profile are
-  restricted to the current user where the operating system supports it.
-- Settings provides a confirmed **Delete stored sign-in data** action that
-  removes the BananaFlow cookie file and dedicated sign-in profile. It does not
-  alter cookies in the user's normal browsers.
-- Dependency auditing, secret scanning, dependency review, Dependabot, and
-  Python CodeQL are configured in `.github/`.
+BananaFlow treats authentication material, downloaded-code/runtime components and destructive filesystem paths as security-sensitive surfaces. The current threat model is in [`docs/security/threat-model.md`](docs/security/threat-model.md).
 
-These controls reduce risk but cannot guarantee that every future secret shape
-or third-party error message is recognized. Treat logs and diagnostics as
-potentially sensitive and inspect them before sharing.
+Key controls include:
+
+- centralized redaction for common credentials, cookies, authorization headers, sensitive query parameters and local profile paths in logs/diagnostics;
+- a BananaFlow-owned isolated browser profile for the sign-in helper rather than silently reusing a normal browser profile;
+- minimized BananaFlow-owned cookie storage, protected to the current user where supported (Windows uses DPAPI for the protected store);
+- a confirmed **Delete stored sign-in data** action that removes BananaFlow-owned cookie/profile state without signing the user out of their normal browsers;
+- bounded retry/reliability policy that distinguishes transient failures from permanent/authentication failures;
+- dependency/security scanning and repository security workflows under `.github/`;
+- versioned release artifacts with published SHA-256 checksums, SBOM and build-attestation evidence as configured by the release process;
+- Tag Editor backup/journal/verify-before-replace invariants for destructive metadata operations.
+
+These controls are defense in depth, not guarantees. Treat logs and diagnostics as potentially sensitive and inspect them before sharing.
 
 ## Official distribution channels
 
-BananaFlow has exactly two official channels, and any other site offering
-"BananaFlow" downloads is not ours:
+BananaFlow has two official application distribution entry points:
 
-- the official website, <https://bananaflow.bananaflow-media.workers.dev/>
-  (its download pages link to the release assets below and publish the
-  matching checksums); and
-- the GitHub Releases of this repository,
-  <https://github.com/BananaFlow-Media/BananaFlow/releases>, which host
-  the artifacts themselves.
+1. the official website, <https://bananaflow.bananaflow-media.workers.dev/>, whose download pages link to verified release artifacts; and
+2. this repository's GitHub Releases, <https://github.com/BananaFlow-Media/BananaFlow/releases>, which host the artifacts.
 
-The website publishes its own
-[security page](https://bananaflow.bananaflow-media.workers.dev/en/security/)
-for end users. A vulnerability **in the website itself** — as opposed to
-in the application — may be reported either through that page's private
-email route or through this repository's private advisory form; both
-reach the same maintainer. As here, never open a public Issue for one.
+Downloads offered elsewhere are not official BananaFlow releases.
 
-## Updates, signing, and checksums
+## Updates, signing and checksums
 
-The app checks the public GitHub Releases API for application updates when
-update checks are enabled. Component checks query PyPI. The packaged updater
-opens a release page; it does not silently install a new application build.
+BananaFlow checks public release metadata when update checks are enabled. Packaged users are directed to the official release/download path; the app does not silently replace itself with an unverified build.
 
-Current Windows packages are not Authenticode-signed, and current macOS work is
-not a supported public Beta target. A checksum can detect accidental corruption
-or mismatch against a separately trusted checksum, but it does not replace a
-digital signature or establish who produced a file. Verify release provenance,
-filenames, versions, and published SHA-256 values before running an artifact.
+Windows packages are currently unsigned with Authenticode. The supported macOS package can also have signing/notarization limitations documented in the release notes. A checksum detects mismatch/corruption relative to a separately trusted published value, but it is not a substitute for publisher identity or code signing.
 
-Security fixes will be issued as new versioned releases rather than by replacing
-previously uploaded artifacts. A security report does not authorize testing
-against third-party services or other users' accounts.
+Published release assets are immutable evidence: security fixes ship as new versioned releases rather than silently replacing previously published binaries.
+
+## Scope
+
+Security reports about BananaFlow's own code, packaged application, update/release behavior, credential handling and documented website integration are welcome through the private route. A report does not authorize testing against third-party services, other users' accounts, or infrastructure you do not own or have permission to test.

@@ -1,9 +1,6 @@
 # BananaFlow brand assets — provenance
 
-Every visual asset in this directory is a production derivative taken
-from the approved **BananaFlow Brand Asset Pack v2.0** (owner-supplied,
-maintained outside this repository). The pack's QA report verifies the
-ICO resolution set (16–256 px), the ICNS set, and the wizard bitmaps.
+Every visual asset in this directory is a production derivative from the owner-supplied **BananaFlow Brand Asset Pack v2.0**, maintained outside this source repository.
 
 | Repository file | Source asset in the brand pack |
 |---|---|
@@ -14,13 +11,10 @@ ICO resolution set (16–256 px), the ICNS set, and the wizard bitmaps.
 
 Usage:
 
-* `bananaflow.ico` — Windows EXE icon (both `bananaflow.exe` and
-  `bananaflow-cli.exe`, wired in `packaging/bananaflow.spec`) and the
-  installer's `SetupIconFile`.
-* `bananaflow.icns` — macOS `.app` bundle icon.
-* `Wizard*.bmp` — Inno Setup wizard imagery (`packaging/bananaflow.iss`).
+- `bananaflow.ico` — Windows executable/installer icon.
+- `bananaflow.icns` — macOS app-bundle icon.
+- `Wizard*.bmp` — Inno Setup wizard imagery.
 
-The BananaFlow artwork is supplied for use by the BananaFlow owner; the
-brand pack does not grant third parties permission to reuse the mark for
-unrelated products. When the brand pack is revised, refresh these
-derivatives from the same source paths and update this table.
+These assets are packaging inputs, not evidence that the GPL source-code license grants unrestricted rights to present unrelated software as an official BananaFlow product. See [`../TRADEMARKS.md`](../TRADEMARKS.md) for the project-brand distinction.
+
+When the external brand pack is revised, refresh derivatives from the approved source assets and update this provenance table in the same change.
