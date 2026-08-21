@@ -85,6 +85,7 @@ Download the **CI-produced draft artifacts** onto clean/representative machines 
 - a real download succeeds;
 - a conversion succeeds and output verifies;
 - a Tag Editor Apply + Undo Applied Batch cycle succeeds on disposable fixtures;
+- when component-overlay code changes, an approved overlay activates only with a current authenticated control record and a revoked test bundle cannot activate;
 - expected product/version/publisher metadata appears in the executable/package;
 - app data is created only in documented per-user locations;
 - critical Hebrew/English UI and the YouTube Doctor/manual QA surfaces render correctly when changed by the release.

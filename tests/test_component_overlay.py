@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import core.component_overlay as component_overlay
 from core.component_overlay import (
     CHANNEL_TAG,
     ComponentManifest,
@@ -43,6 +44,7 @@ def _manifest_bytes(bundle: bytes, **overrides) -> bytes:
         "bundle_id": bundle_id,
         "disabled": False,
         "superseded_by": "",
+        "revoked_bundle_ids": [],
         "compatibility": {
             "min_app_version": "1.0.1",
             "max_app_version_exclusive": "2.0.0",
@@ -82,6 +84,13 @@ class TestManifest:
         bundle = _bundle()
         with pytest.raises(ComponentUpdateError, match="identifier is unsafe"):
             parse_manifest(_manifest_bytes(bundle, bundle_id="../../escape"), app_version="1.0.1")
+
+    def test_rejects_malformed_or_duplicate_revocation_identifiers(self):
+        bundle = _bundle()
+        with pytest.raises(ComponentUpdateError, match="unsafe identifier"):
+            _manifest(bundle, revoked_bundle_ids=["../active"])
+        with pytest.raises(ComponentUpdateError, match="duplicate identifiers"):
+            _manifest(bundle, revoked_bundle_ids=["old", "old"])
 
     def test_release_asset_requires_official_api_url_and_github_digest(self):
         base = {
@@ -136,7 +145,10 @@ class TestInstallAndActivation:
 
         old_path = list(sys.path)
         try:
-            selected = activate_component_overlay(root=tmp_path)
+            selected = activate_component_overlay(
+                root=tmp_path,
+                control_fetcher=lambda: _manifest(_bundle()),
+            )
             assert selected == tmp_path / "bundles" / result.bundle_id / "site-packages"
             assert sys.path[0] == str(selected)
         finally:
@@ -174,6 +186,8 @@ class TestInstallAndActivation:
         (previous / "manifest.json").write_text(json.dumps({
             "schema": 1,
             "bundle_id": "previous",
+            "min_app_version": "1.0.1",
+            "max_app_version_exclusive": "2.0.0",
             "tree_sha256": _tree_sha256(previous / "site-packages"),
         }))
         (tmp_path / "active.json").write_text(json.dumps({
@@ -182,9 +196,75 @@ class TestInstallAndActivation:
 
         old_path = list(sys.path)
         try:
-            selected = activate_component_overlay(root=tmp_path)
+            selected = activate_component_overlay(
+                root=tmp_path,
+                control_fetcher=lambda: _manifest(_bundle()),
+            )
             assert selected == previous / "site-packages"
             state = json.loads((tmp_path / "active.json").read_text())
             assert state == {"active": "previous", "previous": "", "schema": 1}
         finally:
             sys.path[:] = old_path
+
+    def test_expired_control_record_revokes_active_bundle_and_uses_previous(self, tmp_path):
+        old_bundle = _bundle()
+        active_bundle = _bundle()
+        old_manifest = _manifest(old_bundle, bundle_id="previous")
+        active_manifest = _manifest(active_bundle, bundle_id="active")
+        install_verified_component_update(
+            root=tmp_path,
+            fetcher=lambda: (old_manifest, old_bundle),
+            healthcheck=lambda _path: None,
+        )
+        install_verified_component_update(
+            root=tmp_path,
+            fetcher=lambda: (active_manifest, active_bundle),
+            healthcheck=lambda _path: None,
+        )
+
+        old_path = list(sys.path)
+        try:
+            selected = activate_component_overlay(
+                root=tmp_path,
+                now=2_000_000_000,
+                control_fetcher=lambda: _manifest(
+                    active_bundle,
+                    bundle_id="active",
+                    revoked_bundle_ids=["active"],
+                ),
+            )
+            assert selected == tmp_path / "bundles" / "previous" / "site-packages"
+            state = json.loads((tmp_path / "active.json").read_text(encoding="utf-8"))
+            assert state == {"active": "previous", "previous": "", "schema": 1}
+        finally:
+            sys.path[:] = old_path
+
+    def test_stale_control_failure_does_not_activate_overlay(self, tmp_path):
+        bundle = _bundle()
+        manifest = _manifest(bundle)
+        install_verified_component_update(
+            root=tmp_path,
+            fetcher=lambda: (manifest, bundle),
+            healthcheck=lambda _path: None,
+        )
+
+        def unavailable():
+            raise ComponentUpdateError("offline")
+
+        assert activate_component_overlay(
+            root=tmp_path,
+            now=2_000_000_000,
+            control_fetcher=unavailable,
+        ) is None
+
+    def test_new_app_version_never_activates_an_old_overlay(self, tmp_path, monkeypatch):
+        bundle = _bundle()
+        manifest = _manifest(bundle)
+        install_verified_component_update(
+            root=tmp_path,
+            fetcher=lambda: (manifest, bundle),
+            healthcheck=lambda _path: None,
+        )
+
+        monkeypatch.setattr(component_overlay, "FULL_VERSION", "2.0.0")
+        assert activate_component_overlay(root=tmp_path) is None

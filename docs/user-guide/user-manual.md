@@ -133,7 +133,7 @@ You normally do not need to understand the implementation behind those checks â€
 When update checks are enabled, BananaFlow checks for a newer official application release and for newer critical downloader components.
 
 - An **application update** opens the official download/release page and remains a normal full installation.
-- In an **installed packaged build**, **Update Components** downloads the reviewed `yt-dlp` / `yt-dlp-ejs` bundle from BananaFlow's official GitHub component channel, verifies its exact size and SHA-256, checks compatibility, safely prepares it in per-user app data and health-checks it in a separate process. It becomes active only after BananaFlow restarts; the installed application is not rewritten and the previous valid bundle remains available for fallback.
+- In an **installed packaged build**, **Update Components** downloads the reviewed `yt-dlp` / `yt-dlp-ejs` bundle from BananaFlow's official GitHub component channel, verifies its exact size and SHA-256, checks compatibility, safely prepares it in per-user app data and health-checks it in a separate process. It becomes active only after BananaFlow restarts; the installed application is not rewritten and the previous valid bundle remains available for fallback. After you approve such an update, BananaFlow refreshes its small public safety record at most once per day before reusing it; if it reports the bundle is no longer safe, BananaFlow uses its built-in downloader instead.
 - In a **source environment**, the same button runs the documented pip upgrade in that environment.
 
 Neither path installs silently: checking and installing are separate, and the update button is the approval gate.

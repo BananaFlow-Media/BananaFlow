@@ -16,6 +16,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from version import FULL_VERSION
+
 
 PACKAGES = ("yt-dlp", "yt-dlp-ejs")
 
@@ -72,6 +74,7 @@ def build(output_dir: Path, min_app_version: str, max_app_version: str) -> tuple
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "disabled": False,
         "superseded_by": "",
+        "revoked_bundle_ids": [],
         "compatibility": {
             "min_app_version": min_app_version,
             "max_app_version_exclusive": max_app_version,
@@ -96,7 +99,7 @@ def build(output_dir: Path, min_app_version: str, max_app_version: str) -> tuple
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--min-app-version", default="1.0.1")
+    parser.add_argument("--min-app-version", default=FULL_VERSION)
     parser.add_argument("--max-app-version-exclusive", default="2.0.0")
     args = parser.parse_args()
     manifest, bundle = build(

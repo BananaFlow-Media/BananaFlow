@@ -4,8 +4,22 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-21
+
+### Added
+
+- Added an independently verified packaged-build component update channel for `yt-dlp` and `yt-dlp-ejs`. It installs only after explicit approval, verifies official release metadata and exact hashes, prepares the bundle safely in per-user app data, and activates only after restart.
+- Added an authenticated component-control record: a disabled or revoked downloaded bundle, an expired unverifiable control record, or an incompatible application version now prevents that optional overlay from loading and leaves the bundled downloader available.
+
+### Fixed
+
+- Improved YouTube download reliability by selecting the appropriate yt-dlp player clients for audio and video, while keeping the conservative request policy.
+- Added thumbnail fallback and cache handling for unavailable YouTube thumbnail variants.
+- Refresh Download History when returning to its panel, so newly completed downloads appear without restarting the application.
+
 ### Changed
 
+- Updated the reviewed, reproducible `yt-dlp[default]` release pin to `2026.8.19`; its matching EJS support remains installed through yt-dlp's `default` extra.
 - Reorganized repository documentation around explicit sources of truth, current-vs-historical lifecycle and a Code → Documentation impact map.
 - Added canonical AI-agent context (`AGENTS.md`, `docs/AI_CONTEXT.md`) plus thin Claude/Gemini/Copilot adapters and path-specific subsystem instructions.
 - Added a Documentation GitHub Actions gate covering internal Markdown references, stale Stable/Beta language, yt-dlp/provider version consistency, AI-adapter integrity, current platform-status wording and pull-request documentation impact.

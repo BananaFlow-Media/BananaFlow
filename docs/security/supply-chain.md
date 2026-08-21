@@ -52,7 +52,7 @@ The blocking release checklist in `docs/release/RELEASING.md` verifies that the 
 
 ## Update model
 
-Source environments can run an explicitly approved package upgrade. Packaged builds can install the reviewed `yt-dlp` / `yt-dlp-ejs` pair from the official GitHub component channel into a per-user versioned overlay. GitHub's official release-asset size/SHA-256 metadata authenticates the manifest and bundle provenance; the client independently enforces manifest/bundle hash agreement, compatibility, download/expanded-size bounds, safe archive paths, an isolated health check, atomic next-launch selection and last-known-good fallback. See `docs/architecture/secure-component-updater.md`.
+Source environments can run an explicitly approved package upgrade. Packaged builds can install the reviewed `yt-dlp` / `yt-dlp-ejs` pair from the official GitHub component channel into a per-user versioned overlay. GitHub's official release-asset size/SHA-256 metadata authenticates the manifest and bundle provenance; the client independently enforces manifest/bundle hash agreement, compatibility, a periodically refreshed authenticated disabled/revoked-bundle control record, download/expanded-size bounds, safe archive paths, an isolated health check, atomic next-launch selection and last-known-good fallback. See `docs/architecture/secure-component-updater.md`.
 
 A scheduled workflow reports when the reviewed pin is stale but does not author a dependency change. A human-reviewed pin merged to `main` automatically builds/publishes the component channel and triggers Windows/macOS Actions release candidates. Public application releases still require a version tag, draft verification and deliberate maintainer publication.
 

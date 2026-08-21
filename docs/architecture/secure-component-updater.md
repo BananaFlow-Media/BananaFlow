@@ -26,11 +26,11 @@ The control plane is the `component-channel-v1` pre-release in the official `Ban
 
 ### Compatibility
 
-Manifest metadata declares compatible BananaFlow versions/component combinations. An incompatible update is reported rather than installed.
+Manifest metadata declares compatible BananaFlow versions/component combinations. The compatibility range is stored with each prepared bundle and is checked again before every activation, so an application upgrade cannot activate an old incompatible overlay.
 
 ### App-data overlay, not live in-place mutation
 
-Downloaded components install under `components/downloader/bundles/<bundle-id>/site-packages` in BananaFlow's per-user app-data directory. Activation changes only `active.json`, and startup prepends the selected valid overlay before the first `yt_dlp` import.
+Downloaded components install under `components/downloader/bundles/<bundle-id>/site-packages` in BananaFlow's per-user app-data directory. Activation changes only `active.json`, and startup prepends the selected valid overlay before the first `yt_dlp` import. A separately authenticated, cached `control.json` records the channel's disabled/revoked-bundle state; it is refreshed from the official channel at most once per 24 hours after a component update has been approved.
 
 ### Atomic install and rollback
 
@@ -56,7 +56,7 @@ Update logs use centralized redaction and never contain credentials. Public upda
 
 ### Emergency response
 
-The authenticated control plane can disable/supersede a known-bad downloaded component without requiring the client to run it first.
+The authenticated control plane can disable the whole channel or revoke individual bundle IDs without requiring the client to run them first. When the cached control record is older than 24 hours, startup refreshes only the signed manifest before considering an overlay. If that refresh cannot complete, BananaFlow fails closed for the optional overlay and uses its bundled components; it does not block the rest of the application. A revoked active bundle falls back to a still-valid, non-revoked previous bundle when available.
 
 ## Build and publication behavior
 
@@ -67,4 +67,4 @@ The authenticated control plane can disable/supersede a known-bad downloaded com
 
 ## Change rule
 
-Any change to this updater is security-sensitive. It requires threat-model, privacy/network, supply-chain, release, user-guide and test review in the same change. Do not weaken repository identity, API asset-digest, compatibility, bounded-download, safe-unpack, isolated-health-check, atomic-selection or rollback checks.
+Any change to this updater is security-sensitive. It requires threat-model, privacy/network, supply-chain, release, user-guide and test review in the same change. Do not weaken repository identity, API asset-digest, compatibility, revocation/control freshness, bounded-download, safe-unpack, isolated-health-check, atomic-selection or rollback checks.
