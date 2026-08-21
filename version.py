@@ -28,12 +28,12 @@ new release; every other representation derives from them.
 
 from __future__ import annotations
 
-__version__: str = "1.1.0"
+__version__: str = "1.1.1"
 
 # Convenience tuple form for code that needs to compare versions
 # numerically without parsing the string. Also feeds the numeric
 # fields of the Windows VS_VERSIONINFO block.
-VERSION_INFO: tuple[int, int, int] = (1, 1, 0)
+VERSION_INFO: tuple[int, int, int] = (1, 1, 1)
 
 # Pre-release suffix in SemVer notation, or None for a stable release.
 # Examples: "beta.1", "beta.2", "rc.1".

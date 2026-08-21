@@ -4,6 +4,15 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-08-21
+
+### Fixed
+
+- Fixed packaged component updates failing their isolated health check because frozen startup removed the bundle's staging directory before validation.
+- Report the version of the `yt-dlp` module that BananaFlow actually loaded instead of stale package metadata left by an older installation.
+- Clean obsolete packaged `yt-dlp` / `yt-dlp-ejs` module and metadata trees during an in-place Windows installer upgrade.
+- Open application updates on BananaFlow's localized official download page instead of sending users directly to GitHub Releases.
+
 ## [1.1.0] — 2026-08-21
 
 ### Added
