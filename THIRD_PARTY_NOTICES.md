@@ -80,7 +80,7 @@ Chromium is intentionally a large packaged dependency because browser-backed Spo
 The important yt-dlp distinction is intentional:
 
 - project/source compatibility floor: **`yt-dlp[default]>=2026.7.4`**;
-- reviewed reproducible CI/release install: currently **`yt-dlp[default]==2026.8.19`** in `requirements.txt`/the matching release path.
+- reviewed reproducible CI/release install: currently **`yt-dlp[default]==2026.8.20.234504.dev0`** in `requirements.txt`/the matching release path.
 
 A newer reviewed exact release pin does not change the minimum compatibility floor, and the floor must not be inferred from an old developer environment.
 

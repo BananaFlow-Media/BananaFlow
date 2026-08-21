@@ -23,6 +23,8 @@ BananaFlow releases can contain:
 
 Runtime/dev/optional dependencies are declared in `pyproject.toml`, `requirements.txt` and release constraints as appropriate. New runtime dependencies require license review and `THIRD_PARTY_NOTICES.md` updates.
 
+A reviewed downloader-pin update must confirm that the selected release is not yanked, inspect its Python/EJS dependency metadata, install it in a clean environment, pass `pip check`, and run the focused component/downloader plus real-network gates against that exact candidate. The full platform matrix then installs the reviewed pin from scratch before it can enter a tagged build.
+
 ### Staged binaries/components
 
 Large third-party binaries and generated component trees are intentionally gitignored. Repository README files describe each staging slot. Build/fetch scripts perform the staging so the process is reviewable rather than relying on an undocumented maintainer machine state.

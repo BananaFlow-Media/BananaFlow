@@ -76,7 +76,7 @@ dev = [
     # tests.yml installs .[dev], so CI exercises the same reviewed yt-dlp
     # nightly that release installs through constraints-release.txt while the
     # normal project dependency remains an upgradeable security floor.
-    "yt-dlp[default]==2026.8.19",
+    "yt-dlp[default]==2026.8.20.234504.dev0",
 ]
 # Source/venv opt-in for the same GPL v3 bgutil provider plugin pinned
 # by the public Windows build. The packaged build also stages the upstream

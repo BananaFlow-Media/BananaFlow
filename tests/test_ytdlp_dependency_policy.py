@@ -13,7 +13,7 @@ except ModuleNotFoundError:  # Python 3.10 compatibility
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FLOOR = "2026.7.4"
-REVIEWED_PIN = "2026.8.19"
+REVIEWED_PIN = "2026.8.20.234504.dev0"
 
 
 def _active_requirements() -> list[str]:
