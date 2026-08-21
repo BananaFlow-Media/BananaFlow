@@ -16,9 +16,9 @@ recommendation:
       "Open Download Page" is the only update action; outdated
       components are mentioned as included in the app update, never as
       a second competing button. Nothing is downloaded or installed
-      silently — the browser opens the official release page.
-      (A future in-app updater — download, verify, launch installer —
-      is documented in README.md; this dialog stays the approval gate.)
+      silently — the browser opens BananaFlow's official download page.
+      A full self-updater is not offered while the packaged application
+      lacks the publisher-signing guarantees documented in SECURITY.md.
   * Components only, source/venv mode → the developer workflow:
       "Update Components" runs the pip upgrade on a background thread
       after this explicit click, then reports the result and reminds
@@ -63,11 +63,7 @@ from ui.dialogs.styled_dialog import (
 )
 from ui.i18n import t
 from utils.paths import is_frozen
-
-# Fallback target for "get the full app update" when the check that
-# found outdated components didn't also carry a ReleaseInfo (frozen
-# builds surface component updates as "your app build is stale").
-APP_RELEASES_URL = "https://github.com/BananaFlow-Media/BananaFlow/releases"
+from utils.website import site_url
 
 # "Remind me later" choices: (i18n key, days). None = next launch only
 # (no persisted snooze — the startup check simply runs again next time).
@@ -257,12 +253,11 @@ class UpdatePromptDialog(StyledDialog):
         self.accept()
 
     def _on_get_app_update(self) -> None:
-        if self._app_release is not None and self._app_release.release_url:
-            QDesktopServices.openUrl(QUrl(self._app_release.release_url))
+        QDesktopServices.openUrl(QUrl(site_url("download")))
         self.accept()
 
     def _on_open_releases_page(self) -> None:
-        QDesktopServices.openUrl(QUrl(APP_RELEASES_URL))
+        QDesktopServices.openUrl(QUrl(site_url("download")))
         self.accept()
 
     # ── Component install flow (source/venv mode only) ─────────────────────────

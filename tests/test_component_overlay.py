@@ -22,6 +22,7 @@ from core.component_overlay import (
     activate_component_overlay,
     install_verified_component_update,
     parse_manifest,
+    should_activate_component_overlay,
 )
 
 
@@ -129,6 +130,14 @@ class TestSafeExtraction:
 
 
 class TestInstallAndActivation:
+    def test_frozen_healthcheck_does_not_run_normal_overlay_activation(self):
+        assert should_activate_component_overlay(argv=["bananaflow.exe"], frozen=True)
+        assert not should_activate_component_overlay(
+            argv=["bananaflow.exe", "--component-healthcheck", "staging/site-packages"],
+            frozen=True,
+        )
+        assert not should_activate_component_overlay(argv=["main.py"], frozen=False)
+
     def test_integrity_healthcheck_and_atomic_next_launch_selection(self, tmp_path):
         bundle = _bundle()
         checked = []

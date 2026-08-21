@@ -153,22 +153,21 @@ def is_newer_version(remote: str, local: str) -> bool:
 def installed_component_version(pypi_name: str) -> str:
     """Best-effort installed version of a monitored package.
 
-    importlib.metadata works both in a source venv and (when PyInstaller
-    bundles the dist-info) in a frozen build; yt-dlp additionally ships
-    its version as a module attribute, which survives freezing even
-    without metadata.
+    yt-dlp's imported module is authoritative because an older Inno Setup
+    upgrade could leave stale ``*.dist-info`` directories beside the current
+    frozen module.  Other packages use importlib metadata, and yt-dlp falls
+    back to that metadata if its module cannot be imported.
     """
-    try:
-        return importlib.metadata.version(pypi_name)
-    except Exception:
-        pass
     if pypi_name == "yt-dlp":
         try:
             import yt_dlp
             return yt_dlp.version.__version__
         except Exception:
-            return ""
-    return ""
+            pass
+    try:
+        return importlib.metadata.version(pypi_name)
+    except Exception:
+        return ""
 
 
 # ──────────────────────────────────────────────────────────────────────────────

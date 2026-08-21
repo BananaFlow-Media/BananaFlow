@@ -44,7 +44,7 @@ Downloaded components install under `components/downloader/bundles/<bundle-id>/s
 
 ### Concurrency and shutdown
 
-The worker can prepare an update while the application is running, but the current process keeps its already selected implementation. Only the next launch reads the new pointer, so active operations are never swapped. Preparation uses a private staging directory; failure does not change `active.json`, and abandoned staging data is safe to remove without affecting the active bundle.
+The worker can prepare an update while the application is running, but the current process keeps its already selected implementation. Only the next launch reads the new pointer, so active operations are never swapped. Preparation uses a private staging directory; failure does not change `active.json`, and abandoned staging data is safe to remove without affecting the active bundle. The isolated frozen health-check child bypasses normal overlay activation and staging cleanup, because its explicit validation target is inside that staging directory.
 
 ### User control
 

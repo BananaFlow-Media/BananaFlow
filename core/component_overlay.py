@@ -420,6 +420,17 @@ def _run_healthcheck(site_packages: Path) -> None:
         raise ComponentUpdateError("The downloaded components failed their isolated health check.")
 
 
+def should_activate_component_overlay(*, argv: list[str], frozen: bool) -> bool:
+    """Whether normal startup should select and clean an overlay.
+
+    The frozen health-check subprocess receives a path below the overlay's
+    private ``staging`` directory.  Normal activation deliberately removes
+    abandoned staging data, so running it in that child would delete the
+    bundle immediately before validating it.
+    """
+    return frozen and "--component-healthcheck" not in argv
+
+
 def install_verified_component_update(
     *,
     root: Path | None = None,

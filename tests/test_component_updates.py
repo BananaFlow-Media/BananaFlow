@@ -9,6 +9,9 @@ to be installed in the environment running the suite.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
+
+import core.component_updates as component_updates
 
 from core.component_updates import (
     MONITORED_COMPONENTS,
@@ -185,3 +188,17 @@ class TestInPlaceUpgrade:
 
     def test_installed_version_lookup_never_raises_for_unknown(self):
         assert installed_component_version("definitely-not-a-real-pkg-xyz") == ""
+
+    def test_yt_dlp_module_version_wins_over_stale_dist_info(self, monkeypatch):
+        monkeypatch.setitem(
+            sys.modules,
+            "yt_dlp",
+            SimpleNamespace(version=SimpleNamespace(__version__="2026.8.19")),
+        )
+        monkeypatch.setattr(
+            component_updates.importlib.metadata,
+            "version",
+            lambda _name: "2026.7.4",
+        )
+
+        assert installed_component_version("yt-dlp") == "2026.8.19"
