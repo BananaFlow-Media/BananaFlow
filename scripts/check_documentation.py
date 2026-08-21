@@ -239,10 +239,15 @@ IMPACT_RULES = (
     ),
     ImpactRule(
         "updaters/components",
-        (r"^core/(?:update_checker|component_updates|runtime_components)\.py$",),
+        (
+            r"^core/(?:update_checker|component_updates|runtime_components|component_overlay)\.py$",
+            r"^\.github/workflows/component-channel\.yml$",
+        ),
         review_required=(
-            "docs/user-guide/user-manual.md", "SECURITY.md", "PRIVACY.md",
-            "docs/architecture/secure-component-updater.md", "docs/security/threat-model.md",
+            "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
+            "SECURITY.md", "PRIVACY.md", "docs/architecture/secure-component-updater.md",
+            "docs/security/threat-model.md", "docs/security/supply-chain.md",
+            "docs/release/RELEASING.md", "THIRD_PARTY_NOTICES.md", "SOURCE_OFFER.md",
         ),
         allow_no_impact=False,
     ),

@@ -172,14 +172,19 @@ def test_macos_prerelease_flag_matches_windows_logic():
     assert 'if [[ "$tag" == *-* ]]' in text
 
 
-def test_workflow_does_not_trigger_on_branch_pushes(parsed: dict):
-    """Release publication must be impossible from an ordinary branch push."""
+def test_workflow_builds_component_pin_rc_on_main_but_only_tags_can_publish(parsed: dict):
+    """Reviewed pin changes build RCs; the publication job stays tag-only."""
     # PyYAML parses the `on:` key as the boolean True.
     triggers = parsed.get("on", parsed.get(True))
 
     assert set(triggers) == {"workflow_dispatch", "push"}
-    assert set(triggers["push"]) == {"tags"}, "push must be tag-only, never branch-triggered"
-    assert triggers["push"]["tags"] == [
+    push = triggers["push"]
+    assert set(push) == {"branches", "paths", "tags"}
+    assert push["branches"] == ["main"]
+    assert push["paths"] == [
+        "requirements.txt", "constraints-release.txt", "pyproject.toml",
+    ]
+    assert push["tags"] == [
         "v[0-9]+.[0-9]+.[0-9]+",
         "v[0-9]+.[0-9]+.[0-9]+-*",
     ], (
@@ -188,6 +193,13 @@ def test_workflow_does_not_trigger_on_branch_pushes(parsed: dict):
         "version policy) actually triggers the release workflow — the "
         "original clean-version-only pattern would silently never match it"
     )
+
+    macos = pytest.importorskip("yaml").safe_load(
+        MACOS_WORKFLOW.read_text(encoding="utf-8")
+    )
+    mac_push = macos.get("on", macos.get(True))["push"]
+    assert mac_push["branches"] == ["main"]
+    assert mac_push["paths"] == push["paths"]
 
 
 def test_permissions_are_least_required(parsed: dict):

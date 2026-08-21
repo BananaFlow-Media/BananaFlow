@@ -93,7 +93,7 @@ class TestBuildUpdatePromptText:
         assert t("update_prompt_component_note") in text
         assert t("update_prompt_frozen_note") not in text
 
-    def test_frozen_mode_explains_full_app_update_required(self):
+    def test_frozen_mode_explains_verified_overlay_update(self):
         text = build_update_prompt_text(None, [_component()], frozen=True)
         assert t("update_prompt_frozen_note") in text
         assert t("update_prompt_component_note") not in text
@@ -210,7 +210,7 @@ class TestUpdatePromptDialogWidget:
         finally:
             dlg2.deleteLater()
 
-    def test_frozen_component_prompt_offers_releases_page_not_pip(self, tmp_path, monkeypatch):
+    def test_frozen_component_prompt_offers_verified_component_install(self, tmp_path, monkeypatch):
         try:
             _make_qapp(tmp_path, monkeypatch)
             import ui.dialogs.update_prompt_dialog as upd
@@ -218,10 +218,11 @@ class TestUpdatePromptDialogWidget:
             pytest.skip("PySide6 / qfluentwidgets not available")
             return
 
-        monkeypatch.setattr(upd, "can_update_in_place", lambda: False)
+        monkeypatch.setattr(upd, "can_update_in_place", lambda: True)
+        monkeypatch.setattr(upd, "is_frozen", lambda: True)
         dlg = upd.UpdatePromptDialog(_store(tmp_path), None, [_component()])
         try:
-            assert not hasattr(dlg, "_install_components_btn")
+            assert hasattr(dlg, "_install_components_btn")
             assert t("update_prompt_frozen_note") in dlg._body_lbl.text()
         finally:
             dlg.deleteLater()

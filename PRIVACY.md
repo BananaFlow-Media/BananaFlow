@@ -19,8 +19,8 @@ The exact requests depend on selected features and configuration.
 | YouTube / YouTube Music | Search, metadata/extraction, downloads, channel/listing work, authenticated items when enabled | URLs/IDs, search terms, request headers and configured YouTube session cookies only when required |
 | Spotify web pages | Resolving/importing Spotify track/album/playlist/artist metadata through the browser-backed scraper | Spotify URL/ID and normal browser request metadata |
 | User-configured Spotify search proxy | Spotify **search** in the Search panel | Search query, requested result limit and optional `X-App-Token` |
-| GitHub API / Releases | App update checks and opening official releases | Repository/version request and normal connection metadata |
-| PyPI | Component-version checks for supported source/developer flows | Package names and normal connection metadata |
+| GitHub API / Releases | App update checks, opening official releases, an explicitly approved packaged-component update, and (after such an update) a control-manifest refresh at most once per 24 hours before reusing its overlay | Repository/version/asset request, downloaded public component manifest/bundle and normal connection metadata |
+| PyPI | Component-version checks and source/developer component updates | Package names and normal connection metadata |
 | MusicBrainz | Explicit or enabled metadata enrichment | Track/artist/album/duration metadata needed for matching |
 | Cover Art Archive | Optional artwork lookup | MusicBrainz release identifier and normal connection metadata |
 | Lyrics providers used by configured dependencies | Optional lyrics lookup | Track title/artist search terms |
@@ -43,6 +43,7 @@ The per-user application-data directory is resolved by `utils.paths` (Windows `%
 - `config.json` — settings and UI state, including optional proxy configuration;
 - `downloads.db` — download history;
 - `update_state.json` — update reminder/skip state;
+- `components/downloader/` — verified versioned `yt-dlp` / `yt-dlp-ejs` overlays plus the active/previous selection pointer after an approved packaged-component update;
 - rotating local logs;
 - protected/minimized BananaFlow-owned YouTube cookie data (`app_cookies.dpapi` on Windows or an owner-permission cookie file on other supported paths);
 - `browser_profile/` — dedicated sign-in-helper profile separate from normal browser profiles;

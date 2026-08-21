@@ -108,6 +108,22 @@ def test_current_platform_support_wording_has_no_retired_status():
     assert mod.check_platform_support_language() == []
 
 
+def test_component_overlay_and_channel_workflow_have_strict_documentation_impact():
+    rule = next(item for item in mod.IMPACT_RULES if item.name == "updaters/components")
+    assert any(re.search(pattern, "core/component_overlay.py") for pattern in rule.path_patterns)
+    assert any(
+        re.search(pattern, ".github/workflows/component-channel.yml")
+        for pattern in rule.path_patterns
+    )
+    assert rule.allow_no_impact is False
+    assert {
+        "docs/architecture/secure-component-updater.md",
+        "docs/release/RELEASING.md",
+        "docs/security/supply-chain.md",
+        "SOURCE_OFFER.md",
+    } <= set(rule.review_required)
+
+
 def test_platform_status_check_includes_workflows_and_issue_forms(monkeypatch, tmp_path):
     workflows = tmp_path / ".github" / "workflows"
     forms = tmp_path / ".github" / "ISSUE_TEMPLATE"

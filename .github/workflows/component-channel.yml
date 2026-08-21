@@ -1,0 +1,113 @@
+name: Downloader component channel
+
+# A reviewed pin change on main publishes an independently installable,
+# integrity-verifiable component bundle. The schedule only detects drift: it
+# never writes a bot-authored commit or bypasses review of a new dependency.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - requirements.txt
+      - constraints-release.txt
+      - pyproject.toml
+      - scripts/build_component_channel.py
+      - core/component_overlay.py
+      - .github/workflows/component-channel.yml
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  schedule:
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    name: Detect a newer reviewed downloader candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Compare the reviewed yt-dlp pin with PyPI
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, re, urllib.request
+          from pathlib import Path
+
+          text = Path('requirements.txt').read_text(encoding='utf-8')
+          match = re.search(r'^yt-dlp\[default\]==([^\s#]+)', text, re.MULTILINE)
+          if not match:
+              raise SystemExit('requirements.txt has no exact yt-dlp[default] pin')
+          reviewed = match.group(1)
+          with urllib.request.urlopen('https://pypi.org/pypi/yt-dlp/json', timeout=20) as response:
+              data = json.load(response)
+          releases = [
+              version for version, files in data.get('releases', {}).items()
+              if files and not all(item.get('yanked') for item in files)
+          ]
+          numeric = lambda value: tuple(int(part) for part in re.findall(r'\d+', value))
+          latest = max(releases, key=numeric)
+          with Path(__import__('os').environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+              summary.write(f'## Downloader freshness\n\nReviewed: `{reviewed}`  \nNewest: `{latest}`\n')
+          if numeric(latest) > numeric(reviewed):
+              raise SystemExit(f'New yt-dlp candidate {latest} requires human review; current pin is {reviewed}')
+          PY
+
+  publish:
+    name: Build, verify and publish the component channel
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install the reviewed release dependency set
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+          python -m pip check
+      - name: Build deterministic component assets
+        run: python scripts/build_component_channel.py --output dist/component-channel
+      - name: Verify manifest and updater tests
+        run: python -m pytest tests/test_component_overlay.py tests/test_component_updates.py -q
+      - name: Generate component provenance attestation
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-path: dist/component-channel/bananaflow-components-*.zip
+      - name: Upload Actions evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: downloader-component-channel-${{ github.sha }}
+          path: dist/component-channel/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Create or update the official pre-release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if ! gh release view component-channel-v1 >/dev/null 2>&1; then
+            gh release create component-channel-v1 \
+              --target "$GITHUB_SHA" \
+              --title "BananaFlow downloader component channel" \
+              --notes "Reviewed downloader component bundles for BananaFlow's verified in-app updater. This is not an application release." \
+              --prerelease
+          fi
+          bundle=$(find dist/component-channel -maxdepth 1 -name 'bananaflow-components-*.zip' -print -quit)
+          gh release upload component-channel-v1 "$bundle" --clobber
+          # The authenticated manifest is replaced last, after its unique
+          # bundle asset is available, so clients never observe half an update.
+          gh release upload component-channel-v1 \
+            dist/component-channel/bananaflow-components.json --clobber

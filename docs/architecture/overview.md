@@ -61,7 +61,7 @@ Selection controls editing scope; pending proposals control Apply scope. Disk sa
 
 ## Persistence
 
-Persistent application state is stored under the per-user BananaFlow app-data directory resolved by `utils.paths`. Examples include configuration, history, update state, logs, protected/minimized sign-in data, the dedicated browser profile, Tag Editor drafts/backups/recovery state and feature caches.
+Persistent application state is stored under the per-user BananaFlow app-data directory resolved by `utils.paths`. Examples include configuration, history, update state, logs, protected/minimized sign-in data, the dedicated browser profile, verified versioned downloader-component overlays, Tag Editor drafts/backups/recovery state and feature caches.
 
 Persisted schema/path/meaning changes require forward migration behavior and tests. See [`../migrations/README.md`](../migrations/README.md).
 
@@ -73,7 +73,7 @@ Credentials/cookies cross a stricter trust boundary than ordinary URLs/search te
 
 ## Runtime components and supply chain
 
-Packaged builds may include third-party executables/browser/runtime/plugin components. They are staged at build time, not committed as binaries. Versions, licenses, sources and release verification are tracked by `THIRD_PARTY_NOTICES.md`, `SOURCE_OFFER.md`, packaging README files, SBOM generation and the release checklist. See [`../security/supply-chain.md`](../security/supply-chain.md).
+Packaged builds may include third-party executables/browser/runtime/plugin components. They are staged at build time, not committed as binaries. Versions, licenses, sources and release verification are tracked by `THIRD_PARTY_NOTICES.md`, `SOURCE_OFFER.md`, packaging README files, SBOM generation and the release checklist. The independently updateable `yt-dlp` / `yt-dlp-ejs` overlay is prepared in versioned app data and selected before the first downloader import; its trust, integrity, compatibility, atomicity and rollback contract is defined in [`secure-component-updater.md`](secure-component-updater.md). See also [`../security/supply-chain.md`](../security/supply-chain.md).
 
 ## Architecture change rule
 

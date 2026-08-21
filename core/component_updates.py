@@ -18,14 +18,9 @@ Responsibilities
 * Never raise: any network/parsing failure is expressed per component as
   ``check_ok=False`` so a flaky network can't crash a background check.
 
-What this module does NOT do
-----------------------------
-* It never installs anything. Building the pip command
-  (:func:`pip_upgrade_command`) is as far as it goes — running it is the
-  UI's job, and only after explicit user approval.
-* In a packaged (PyInstaller-frozen) build the components are baked into
-  the EXE and cannot be upgraded in place; :func:`can_update_in_place`
-  reports that so the UI can explain that a full app update is required.
+Installation is deliberately separate: source environments use the explicit
+pip command below, while packaged builds use the verified app-data overlay in
+``core.component_overlay``. Both paths run only after user approval.
 
 Design
 ------
@@ -262,10 +257,11 @@ class ComponentUpdateChecker:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def can_update_in_place() -> bool:
-    """True when components can be pip-upgraded into the running
-    environment (source checkout / venv). False for a frozen EXE, where
-    dependencies are baked into the bundle and only a full app update
-    can refresh them."""
+    """Whether pip can update the current source environment in place.
+
+    Frozen builds return False because their approved path is the separate
+    versioned app-data overlay, not mutation of the installed environment.
+    """
     from utils.paths import is_frozen
     return not is_frozen()
 

@@ -2,7 +2,7 @@
 
 Status: **Current release-compliance inventory**
 
-Version reference: BananaFlow `1.0.0` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
+Version reference: BananaFlow `1.1.0` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
 
 BananaFlow is licensed as GPL-3.0-or-later. This document records third-party packages, staged binaries/components, their license families, source locations and release-handling obligations. It is a best-effort open-source compliance document, not legal advice.
 

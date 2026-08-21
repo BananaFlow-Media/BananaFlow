@@ -2,6 +2,7 @@ name: Build macOS release
 
 # Runs only on:
 #   * Manual dispatch from the Actions tab.
+#   * A reviewed component-pin change merged to main (Actions RC only).
 #   * Tags matching v*.*.* (e.g. v1.0.0).
 #
 # Targets Apple Silicon (arm64) via the macos-14 runner. On a tag push
@@ -32,6 +33,12 @@ on:
         required: false
         default: "true"
   push:
+    branches:
+      - main
+    paths:
+      - requirements.txt
+      - constraints-release.txt
+      - pyproject.toml
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'

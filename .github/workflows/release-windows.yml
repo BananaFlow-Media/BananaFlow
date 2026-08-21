@@ -3,9 +3,11 @@ name: Build Windows release
 # Runs only on:
 #   * Manual dispatch from the Actions tab — builds and verifies everything,
 #     and deliberately publishes NOTHING. This is the release dry run.
+#   * A reviewed component-pin change merged to main — builds and uploads an
+#     Actions release candidate, but creates no GitHub Release.
 #   * Tags matching v*.*.* — same build, plus a DRAFT GitHub Release.
-# It does NOT run on every push or PR, so dev cycles are not blocked by long
-# PyInstaller + Playwright builds.
+# It does not run on unrelated pushes or PRs, so ordinary development cycles
+# are not blocked by long PyInstaller + Playwright builds.
 #
 # The build itself is delegated to scripts/build_windows.ps1 — the same script
 # a maintainer runs locally — so CI can never quietly ship a different product
@@ -30,6 +32,12 @@ name: Build Windows release
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+    paths:
+      - requirements.txt
+      - constraints-release.txt
+      - pyproject.toml
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'

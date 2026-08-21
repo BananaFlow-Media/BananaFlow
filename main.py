@@ -53,6 +53,16 @@ _install_crash_reporting()
 
 logger = logging.getLogger(__name__)
 
+# Select a previously verified per-user downloader overlay before any project
+# path can import yt_dlp. This performs no network or installation work.
+try:
+    from core.component_overlay import activate_component_overlay
+    from utils.paths import is_frozen as _is_frozen
+    _component_overlay = activate_component_overlay() if _is_frozen() else None
+except Exception:
+    _component_overlay = None
+    logger.warning("Component-overlay activation failed (using bundled components)", exc_info=True)
+
 
 def main() -> int:
     logger.info("Starting BananaFlow (debug=%s)", _debug_mode)
@@ -195,6 +205,15 @@ def _run_internal_smoke_test(argv: list[str]) -> int:
     return 2
 
 
+def _run_component_healthcheck(argv: list[str]) -> int:
+    """Hidden isolated validation target for a prepared component overlay."""
+    index = argv.index("--component-healthcheck")
+    if index + 1 >= len(argv):
+        return 2
+    from core.component_overlay import run_component_healthcheck
+    return run_component_healthcheck(Path(argv[index + 1]))
+
+
 if __name__ == "__main__":
     # Must be the very first thing in a frozen build. If any code (ours or a
     # dependency) ever starts a child via multiprocessing, PyInstaller's
@@ -205,6 +224,8 @@ if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
 
+    if "--component-healthcheck" in sys.argv:
+        sys.exit(_run_component_healthcheck(sys.argv))
     if "--internal-smoke-test" in sys.argv:
         sys.exit(_run_internal_smoke_test(sys.argv))
     sys.exit(main())

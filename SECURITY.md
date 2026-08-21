@@ -52,6 +52,7 @@ Key controls include:
 - bounded retry/reliability policy that distinguishes transient failures from permanent/authentication failures;
 - dependency/security scanning and repository security workflows under `.github/`;
 - versioned release artifacts with published SHA-256 checksums, SBOM and build-attestation evidence as configured by the release process;
+- authenticated GitHub release-asset digests, compatibility checks, bounded safe unpacking, isolated health checks and atomic last-known-good fallback for approved packaged-component overlays;
 - Tag Editor backup/journal/verify-before-replace invariants for destructive metadata operations.
 
 These controls are defense in depth, not guarantees. Treat logs and diagnostics as potentially sensitive and inspect them before sharing.
@@ -67,7 +68,7 @@ Downloads offered elsewhere are not official BananaFlow releases.
 
 ## Updates, signing and checksums
 
-BananaFlow checks public release metadata when update checks are enabled. Packaged users are directed to the official release/download path; the app does not silently replace itself with an unverified build.
+BananaFlow checks public release metadata when update checks are enabled. Packaged users are directed to the official release/download path for application updates; the app does not silently replace itself with an unverified build. A user can separately approve a downloader-component update from the official repository channel. That path verifies GitHub's SHA-256/size metadata and the channel manifest before preparing a versioned per-user overlay; it never rewrites the installed application and takes effect only after restart. Before an approved overlay is reused, its authenticated channel control record is refreshed at most once per 24 hours; a revoked, disabled, stale-unverifiable or app-incompatible overlay is not activated, and the bundled components remain available.
 
 Windows packages are currently unsigned with Authenticode. The supported macOS package can also have signing/notarization limitations documented in the release notes. A checksum detects mismatch/corruption relative to a separately trusted published value, but it is not a substitute for publisher identity or code signing.
 

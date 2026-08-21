@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bananaflow"
-version = "1.0.0"
+version = "1.1.0"
 description = "Desktop downloader for YouTube, YouTube Music, and Spotify — with GUI and CLI"
 requires-python = ">=3.10"
 readme = "README.md"
