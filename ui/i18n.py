@@ -350,12 +350,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "most common cause of failing YouTube downloads."
         ),
         "update_prompt_frozen_note": (
-            "The downloader components are bundled inside this installed build "
-            "of BananaFlow and are updated together with the app, so there is "
-            "nothing to install separately. When a BananaFlow update that includes "
-            "newer components is published, this notification will point to it. "
-            "“Open Download Page” shows the latest available release — if none "
-            "is newer yet, check back later."
+            "This installed build can update its downloader components separately. "
+            "Choosing “Update Components” downloads a reviewed bundle from the "
+            "official BananaFlow repository, verifies its exact size and SHA-256, "
+            "health-checks it in a separate process, and prepares it in per-user "
+            "app data. It becomes active only after BananaFlow restarts; the "
+            "installed application files are not rewritten."
         ),
         "update_get_app_btn": "Open Download Page",
         "update_components_btn": "Update Components",
@@ -372,8 +372,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "versions to take effect."
         ),
         "component_install_failed_msg": (
-            "Component update failed. You can try again, or run "
-            "'pip install --upgrade yt-dlp[default]' manually.\n\nDetails: {detail}"
+            "Component update failed safely and the current components were left "
+            "unchanged. You can try again.\n\nDetails: {detail}"
         ),
 
         # ── Browser cookies ─────────────────────────────────────────────────────
@@ -1758,11 +1758,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "YouTube שנכשלות."
         ),
         "update_prompt_frozen_note": (
-            "רכיבי ההורדה ארוזים בתוך גרסת ההתקנה הזו של BananaFlow ומתעדכנים "
-            "יחד עם האפליקציה, כך שאין צורך להתקין דבר בנפרד. כאשר יתפרסם "
-            "עדכון BananaFlow שכולל רכיבים חדשים יותר, ההתראה הזו תפנה אליו. "
-            "“פתח עמוד הורדה” מציג את הגרסה האחרונה הזמינה — אם אין עדיין "
-            "גרסה חדשה יותר, בדוק שוב מאוחר יותר."
+            "גרסת ההתקנה הזו יכולה לעדכן את רכיבי ההורדה בנפרד. "
+            "בחירה ב“עדכן רכיבים” מורידה חבילה שנבדקה מהמאגר הרשמי של "
+            "BananaFlow, מאמתת את הגודל ואת SHA-256, ומריצה בדיקת תקינות בתהליך "
+            "נפרד. העדכון נשמר בנתוני המשתמש ונכנס לתוקף רק לאחר הפעלה מחדש; "
+            "קובצי התוכנה המותקנת אינם משתנים."
         ),
         "update_get_app_btn": "פתח עמוד הורדה",
         "update_components_btn": "עדכן רכיבים",
@@ -1779,8 +1779,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "החדשות ייכנסו לתוקף."
         ),
         "component_install_failed_msg": (
-            "עדכון הרכיבים נכשל. אפשר לנסות שוב, או להריץ ידנית "
-            "'pip install --upgrade yt-dlp[default]'.\n\nפרטים: {detail}"
+            "עדכון הרכיבים נכשל בבטחה, והרכיבים הנוכחיים לא השתנו. "
+            "אפשר לנסות שוב.\n\nפרטים: {detail}"
         ),
 
         # ── Browser cookies ─────────────────────────────────────────────────────

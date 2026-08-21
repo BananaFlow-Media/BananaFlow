@@ -23,10 +23,9 @@ recommendation:
       "Update Components" runs the pip upgrade on a background thread
       after this explicit click, then reports the result and reminds
       that a restart is needed.
-  * Components only, packaged EXE mode → in-place upgrade is impossible
-      (dependencies are baked into the EXE), so the button opens the
-      app download page and the body text explains that a BananaFlow update
-      is how components get refreshed (and that one may not exist yet).
+  * Components only, packaged EXE mode → "Update Components" downloads the
+      reviewed official component bundle, verifies it, prepares it in
+      versioned app data, health-checks it, and selects it for the next launch.
 
 Secondary choices are always present:
 
@@ -63,6 +62,7 @@ from ui.dialogs.styled_dialog import (
     make_root_layout,
 )
 from ui.i18n import t
+from utils.paths import is_frozen
 
 # Fallback target for "get the full app update" when the check that
 # found outdated components didn't also carry a ReleaseInfo (frozen
@@ -171,7 +171,7 @@ class UpdatePromptDialog(StyledDialog):
         self._app_release = app_release
         self._component_updates = list(component_updates or [])
         self._update_ids = collect_update_ids(app_release, self._component_updates)
-        self._frozen = not can_update_in_place()
+        self._frozen = is_frozen()
         self._installing = False
         self._install_worker = None
 
@@ -223,18 +223,13 @@ class UpdatePromptDialog(StyledDialog):
             get_app_btn.clicked.connect(self._on_get_app_update)
             self._action_buttons.append(get_app_btn)
             footer_buttons.append(get_app_btn)
-        elif self._component_updates and not self._frozen:
+        elif self._component_updates and (self._frozen or can_update_in_place()):
             self._install_components_btn = make_button(
                 t("update_components_btn"), "primary",
             )
             self._install_components_btn.clicked.connect(self._on_install_components)
             self._action_buttons.append(self._install_components_btn)
             footer_buttons.append(self._install_components_btn)
-        elif self._component_updates and self._frozen:
-            releases_btn = make_button(t("update_open_releases_btn"), "primary")
-            releases_btn.clicked.connect(self._on_open_releases_page)
-            self._action_buttons.append(releases_btn)
-            footer_buttons.append(releases_btn)
 
         root.addWidget(make_footer(*footer_buttons))
 

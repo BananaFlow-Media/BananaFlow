@@ -63,6 +63,16 @@ Then explicitly verify:
 4. macOS release workflow builds and attaches the supported Apple Silicon package/artifacts for the same stable or pre-release tag. Signing/notarization status is a separate release property and does not by itself make the product experimental.
 5. Linux is a supported source-install platform; there is currently no official Linux installer/package artifact to attach.
 
+### Component pin automation
+
+The daily component-channel workflow compares the exact reviewed `yt-dlp[default]` pin with the newest non-yanked PyPI candidate. A newer candidate intentionally fails that advisory job for maintainer review; it does not create a bot-authored commit, change a pin or publish unreviewed executable code.
+
+After a human-reviewed pin change is merged to `main`:
+
+1. `.github/workflows/component-channel.yml` installs the release dependency set, builds the deterministic `yt-dlp` / `yt-dlp-ejs` overlay, runs focused updater tests, records build provenance and updates the official `component-channel-v1` pre-release assets (bundle first, authenticated manifest last). The same publication job also runs for an application version tag, ensuring the first packaged release that supports overlays has a channel to consume.
+2. The Windows and macOS release workflows run automatically and retain full release-candidate artifacts in Actions. A branch-triggered build creates no GitHub application release.
+3. Only a matching version tag creates/updates the normal draft application release, and publication remains the manual procedure below.
+
 ## Manual acceptance — blocking
 
 Download the **CI-produced draft artifacts** onto clean/representative machines and verify at minimum:

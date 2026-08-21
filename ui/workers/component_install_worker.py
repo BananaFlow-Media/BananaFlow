@@ -1,11 +1,9 @@
 """
-ui/workers/component_install_worker.py  –  In-place component upgrade
-======================================================================
-Runs the pip upgrade command from core.component_updates on a background
-thread. Only ever started after the user explicitly clicked "Update
-components" in the update prompt — nothing in the app runs this
-automatically — and only in source/venv mode (core.component_updates.
-can_update_in_place() gates the button that launches it).
+ui/workers/component_install_worker.py  –  Approved component upgrade
+=====================================================================
+Runs the appropriate update path on a background thread after an explicit
+click: pip for source environments, or the verified versioned app-data
+overlay for an installed/frozen build.
 
 The upgraded packages are already imported into the running process, so
 the new version only takes effect after BananaFlow restarts; the completion
@@ -27,6 +25,7 @@ import sys
 from PySide6.QtCore import QThread, Signal
 
 from core.component_updates import pip_upgrade_command
+from utils.paths import is_frozen
 
 _TIMEOUT_SECONDS = 600          # pip resolving + downloading can be slow
 _OUTPUT_TAIL_CHARS = 2000
@@ -38,6 +37,22 @@ class ComponentInstallWorker(QThread):
     completed = Signal(bool, str)
 
     def run(self) -> None:
+        if is_frozen():
+            self._run_packaged_update()
+            return
+        self._run_source_update()
+
+    def _run_packaged_update(self) -> None:
+        try:
+            from core.component_overlay import install_verified_component_update
+            result = install_verified_component_update()
+        except Exception as exc:
+            self.completed.emit(False, str(exc)[-_OUTPUT_TAIL_CHARS:])
+            return
+        versions = ", ".join(f"{name} {version}" for name, version in result.versions)
+        self.completed.emit(True, versions)
+
+    def _run_source_update(self) -> None:
         command = pip_upgrade_command()
         creationflags = 0
         if sys.platform == "win32":

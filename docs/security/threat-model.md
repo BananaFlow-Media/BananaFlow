@@ -9,7 +9,7 @@ This threat model focuses on security properties of the desktop application and 
 - authentication cookies/session material and optional API/proxy credentials;
 - user media libraries and metadata, including protection against unintended overwrite/delete;
 - local paths, history, logs, drafts/backups and other potentially private metadata;
-- integrity of downloaded application releases and bundled runtime components;
+- integrity of downloaded application releases, bundled runtime components and per-user component overlays;
 - integrity of configuration and persisted migration state;
 - user expectations about what network services receive which data.
 
@@ -58,10 +58,11 @@ This threat model focuses on security properties of the desktop application and 
 
 ### Update and supply chain
 
-- The normal packaged-app update path directs users to versioned releases rather than silently replacing application code.
+- The packaged-app update path directs users to versioned releases and does not silently replace application code.
 - Release artifacts publish checksums/SBOM/attestation evidence as configured by the release pipeline.
 - Bundled components are staged through reviewed scripts and documented with source/license/version information.
-- A future independently downloadable component updater must satisfy the secure-updater design before shipping; do not implement a hashless/unverified partial updater.
+- Independently downloaded `yt-dlp` / `yt-dlp-ejs` updates are accepted only from the exact official GitHub component-channel release, after GitHub asset digest/size verification, manifest/bundle agreement, compatibility and bounded safe-unpack checks.
+- A prepared overlay is health-checked in a separate process and atomically selected only for the next launch; the previous valid selection is retained for fallback and a failed/interrupted preparation cannot change the active pointer.
 
 ## Important residual risks
 

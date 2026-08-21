@@ -1,8 +1,8 @@
 # Secure component updater — design record
 
-Status: **Accepted design; independent packaged-component updater is not implemented**
+Status: **Implemented / normative**
 
-BananaFlow currently treats a full application release as the normal way packaged users receive updated bundled components. Source environments can support explicit dependency updates. This document defines the minimum security bar for any future updater that downloads/replaces executable/script components independently of a full app release.
+BananaFlow can update the fast-moving `yt-dlp` / `yt-dlp-ejs` pair independently of the installed application. Source environments use an explicitly approved pip update. Packaged builds use the verified per-user overlay implemented by `core/component_overlay.py`; the installed program directory is never rewritten.
 
 ## Why a partial updater is not acceptable
 
@@ -10,11 +10,11 @@ An updater is a code-execution supply-chain path. Downloading a “latest” bin
 
 ## Required design properties
 
-A future implementation must provide all of the following as one coherent design:
+The implementation provides the following as one coherent design:
 
-### Authenticated manifest
+### Authenticated manifest and trust root
 
-BananaFlow-controlled manifest identifies exact component version, expected size/hash, artifact URL, compatibility range and emergency-disable/superseded state. The manifest must itself be authenticated (for example a project-held signing key or another independently reviewable authenticated mechanism), not merely fetched over an arbitrary URL.
+The control plane is the `component-channel-v1` pre-release in the official `BananaFlow-Media/BananaFlow` GitHub repository. The client requests that exact repository/tag through GitHub's HTTPS Releases API. It accepts exactly one named manifest asset and verifies the asset size and GitHub-provided SHA-256 digest before parsing it. The manifest then identifies the exact bundle asset, size/hash, BananaFlow compatibility range, component versions and emergency-disable/superseded state. Manifest-supplied download URLs are not used: the matching official release asset API record is the download authority.
 
 ### Exact integrity and transport
 
@@ -30,7 +30,7 @@ Manifest metadata declares compatible BananaFlow versions/component combinations
 
 ### App-data overlay, not live in-place mutation
 
-Downloaded components should install into versioned per-user app-data storage rather than rewriting the installed program tree while the app is using it. Activation changes a small pointer/selection only after verification.
+Downloaded components install under `components/downloader/bundles/<bundle-id>/site-packages` in BananaFlow's per-user app-data directory. Activation changes only `active.json`, and startup prepends the selected valid overlay before the first `yt_dlp` import.
 
 ### Atomic install and rollback
 
@@ -39,12 +39,12 @@ Downloaded components should install into versioned per-user app-data storage ra
 - unpack/prepare safely;
 - run component-specific health check;
 - atomically activate only after success;
-- retain at least one last-known-good version;
-- roll back if health check/activation fails.
+- retain the previous active bundle as the last-known-good selection;
+- fall back atomically to that previous bundle when the active bundle/marker is missing or invalid.
 
 ### Concurrency and shutdown
 
-Do not swap components during active operations that use them. Do not start an install during shutdown. An interrupted download/preparation is recognized/cleaned on next launch without changing the active component.
+The worker can prepare an update while the application is running, but the current process keeps its already selected implementation. Only the next launch reads the new pointer, so active operations are never swapped. Preparation uses a private staging directory; failure does not change `active.json`, and abandoned staging data is safe to remove without affecting the active bundle.
 
 ### User control
 
@@ -58,13 +58,13 @@ Update logs use centralized redaction and never contain credentials. Public upda
 
 The authenticated control plane can disable/supersede a known-bad downloaded component without requiring the client to run it first.
 
-## Current behavior
+## Build and publication behavior
 
-- Application update checks query the official BananaFlow release feed.
-- Component-version checks can compare selected source/developer dependencies.
-- Packaged components are refreshed by publishing a new full BananaFlow release.
-- Packaged users are not offered a silent independent component replacement mechanism.
+- `.github/workflows/component-channel.yml` detects upstream drift on a schedule but does not create an unreviewed/bot-authored dependency change.
+- When an exact component pin is reviewed and merged to `main`, CI builds the overlay from the installed distributions, runs updater tests, produces provenance evidence and publishes the bundle before replacing the channel manifest.
+- The Windows and macOS release workflows also build full Actions release candidates for a reviewed pin change. They do not create or publish an application release without the existing tag/human release process.
+- Installation remains an explicit user action. A successful update requires a restart.
 
 ## Change rule
 
-Any implementation of this design is security-sensitive. It requires threat-model, privacy/network, supply-chain, release, user-guide and test updates in the same PR. Do not implement a “temporary” updater that omits authentication/rollback/health-check requirements.
+Any change to this updater is security-sensitive. It requires threat-model, privacy/network, supply-chain, release, user-guide and test review in the same change. Do not weaken repository identity, API asset-digest, compatibility, bounded-download, safe-unpack, isolated-health-check, atomic-selection or rollback checks.

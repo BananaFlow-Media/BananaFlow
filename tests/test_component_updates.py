@@ -179,7 +179,7 @@ class TestInPlaceUpgrade:
         monkeypatch.delattr(sys, "frozen", raising=False)
         assert can_update_in_place() is True
 
-    def test_cannot_update_in_place_when_frozen(self, monkeypatch):
+    def test_frozen_build_cannot_mutate_installed_environment(self, monkeypatch):
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         assert can_update_in_place() is False
 
