@@ -5,7 +5,7 @@
 # pyproject.toml's safe >=2026.7.4 compatibility floor instead.
 # The [default] extra installs yt-dlp's matching EJS dependency, so do not list
 # yt-dlp-ejs independently.
-yt-dlp[default]==2026.8.19
+yt-dlp[default]==2026.8.20.234504.dev0
 
 # PO Token Provider plugin: not a source-tree runtime requirement, but
 # the public Windows build pins and stages bgutil-ytdlp-pot-provider

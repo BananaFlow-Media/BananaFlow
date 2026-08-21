@@ -6,6 +6,10 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [1.1.1] — 2026-08-21
 
+### Changed
+
+- Updated the reviewed release/component pin to `yt-dlp[default] 2026.8.20.234504.dev0` with its matching `yt-dlp-ejs 0.8.0` dependency.
+
 ### Fixed
 
 - Fixed packaged component updates failing their isolated health check because frozen startup removed the bundle's staging directory before validation.
