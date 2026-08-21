@@ -1,5 +1,7 @@
 """Static policy gates for independently published downloader components."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -36,3 +38,16 @@ def test_builder_contains_only_the_two_reviewed_distributions():
     text = BUILDER.read_text(encoding="utf-8")
     assert 'PACKAGES = ("yt-dlp", "yt-dlp-ejs")' in text
     assert "ZipInfo" in text and "sha256" in text
+
+
+def test_builder_runs_when_invoked_by_path_outside_the_repository(tmp_path):
+    output = tmp_path / "channel"
+    result = subprocess.run(
+        [sys.executable, str(BUILDER), "--output", str(output)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (output / "bananaflow-components.json").is_file()

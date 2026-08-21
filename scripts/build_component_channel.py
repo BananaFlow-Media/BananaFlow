@@ -12,9 +12,16 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+
+# GitHub Actions invokes this file by path, which otherwise exposes only the
+# scripts directory to imports. Keep the release version source canonical.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from version import FULL_VERSION
 

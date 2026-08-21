@@ -13,6 +13,7 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ### Fixed
 
+- Fixed component-channel release builds invoked by path in CI so they load the canonical application version before publishing a bundle.
 - Improved YouTube download reliability by selecting the appropriate yt-dlp player clients for audio and video, while keeping the conservative request policy.
 - Added thumbnail fallback and cache handling for unavailable YouTube thumbnail variants.
 - Refresh Download History when returning to its panel, so newly completed downloads appear without restarting the application.
