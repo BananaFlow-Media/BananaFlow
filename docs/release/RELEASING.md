@@ -79,6 +79,7 @@ Download the **CI-produced draft artifacts** onto clean/representative machines 
 
 - published SHA-256 values match downloaded artifacts;
 - Windows installer installs/launches/uninstalls and the portable build runs;
+- installing the Windows build over a previous version removes obsolete `_internal/yt_dlp*` package and `*.dist-info` trees before copying the current ones, and the component-update UI reports the imported yt-dlp version rather than stale metadata;
 - macOS Apple Silicon package opens and the main application workflow launches successfully; document any current Gatekeeper/signing first-run requirement;
 - `bananaflow-cli --version` prints the release version where the CLI is part of the tested install;
 - `bananaflow-cli --doctor` passes its blocking checks on the packaged build;
@@ -86,6 +87,7 @@ Download the **CI-produced draft artifacts** onto clean/representative machines 
 - a conversion succeeds and output verifies;
 - a Tag Editor Apply + Undo Applied Batch cycle succeeds on disposable fixtures;
 - when component-overlay code changes, an approved overlay activates only with a current authenticated control record and a revoked test bundle cannot activate;
+- when component-overlay health-check startup changes, the frozen health-check validates its staged `site-packages` without normal startup deleting that staging directory;
 - expected product/version/publisher metadata appears in the executable/package;
 - app data is created only in documented per-user locations;
 - critical Hebrew/English UI and the YouTube Doctor/manual QA surfaces render correctly when changed by the release.

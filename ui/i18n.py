@@ -331,7 +331,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_prompt_subtitle": "Nothing is installed without your approval.",
         "update_prompt_app_line": "A new version of BananaFlow is available: {new}  (you have v{cur}).",
         "update_prompt_app_note": (
-            "Choosing “Open Download Page” opens the BananaFlow release page in your "
+            "Choosing “Open Download Page” opens BananaFlow's official download page in your "
             "browser, where you can download and install the new version. BananaFlow "
             "does not update itself automatically."
         ),
@@ -1740,7 +1740,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_prompt_subtitle": "שום דבר לא מותקן ללא אישורך.",
         "update_prompt_app_line": "גרסה חדשה של BananaFlow זמינה: {new}  (ברשותך v{cur}).",
         "update_prompt_app_note": (
-            "בחירה ב“פתח עמוד הורדה” תפתח את עמוד הגרסה של BananaFlow בדפדפן, שם "
+            "בחירה ב“פתח עמוד הורדה” תפתח את עמוד ההורדה באתר הרשמי של BananaFlow, שם "
             "תוכל להוריד ולהתקין את הגרסה החדשה. BananaFlow אינו מתעדכן אוטומטית."
         ),
         "update_prompt_app_includes_components": (

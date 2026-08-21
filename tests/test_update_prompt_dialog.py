@@ -262,6 +262,30 @@ class TestUpdatePromptDialogWidget:
         finally:
             dlg.deleteLater()
 
+    def test_app_update_opens_official_download_page_not_github(self, tmp_path, monkeypatch):
+        try:
+            _make_qapp(tmp_path, monkeypatch)
+            import ui.dialogs.update_prompt_dialog as upd
+        except ImportError:
+            pytest.skip("PySide6 / qfluentwidgets not available")
+            return
+
+        opened = []
+        official_url = "https://bananaflow.bananaflow-media.workers.dev/he/download/"
+        monkeypatch.setattr(upd, "site_url", lambda page: official_url)
+        monkeypatch.setattr(
+            upd.QDesktopServices,
+            "openUrl",
+            lambda url: opened.append(url.toString()),
+        )
+        dlg = upd.UpdatePromptDialog(_store(tmp_path), _release("9.9.9"), [])
+        try:
+            dlg._on_get_app_update()
+            assert opened == [official_url]
+            assert "github.com" not in opened[0]
+        finally:
+            dlg.deleteLater()
+
 
 class TestHebrewRtlRendering:
     """Headless (offscreen) check that the update prompt renders in

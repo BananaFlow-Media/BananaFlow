@@ -152,8 +152,29 @@ def test_destinations_and_uninstall_policy_are_unchanged():
     assert re.search(r'(?m)^\s*Source:\s*"\{#DistDir\}\\\*";\s*DestDir:\s*"\{app\}"', text)
     assert 'PrivilegesRequired=lowest' in text
     # User data lives outside {app} and must not be touched by uninstall.
-    uninstall = re.findall(r'(?mi)^\s*Type:\s*filesandordirs;\s*Name:\s*"([^"]+)"', text)
+    uninstall_section = text.split("[UninstallDelete]", 1)[1]
+    uninstall = re.findall(
+        r'(?mi)^\s*Type:\s*filesandordirs;\s*Name:\s*"([^"]+)"',
+        uninstall_section,
+    )
     assert uninstall == ["{app}\\scripts"], (
         f"uninstall policy changed: {uninstall}"
     )
     assert ".bananaflow" not in "".join(uninstall), "user data must survive uninstall"
+
+
+def test_upgrade_removes_only_stale_packaged_downloader_trees_before_copy():
+    """An in-place install must not retain old module files or dist-info."""
+    text = _iss_text()
+    install_delete = set(re.findall(
+        r'(?mi)^\s*Type:\s*filesandordirs;\s*Name:\s*"([^"]+)"',
+        text.split("[InstallDelete]", 1)[1].split("[Icons]", 1)[0],
+    ))
+
+    assert install_delete == {
+        "{app}\\_internal\\yt_dlp",
+        "{app}\\_internal\\yt_dlp_ejs",
+        "{app}\\_internal\\yt_dlp-*.dist-info",
+        "{app}\\_internal\\yt_dlp_ejs-*.dist-info",
+    }
+    assert all(path.startswith("{app}\\_internal\\yt_dlp") for path in install_delete)

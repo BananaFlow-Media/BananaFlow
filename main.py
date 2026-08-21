@@ -56,9 +56,16 @@ logger = logging.getLogger(__name__)
 # Select a previously verified per-user downloader overlay before any project
 # path can import yt_dlp. This performs no network or installation work.
 try:
-    from core.component_overlay import activate_component_overlay
+    from core.component_overlay import (
+        activate_component_overlay,
+        should_activate_component_overlay,
+    )
     from utils.paths import is_frozen as _is_frozen
-    _component_overlay = activate_component_overlay() if _is_frozen() else None
+    _component_overlay = (
+        activate_component_overlay()
+        if should_activate_component_overlay(argv=sys.argv, frozen=_is_frozen())
+        else None
+    )
 except Exception:
     _component_overlay = None
     logger.warning("Component-overlay activation failed (using bundled components)", exc_info=True)

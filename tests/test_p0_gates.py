@@ -522,9 +522,9 @@ class TestGitHubRepoURLConsistency:
     """TestUpdateCheckerDefaults only guards the *default parameter*
     UpdateChecker/UpdateWorker fall back to — it says nothing about the
     handful of files that hardcode the full repo URL as a plain string
-    (the About card's HyperlinkCard, the update-prompt's releases link,
-    the MusicBrainz User-Agent, the Inno Setup installer metadata, and
-    three legal/compliance docs). With nothing guarding them, a future
+    (the About card's HyperlinkCard, the MusicBrainz User-Agent, the
+    Inno Setup installer metadata, and legal/compliance docs). With
+    nothing guarding them, a future
     revert of any one file, or a copy-paste of a stale URL into a new
     file, would ship silently. If the repo moves again, update
     EXPECTED_URL here too.
@@ -537,7 +537,6 @@ class TestGitHubRepoURLConsistency:
     # hardcodes the full repo URL as a plain string.
     _FILES_WITH_FULL_URL = [
         ("ui/panels/settings_panel.py", "About card HyperlinkCard"),
-        ("ui/dialogs/update_prompt_dialog.py", "APP_RELEASES_URL"),
         ("core/musicbrainz_enricher.py", "MusicBrainz User-Agent"),
         ("packaging/bananaflow.iss", "Inno Setup AppURL"),
         ("LICENSES.md", "license bundle doc"),
@@ -740,9 +739,7 @@ class TestOfficialWebsiteURLConsistency:
 
         assert "AppPublisherURL={#WebsiteURL}" in iss
         assert "AppSupportURL={#WebsiteHelpURL}" in iss
-        # Updates still point at the Releases feed that actually hosts
-        # the artifacts.
-        assert "AppUpdatesURL={#AppURL}/releases" in iss
+        assert "AppUpdatesURL={#WebsiteDownloadURL}" in iss
 
     def test_packaging_metadata_declares_the_website_as_homepage(self):
         root = self._root()

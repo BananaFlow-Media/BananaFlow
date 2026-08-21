@@ -19,6 +19,7 @@
 ; page a bare visit to the site redirects to (/ -> 308 -> /he/).
 #define WebsiteHomeURL "https://bananaflow.bananaflow-media.workers.dev/he/"
 #define WebsiteHelpURL "https://bananaflow.bananaflow-media.workers.dev/he/help/"
+#define WebsiteDownloadURL "https://bananaflow.bananaflow-media.workers.dev/he/download/"
 #define AppExeName     "bananaflow.exe"
 #define AppCliExeName  "bananaflow-cli.exe"
 ; A brand-new installation identity: BananaFlow installs side-by-side
@@ -60,7 +61,7 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#WebsiteURL}
 AppSupportURL={#WebsiteHelpURL}
-AppUpdatesURL={#AppURL}/releases
+AppUpdatesURL={#WebsiteDownloadURL}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -100,6 +101,15 @@ Source: "{#RepoRoot}SOURCE_OFFER.md";       DestDir: "{app}"; Flags: ignoreversi
 Source: "{#RepoRoot}CONTRIBUTING.md";       DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}README.md";             DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; A one-folder PyInstaller upgrade overlays the previous installation. Remove
+; only the downloader packages and their metadata before [Files] is processed,
+; so an obsolete dist-info directory cannot make the current module look old.
+Type: filesandordirs; Name: "{app}\_internal\yt_dlp"
+Type: filesandordirs; Name: "{app}\_internal\yt_dlp_ejs"
+Type: filesandordirs; Name: "{app}\_internal\yt_dlp-*.dist-info"
+Type: filesandordirs; Name: "{app}\_internal\yt_dlp_ejs-*.dist-info"
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

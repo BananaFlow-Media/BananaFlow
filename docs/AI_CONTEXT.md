@@ -19,7 +19,7 @@ The main English/Hebrew user manuals are written for ordinary non-programmer use
 - `ui/workers/` — `QThread` bridges for long-running work.
 - `core/` — backend engines, persistence and services; no Qt symbols.
 - `utils/` — shared backend helpers; no Qt symbols.
-- `packaging/` + `scripts/` — release assembly, staged components and build/test tooling.
+- `packaging/` + `scripts/` — release assembly, staged components and build/test tooling; Windows in-place upgrades must remove obsolete packaged downloader trees before copying their replacements.
 - `tests/` — pytest suite; supported full gate is isolated per test file.
 
 Read [`architecture/overview.md`](architecture/overview.md) and [`../PROJECT_STRUCTURE.md`](../PROJECT_STRUCTURE.md) before architecture changes.
