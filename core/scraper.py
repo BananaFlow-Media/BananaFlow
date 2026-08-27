@@ -995,7 +995,7 @@ def scrape_spotify_track(
     return title, items
 
 
-def scrape_spotify_artist(
+def _scrape_spotify_artist_legacy(
     url: str,
     on_item: Optional[Callable[[Dict], None]] = None,
     cookies_file: Optional[str] = None,
@@ -1199,6 +1199,488 @@ def scrape_spotify_artist(
     if not metadata_only:
         _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
     return artist_name or "Unknown Artist", items
+
+
+_SPOTIFY_SECTION_NAMES = {
+    "all": ("All", "הכול"),
+    "album": ("Albums", "אלבומים"),
+    "single": ("Singles and EPs", "סינגלים ו-EP"),
+    "compilation": ("Compilations", "אוספים"),
+    "appears_on": ("Appears On", "מופיע ב"),
+}
+
+_SPOTIFY_CATEGORY_NAMES = {
+    "all": "דיסקוגרפיה",
+    "album": "אלבומים",
+    "single": "סינגלים ו-EP",
+    "compilation": "אוספים",
+    "appears_on": "מופיע באוספים",
+}
+
+
+def _spotify_artist_base_url(url: str) -> str:
+    """Return the canonical public artist URL for any discography sub-route."""
+    match = re.search(r"https?://open\.spotify\.com/artist/[^/?#]+", url)
+    return match.group(0) if match else re.sub(r"/discography/.*$", "", url.rstrip("/"))
+
+
+def _spotify_section_key(label: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(label or "")).strip().casefold()
+    aliases = {
+        "all": "all", "הכול": "all", "הכל": "all",
+        "albums": "album", "album": "album", "אלבומים": "album",
+        "singles and eps": "single", "singles & eps": "single",
+        "singles": "single", "סינגלים ו-ep": "single", "סינגלים": "single",
+        "compilations": "compilation", "compilation": "compilation",
+        "אוספים": "compilation",
+        "appears on": "appears_on", "מופיע ב": "appears_on",
+    }
+    return aliases.get(normalized, "")
+
+
+def _spotify_artist_name_from_page(page) -> str:
+    selector = (
+        "main h1, [data-testid='artist-page-header-name'], "
+        "[data-testid='artist-name']"
+    )
+    try:
+        if page.locator(selector).count():
+            return page.locator(selector).first.inner_text().strip()
+    except Exception:
+        pass
+    try:
+        title = page.title().split("|")[0].strip()
+        title = re.sub(r"^Spotify\s*[-–]\s*", "", title, flags=re.IGNORECASE)
+        return re.sub(r"\s*[-–]\s*Discography.*$", "", title, flags=re.IGNORECASE).strip()
+    except Exception:
+        return ""
+
+
+def _click_spotify_link(page, href_fragment: str) -> bool:
+    link = page.locator(f"main a[href*='{href_fragment}']").first
+    try:
+        link.wait_for(state="attached", timeout=12000)
+    except Exception:
+        return False
+    link.click()
+    page.wait_for_timeout(1000)
+    return True
+
+
+def _open_spotify_discography(page, artist_url: str) -> bool:
+    page.goto(artist_url, wait_until="load", timeout=30000)
+    try:
+        page.wait_for_selector("main h1", timeout=12000)
+    except Exception:
+        pass
+    return _click_spotify_link(page, "/discography/")
+
+
+def _spotify_discography_filters(page) -> list[tuple[str, str]]:
+    """Read the currently available filter options from Spotify's combobox."""
+    combo = page.locator("button[role='combobox']").first
+    if not combo.count():
+        return []
+    combo.click()
+    page.wait_for_timeout(250)
+    result: list[tuple[str, str]] = []
+    for option in page.locator("[role='option'], [role='menuitemradio']").all():
+        try:
+            label = option.inner_text().strip()
+        except Exception:
+            continue
+        key = _spotify_section_key(label)
+        if key and (key, label) not in result:
+            result.append((key, label))
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return result
+
+
+def discover_spotify_artist_sections(
+    url: str,
+    *,
+    locale: str = "en-US",
+) -> tuple[str, list[dict]]:
+    """Discover only the category tabs Spotify exposes for this artist."""
+    artist_url = _spotify_artist_base_url(url)
+    sync_playwright = _sync_playwright_for("Spotify artist category discovery")
+    artist_name = ""
+    sections: list[dict] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = browser.new_context(**_spotify_context_kwargs(
+            locale, viewport={"width": 1280, "height": 1000},
+        ))
+        page = context.new_page()
+        page.route("**/*", _block_heavy_resources)
+        try:
+            page.goto(artist_url, wait_until="load", timeout=30000)
+            try:
+                page.wait_for_selector("main h1", timeout=12000)
+            except Exception:
+                pass
+            artist_name = _spotify_artist_name_from_page(page)
+            has_appears_on = bool(
+                page.locator("main a[href*='/appears-on']").count()
+            )
+            if _click_spotify_link(page, "/discography/"):
+                filters = _spotify_discography_filters(page)
+                specific = [(key, label) for key, label in filters if key != "all"]
+                visible_filters = specific or filters
+                if not visible_filters:
+                    visible_filters = [(
+                        "all",
+                        _SPOTIFY_SECTION_NAMES["all"][
+                            1 if str(locale).lower().startswith("he") else 0
+                        ],
+                    )]
+                for key, label in visible_filters:
+                    sections.append({
+                        "key": key,
+                        "provider_label": label,
+                        "item_count": -1,
+                    })
+            if has_appears_on:
+                label = _SPOTIFY_SECTION_NAMES["appears_on"][
+                    1 if str(locale).lower().startswith("he") else 0
+                ]
+                sections.append({
+                    "key": "appears_on",
+                    "provider_label": label,
+                    "item_count": -1,
+                })
+        finally:
+            browser.close()
+    return artist_name or "Unknown Artist", sections
+
+
+def _select_spotify_filter(page, provider_label: str) -> bool:
+    combo = page.locator("button[role='combobox']").first
+    if not combo.count():
+        return False
+    combo.click()
+    page.wait_for_timeout(200)
+    options = page.locator("[role='option'], [role='menuitemradio']")
+    for option in options.all():
+        try:
+            if option.inner_text().strip() == provider_label.strip():
+                option.click()
+                page.wait_for_timeout(700)
+                return True
+        except Exception:
+            continue
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return False
+
+
+def _spotify_release_type(section_key: str, metadata: str, total_tracks: int) -> str:
+    if section_key == "compilation":
+        return "compilation"
+    if section_key == "album":
+        return "album"
+    if section_key in {"single", "all"}:
+        lower = str(metadata or "").casefold()
+        if "album" in lower or "אלבום" in lower:
+            return "album"
+        if "compilation" in lower or "אוסף" in lower:
+            return "compilation"
+        return "ep" if "ep" in lower or total_tracks > 1 else "single"
+    return section_key
+
+
+def _collect_spotify_discography_tracks(
+    page,
+    *,
+    artist_name: str,
+    section_key: str,
+    seen_occurrences: set[tuple[str, str, str]],
+    cancel_check: Optional[Callable[[], bool]],
+) -> list[dict]:
+    """Collect visible track-list grids while preserving cross-section copies."""
+    items: list[dict] = []
+    stagnant_count = 0
+    try:
+        page.wait_for_selector("main div[data-testid='track-list']", timeout=12000)
+    except Exception:
+        pass
+
+    while stagnant_count < 8:
+        if cancel_check and cancel_check():
+            break
+        grids = page.locator("main div[data-testid='track-list']").all()
+        if not grids:
+            break
+        added_any = False
+        last_track = None
+        for grid in grids:
+            release_title = grid.get_attribute("aria-label") or ""
+            if not release_title or release_title == artist_name:
+                try:
+                    release_title = grid.evaluate(
+                        "el => el.previousElementSibling?.innerText || ''"
+                    ) or release_title
+                except Exception:
+                    pass
+            release_title = release_title or "Unknown Release"
+            rows = grid.locator("div[data-testid='tracklist-row']").all()
+            if not rows:
+                continue
+            try:
+                container = grid.evaluate_handle(
+                    "el => el.closest('div:has(h1), div:has(h2), div:has(img), "
+                    "[class*=\"contentSpacing\"]') || el.parentElement"
+                )
+                metadata = container.evaluate("el => el.innerText || ''")
+                count_match = re.search(
+                    r"(\d+)\s*(שיר|שירים|song|songs|track|tracks)",
+                    metadata.casefold(),
+                )
+                total_tracks = int(count_match.group(1)) if count_match else len(rows)
+                thumb = grid.evaluate(
+                    "el => el.closest('section, div')?.querySelector('img')?.src || ''"
+                ) or ""
+            except Exception:
+                metadata, total_tracks, thumb = "", len(rows), ""
+            release_type = _spotify_release_type(section_key, metadata, total_tracks)
+            category = _SPOTIFY_CATEGORY_NAMES.get(section_key, section_key)
+            if section_key == "all":
+                category = _SPOTIFY_CATEGORY_NAMES.get(release_type, "דיסקוגרפיה")
+
+            for position, row in enumerate(rows, start=1):
+                last_track = row
+                try:
+                    link = row.locator("a[data-testid='internal-track-link']").first
+                    title_el = link.locator("div").first
+                    if not title_el.count():
+                        title_el = row.locator("div[dir='auto']").first
+                    track_title = title_el.inner_text().strip()
+                    href = (link.get_attribute("href") or "") if link.count() else ""
+                    spotify_id = _spotify_id_from_url(href)
+                    occurrence = (
+                        section_key,
+                        release_title.casefold(),
+                        spotify_id or f"{position}:{track_title.casefold()}",
+                    )
+                    if occurrence in seen_occurrences:
+                        continue
+                    seen_occurrences.add(occurrence)
+                    artist_links = row.locator("a[href*='/artist/']").all()
+                    artist_credits = _read_spotify_artist_credits(artist_links, page)
+                    track_title, artist, artist_credits = _validated_spotify_display_metadata(
+                        track_title, artist_credits or [artist_name],
+                    )
+                    duration_sec, duration_str = 0, ""
+                    duration_el = row.locator("[data-testid='track-duration']").first
+                    if duration_el.count():
+                        duration_str = duration_el.inner_text().strip()
+                        parts = [int(part) for part in duration_str.split(":")]
+                        if len(parts) == 2:
+                            duration_sec = parts[0] * 60 + parts[1]
+                        elif len(parts) == 3:
+                            duration_sec = parts[0] * 3600 + parts[1] * 60 + parts[2]
+                    item = {
+                        "title": track_title,
+                        "artist": artist,
+                        "artist_credits": artist_credits,
+                        "album": release_title,
+                        "parent_artist": artist_name,
+                        "category": category,
+                        "catalog_section": section_key,
+                        "release_type": release_type,
+                        "album_index": position,
+                        "total_tracks": total_tracks,
+                        "url": "",
+                        "platform": "spotify",
+                        "thumbnail_url": _ensure_high_res_spotify_image(thumb),
+                        "duration_sec": duration_sec,
+                        "duration_str": duration_str,
+                        "spotify_id": spotify_id,
+                        "spotify_url": (
+                            f"https://open.spotify.com/track/{spotify_id}"
+                            if spotify_id else ""
+                        ),
+                    }
+                    items.append(item)
+                    added_any = True
+                except Exception as exc:
+                    logger.debug("Spotify artist row skipped: %s", exc)
+        stagnant_count = 0 if added_any else stagnant_count + 1
+        if last_track:
+            last_track.scroll_into_view_if_needed()
+            page.wait_for_timeout(500)
+    return items
+
+
+def _spotify_credit_matches_artist(item: dict, artist_name: str) -> bool:
+    target = re.sub(r"\W+", "", artist_name, flags=re.UNICODE).casefold()
+    credits = item.get("artist_credits") or re.split(
+        r"\s*(?:,|&|feat\.?|ft\.?)\s*", str(item.get("artist") or ""),
+        flags=re.IGNORECASE,
+    )
+    return any(
+        re.sub(r"\W+", "", str(credit), flags=re.UNICODE).casefold() == target
+        for credit in credits
+    )
+
+
+def _collect_spotify_appears_on(
+    page,
+    *,
+    artist_url: str,
+    artist_name: str,
+    locale: str,
+    cancel_check: Optional[Callable[[], bool]],
+) -> list[dict]:
+    """Expand Appears On release cards and retain tracks credited to the artist."""
+    from utils.spotify_resolver import SpotifyResolver
+
+    page.goto(artist_url, wait_until="load", timeout=30000)
+    if not _click_spotify_link(page, "/appears-on"):
+        return []
+    album_ids: dict[str, str] = {}
+    stagnant = 0
+    while stagnant < 5:
+        before = len(album_ids)
+        for link in page.locator("main a[href*='/album/']").all():
+            try:
+                href = link.get_attribute("href") or ""
+                album_id = _spotify_id_from_url(href)
+                label = (link.get_attribute("aria-label") or link.inner_text() or "").strip()
+                label = next((line.strip() for line in label.splitlines() if line.strip()), label)
+                if album_id:
+                    album_ids.setdefault(album_id, label or "Compilation")
+            except Exception:
+                continue
+        stagnant = 0 if len(album_ids) > before else stagnant + 1
+        page.mouse.wheel(0, 1400)
+        page.wait_for_timeout(450)
+
+    items: list[dict] = []
+    for album_id, album_title in album_ids.items():
+        if cancel_check and cancel_check():
+            break
+        try:
+            release_tracks = SpotifyResolver._embed_fallback(
+                "album", album_id, locale=locale,
+            )
+        except Exception as exc:
+            logger.warning("Spotify Appears On album %s failed: %s", album_id, exc)
+            continue
+        matching = [
+            item for item in release_tracks
+            if _spotify_credit_matches_artist(item, artist_name)
+        ]
+        for position, item in enumerate(matching, start=1):
+            item.update({
+                "album": album_title,
+                "parent_artist": artist_name,
+                "category": _SPOTIFY_CATEGORY_NAMES["appears_on"],
+                "catalog_section": "appears_on",
+                "release_type": "compilation",
+                "album_index": position,
+                "total_tracks": len(matching),
+                "platform": "spotify",
+                "url": "",
+            })
+            items.append(item)
+    return items
+
+
+def scrape_spotify_artist(
+    url: str,
+    on_item: Optional[Callable[[Dict], None]] = None,
+    cookies_file: Optional[str] = None,
+    metadata_only: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    locale: str = "en-US",
+    *,
+    selected_sections: Optional[dict[str, str]] = None,
+    on_section: Optional[Callable[[str], None]] = None,
+) -> Tuple[str, List[Dict]]:
+    """Scrape selected Spotify artist categories after explicit discovery."""
+    if selected_sections is None:
+        return _scrape_spotify_artist_legacy(
+            url,
+            on_item=on_item,
+            cookies_file=cookies_file,
+            metadata_only=metadata_only,
+            cancel_check=cancel_check,
+            locale=locale,
+        )
+
+    artist_url = _spotify_artist_base_url(url)
+    items: list[dict] = []
+    artist_name = ""
+    seen_occurrences: set[tuple[str, str, str]] = set()
+    sync_playwright = _sync_playwright_for("Spotify selected artist categories")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = browser.new_context(**_spotify_context_kwargs(
+            locale, viewport={"width": 1280, "height": 1000},
+        ))
+        page = context.new_page()
+        page.route("**/*", _block_heavy_resources)
+        try:
+            page.goto(artist_url, wait_until="load", timeout=30000)
+            try:
+                page.wait_for_selector("main h1", timeout=12000)
+            except Exception:
+                pass
+            artist_name = _spotify_artist_name_from_page(page) or "Unknown Artist"
+            discography = [
+                (key, label) for key, label in selected_sections.items()
+                if key != "appears_on"
+            ]
+            if discography and _open_spotify_discography(page, artist_url):
+                for key, label in discography:
+                    if cancel_check and cancel_check():
+                        break
+                    if on_section:
+                        on_section(key)
+                    if (
+                        label
+                        and not _select_spotify_filter(page, label)
+                        and key != "all"
+                    ):
+                        logger.warning("Spotify category filter not found: %s", label)
+                        continue
+                    items.extend(_collect_spotify_discography_tracks(
+                        page,
+                        artist_name=artist_name,
+                        section_key=key,
+                        seen_occurrences=seen_occurrences,
+                        cancel_check=cancel_check,
+                    ))
+            if "appears_on" in selected_sections and not (
+                cancel_check and cancel_check()
+            ):
+                if on_section:
+                    on_section("appears_on")
+                items.extend(_collect_spotify_appears_on(
+                    page,
+                    artist_url=artist_url,
+                    artist_name=artist_name,
+                    locale=locale,
+                    cancel_check=cancel_check,
+                ))
+        finally:
+            browser.close()
+
+    for item in items:
+        _emit_pending_track(item, on_item if metadata_only else None)
+    if not metadata_only:
+        _parallel_resolve_urls(items, on_item, cookies_file=cookies_file)
+    return artist_name or "Unknown Artist", items
 # ── YouTube Music Isolated Functions ──────────────────────────────────────────
 def scrape_ytm_playlist(url: str, on_item: Optional[Callable[[Dict], None]] = None) -> Tuple[str, List[Dict]]:
     """Dedicated entry for YouTube Music Playlists/Albums using native API for 1:1 thumbnails."""
@@ -1278,18 +1760,26 @@ def scrape_ytm_track(url: str, on_item: Optional[Callable[[Dict], None]] = None)
     except Exception as e:
         logger.error(f"[Scraper] ytmusicapi track failed: {e}. Falling back to yt-dlp.")
         return _scrape_standard_ydl(url, "ytmusic", on_item)
-def scrape_ytm_artist(url: str, on_item: Optional[Callable[[Dict], None]] = None) -> Tuple[str, List[Dict]]:
+def scrape_ytm_artist(
+    url: str,
+    on_item: Optional[Callable[[Dict], None]] = None,
+    *,
+    releases: Optional[List[Dict]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[str, List[Dict]]:
     """Dedicated entry for YTM Artist discographies."""
     from utils.ytm_scraper import fetch_ytm_artist_releases
     from concurrent.futures import ThreadPoolExecutor
 
-    releases = fetch_ytm_artist_releases(url)
+    releases = list(releases) if releases is not None else fetch_ytm_artist_releases(url)
     if not releases:
         return "Unknown Artist", []
     artist_name = releases[0].get("parent_artist", "Unknown Artist")
 
     def _fetch_one(release: Dict) -> Tuple[Dict, List, str]:
         """Fetch tracks for one release in its own YTMusic session (thread-safe)."""
+        if cancel_check and cancel_check():
+            return release, [], release.get("title", "Unknown Release")
         rel_url = release.get("url", "")
         album_title = release.get("title", "Unknown Release")
         try:
@@ -1304,6 +1794,14 @@ def scrape_ytm_artist(url: str, on_item: Optional[Callable[[Dict], None]] = None
                 p = yt.get_song(video_id)
                 if p and p.get("videoDetails"):
                     return release, [p["videoDetails"]], p["videoDetails"].get("title") or album_title
+            if "/browse/" in rel_url:
+                browse_id = rel_url.split("/browse/", 1)[1].split("?", 1)[0]
+                if browse_id.startswith("MPRE"):
+                    album = yt.get_album(browse_id)
+                    return release, album.get("tracks", []), album.get("title") or album_title
+                playlist_id = browse_id[2:] if browse_id.startswith("VL") else browse_id
+                playlist = yt.get_playlist(playlist_id)
+                return release, playlist.get("tracks", []), playlist.get("title") or album_title
         except Exception as exc:
             logger.error("[Scraper] YTM release fetch failed for %s: %s", rel_url, exc, exc_info=True)
         return release, [], album_title
@@ -1311,8 +1809,12 @@ def scrape_ytm_artist(url: str, on_item: Optional[Callable[[Dict], None]] = None
     items: List[Dict] = []
     with ThreadPoolExecutor(max_workers=5) as pool:
         for release, tracks, album_title in pool.map(_fetch_one, releases):
+            if cancel_check and cancel_check():
+                break
             total_tracks = len(tracks)
             for t_idx, track in enumerate(tracks, 1):
+                if cancel_check and cancel_check():
+                    break
                 vid = track.get("videoId")
                 if not vid:
                     continue
@@ -1338,8 +1840,14 @@ def scrape_ytm_artist(url: str, on_item: Optional[Callable[[Dict], None]] = None
                     "thumbnail_url": thumb_url,
                     "duration_sec": int(track.get("duration_seconds") or track.get("lengthSeconds") or 0),
                     "platform": "ytmusic",
-                    "release_type": release.get("type", "album"),
+                    "release_type": (
+                        "compilation"
+                        if release.get("type") == "appears_on"
+                        else release.get("type", "album")
+                    ),
                     "category": release.get("category_name", ""),
+                    "catalog_section": release.get("type", "album"),
+                    "source_id": vid,
                     "album_index": t_idx,
                     "total_tracks": total_tracks,
                 }

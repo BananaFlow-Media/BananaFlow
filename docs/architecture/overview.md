@@ -42,6 +42,20 @@ URL / search result
 
 Spotify URL metadata can be obtained through the app's Spotify scraping/resolution path. Spotify **search** can use the optional configured proxy API. Spotify audio is not downloaded from Spotify servers; metadata is used to identify a separate media source.
 
+Spotify and YouTube Music artist URLs use a staged catalog flow:
+
+```text
+artist URL
+→ background category discovery
+→ user category selection (skipped when only one exists)
+→ background expansion of selected categories
+→ plain-Python cross-category duplicate grouping
+→ per-occurrence user decisions
+→ queue
+```
+
+`core.artist_catalog` owns provider-neutral discovery models, duplicate confidence and decision application without importing Qt. `ArtistFlowController` owns the modal sequence; `ArtistCatalogDiscoveryWorker` and `ArtistCatalogScrapeWorker` keep provider/network work off the GUI thread. Stable Spotify track IDs and YouTube video IDs produce exact groups. Metadata-only comparisons are intentionally conservative and are presented as probable rather than silently removed.
+
 ### Tag Editor
 
 ```text

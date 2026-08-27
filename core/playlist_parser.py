@@ -93,7 +93,7 @@ class TrackMeta:
     artist:         str   = ""          # uploader / artist name
     album:          str   = ""          # album / playlist title
     parent_artist:  str   = ""          # cleaned root artist for organization
-    release_type:   str   = ""          # "album", "single", "playlist", or "performance"
+    release_type:   str   = ""          # album/single/playlist/performance/compilation
 
     # ── Timing ───────────────────────────────────────────────────────────────
     duration_sec:   Optional[int]   = None   # None = live / unknown

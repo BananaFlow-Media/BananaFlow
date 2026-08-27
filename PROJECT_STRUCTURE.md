@@ -55,8 +55,10 @@ The same shape repeats for search (`search_panel` →
 editing (`metadata_editor_panel` → `MetadataController` →
 one of `ui/workers/metadata_worker.py`'s `QThread` workers
 (`MetadataScanWorker`, `MetadataApplyWorker`, …) → `metadata_processor.py`),
-and channel scraping (`ChannelFlowController` → `ChannelScrapeWorker` →
-`channel_tab_discoverer.py`/`scraper.py`). `cli.py` skips the
+channel scraping (`ChannelFlowController` → `ChannelScrapeWorker` →
+`channel_tab_discoverer.py`/`scraper.py`), and staged music-service artist
+imports (`ArtistFlowController` → artist catalog workers →
+`artist_catalog.py`/`scraper.py`). `cli.py` skips the
 controller/worker/signal layers entirely and drives `core/` directly
 through the same `OrchestratorCallbacks` protocol the workers implement —
 see "Layering rule" above.
@@ -83,6 +85,8 @@ Download + resolution: `downloader.py`, `download_orchestrator.py`
 Scraping + search: `scraper.py` (Playwright scrapers for Spotify / YTM /
 YouTube channels), `search_engine.py`, `channel_tab_discoverer.py`,
 `duplicate_detector.py`, `spotify_match_scorer.py`,
+`artist_catalog.py` (Spotify/YTM category discovery models and conservative
+cross-category duplicate decisions),
 `spotify_request_builder.py` (the Spotify two-stage matching contract —
 identity, lazy resolver and admission rule — shared by the GUI and the CLI).
 
@@ -115,12 +119,16 @@ Reliability + updates: `youtube_doctor.py`, `warning_classifier.py`,
 - `dialogs/` — `styled_dialog` (theme/RTL-aware dialog toolkit),
   `update_prompt_dialog`, `youtube_doctor_dialog`, `cookie_auth_dialog`,
   `tab_select_dialog`, `conflict_resolution_dialog`,
+  `artist_catalog_dialog`, `catalog_conflict_dialog`,
   `duplicate_files_dialog`.
 - `models/` — `metadata_table_model` (Qt model for the Tag Editor table).
 - `controllers/` — `download_controller`, `fetch_controller`,
   `search_controller`, `metadata_controller`, `channel_flow_controller`.
+  Artist category selection and duplicate review live in
+  `artist_flow_controller`.
 - `workers/` — `download_worker`, `fetch_worker`, `search_worker`,
   `scraper_worker`, `channel_scrape_worker`, `thumbnail_worker`,
+  `artist_catalog_worker`,
   `clipboard_worker`, `offline_monitor`, `update_worker`,
   `component_install_worker`, `duplicate_detector_worker`,
   `metadata_worker`.

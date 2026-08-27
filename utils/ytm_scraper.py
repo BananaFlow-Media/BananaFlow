@@ -154,7 +154,7 @@ def _extract_items(data: dict, artist_name: str, item_type: str) -> List[Dict]:
                 # Decision Logic:
                 # - If it's an album/single, we prefer playlist_id to get ALL tracks.
                 # - If its a performance/video, we prefer video_id for a direct link.
-                if item_type in ("album", "single") and playlist_id:
+                if item_type in ("album", "single", "playlist", "appears_on") and playlist_id:
                     final_id = playlist_id
                     final_url = f"https://www.youtube.com/playlist?list={playlist_id}"
                 elif video_id:
@@ -186,7 +186,7 @@ def _extract_items(data: dict, artist_name: str, item_type: str) -> List[Dict]:
                         "type": item_type,
                         "artist": artist_name,
                         "parent_artist": artist_name,
-                        "album": title if item_type == "album" else "",
+                        "album": title,
                     })
                 return
 
@@ -284,16 +284,50 @@ def _drain_shelf(browse_id: str, params: Optional[str], artist_name: str, item_t
 
     return items
 
-def fetch_ytm_artist_releases(artist_url: str) -> List[Dict]:
+_ARTIST_SHELF_TYPES = {
+    "אלבומים": "album",
+    "Albums": "album",
+    "סינגלים": "single",
+    "Singles": "single",
+    "סרטונים": "video",
+    "Videos": "video",
+    "הופעות": "performance",
+    "Performances": "performance",
+    "Live": "performance",
+    "פלייליסטים": "playlist",
+    "Playlists": "playlist",
+    "מופיע ב": "appears_on",
+    "Featured on": "appears_on",
+}
+
+_CATEGORY_NAMES = {
+    "album": "אלבומים",
+    "single": "סינגלים ו-EP",
+    "performance": "הופעות חיות",
+    "video": "סרטונים",
+    "playlist": "פלייליסטים",
+    "appears_on": "מופיע באוספים",
+}
+
+
+def discover_ytm_artist_catalog(
+    artist_url: str,
+) -> tuple[str, dict[str, List[Dict]]]:
+    """Discover every supported shelf and its releases for one YTM artist.
+
+    Unlike :func:`fetch_ytm_artist_releases`, this discovery entry point keeps
+    video/playlist/featured shelves so the GUI can present the categories to
+    the user instead of silently choosing on their behalf.
+    """
     # Parse artist ID
     artist_id = _resolve_ytm_artist_id(artist_url)
     if not artist_id:
-        return []
+        return "", {}
 
     print(f"[YTM] Fetching artist page: {artist_id}")
     main_data = _call_api(artist_id)
     if not main_data:
-        return []
+        return "", {}
 
     # Extract dynamic visitorData from response context to maintain session state
     visitor_data = main_data.get("responseContext", {}).get("visitorData")
@@ -303,38 +337,25 @@ def fetch_ytm_artist_releases(artist_url: str) -> List[Dict]:
     hdr_r = header.get("musicVisualHeaderRenderer") or header.get("musicImmersiveHeaderRenderer") or {}
     artist_name = _clean_name(hdr_r.get("title", {}).get("runs", [{}])[0].get("text", "Unknown Artist"))
 
-    all_results = []       # Final list
-    added_ids_per_type = {}  # type -> set(id)  –  deduplicate within each category only
+    sections: dict[str, List[Dict]] = {}
+    added_ids_per_type: dict[str, set[str]] = {}
 
     def _add_items(items: List[Dict]):
         for item in items:
             t = item["type"]
-            # Opt-out of generic "video" shelf when downloading full artist
-            if t == "video":
-                continue
             if item["id"] not in added_ids_per_type.get(t, set()):
                 added_ids_per_type.setdefault(t, set()).add(item["id"])
-                all_results.append(item)
+                item["category_name"] = _CATEGORY_NAMES.get(t, t)
+                sections.setdefault(t, []).append(item)
 
     # ── Step 1: Walk the main page and collect every shelf ─────────────────────
-    # Map Hebrew shelf title → internal type
-    SHELF_TYPES = {
-        "אלבומים": "album",
-        "סינגלים": "single",
-        "סרטונים": "video",
-        "הופעות": "performance",
-        "Live": "performance",
-    }
-
     def _shelf_type(text: str) -> Optional[str]:
-        for key, val in SHELF_TYPES.items():
+        for key, val in _ARTIST_SHELF_TYPES.items():
             if key in text:
                 return val
         return None
 
     shelves: List[tuple] = []   # (item_type, shelf_renderer, label)
-    bonus_playlists: List[tuple] = []  # (item_type, playlist_id, label)
-
     def _collect_sources(obj):
         if isinstance(obj, dict):
             # Standard carousel shelf
@@ -384,11 +405,30 @@ def fetch_ytm_artist_releases(artist_url: str) -> List[Dict]:
         else:
             print(f"[YTM]    -> No See-All (using {len(immediate)} carousel items)")
 
-    # ── Step 3: Removed bonus playlists per user request ──────────
-
     counts = {}
-    for it in all_results:
-        counts[it["type"]] = counts.get(it["type"], 0) + 1
-    print(f"[YTM] Total: {len(all_results)} items – {counts}")
+    for key, releases in sections.items():
+        counts[key] = len(releases)
+    print(f"[YTM] Total: {sum(counts.values())} items – {counts}")
+
+    ordered = {
+        key: sections[key]
+        for key in TYPE_ORDER + ["playlist", "appears_on"]
+        if sections.get(key)
+    }
+    return artist_name, ordered
+
+
+def fetch_ytm_artist_releases(artist_url: str) -> List[Dict]:
+    """Backward-compatible full-discography release list.
+
+    Existing headless/direct callers retain the historical albums + singles +
+    performances behavior.  The GUI uses ``discover_ytm_artist_catalog`` and
+    makes video/playlist categories explicit choices instead.
+    """
+
+    _artist_name, sections = discover_ytm_artist_catalog(artist_url)
+    all_results: List[Dict] = []
+    for key in ("album", "single", "performance"):
+        all_results.extend(sections.get(key, []))
 
     return all_results

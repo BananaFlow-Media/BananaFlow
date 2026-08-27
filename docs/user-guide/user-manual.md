@@ -38,6 +38,12 @@ BananaFlow gives you one desktop app for:
 
 Completed downloads are written to your chosen folder and added to History.
 
+### Importing a whole artist or YouTube channel
+
+When you paste a YouTube channel URL, BananaFlow discovers the channel tabs and asks which ones to scan (for example Videos or Playlists). When you paste a Spotify or YouTube Music artist URL, it similarly discovers the categories that actually exist for that artist—such as Albums, Singles & EPs, Live performances, Videos, Compilations or Appears On. If only one importable category exists, BananaFlow scans it automatically; otherwise you choose one or more categories first.
+
+After the selected categories are scanned, BananaFlow checks for the same recording appearing in multiple selected locations. Exact provider IDs are treated as exact matches; a conservative title/artist/duration comparison may be shown as a probable match for review. For every group you can keep only one category, keep both/all occurrences, clear all, or adjust each occurrence separately. A Live, Remix or Remaster title is not silently merged with a differently named studio version.
+
 ## 4. Spotify: link import and text search are different
 
 ### Pasting a Spotify link
@@ -65,6 +71,8 @@ A higher bitrate cannot restore quality that was already missing from the origin
 The default output location is under `Downloads/BananaFlow`, unless you change it in Settings. Collections such as playlists/albums can be organized into subfolders and numbered automatically.
 
 When BananaFlow finds an existing file, the duplicate policy can skip, warn or overwrite according to your settings and the current workflow. Read the prompt before confirming an overwrite.
+
+The artist/channel duplicate review described above happens before items enter the queue and controls which source locations are imported. It is separate from the existing-file policy, which runs later against files already present in the output folder.
 
 ## 7. Search
 
