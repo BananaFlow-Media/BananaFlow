@@ -1463,6 +1463,108 @@ def _spotify_album_position(item: dict, fallback: int) -> int:
     return position if position > 0 else fallback
 
 
+def _spotify_duration_text(duration_sec: object) -> str:
+    try:
+        seconds = int(duration_sec or 0)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return ""
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return (
+        f"{hours}:{minutes:02d}:{seconds:02d}"
+        if hours else f"{minutes}:{seconds:02d}"
+    )
+
+
+def _hydrate_spotify_artist_release_metadata(
+    items: list[dict],
+    *,
+    locale: str,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    max_workers: int = 5,
+) -> None:
+    """Fill Spotify artwork and duration from release-scoped embed data.
+
+    Artist discography grids currently expose stable track/release IDs but do
+    not render cover art or duration in their row DOM.  Public release embeds
+    contain both.  Fetch each selected stable release once, in a bounded pool,
+    then join by track ID (or release position as a conservative fallback).
+    Existing non-empty metadata is never replaced.
+    """
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        release_id = str(item.get("source_release_id") or "").strip()
+        needs_artwork = not str(item.get("thumbnail_url") or "").strip()
+        try:
+            needs_duration = int(item.get("duration_sec") or 0) <= 0
+        except (TypeError, ValueError):
+            needs_duration = True
+        if release_id and (needs_artwork or needs_duration):
+            groups.setdefault(release_id, []).append(item)
+    if not groups or (cancel_check and cancel_check()):
+        return
+
+    from concurrent.futures import ThreadPoolExecutor
+    from utils.spotify_resolver import SpotifyResolver
+
+    worker_count = max(1, min(int(max_workers or 1), len(groups)))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = {
+            release_id: pool.submit(
+                SpotifyResolver._embed_fallback,
+                "album",
+                release_id,
+                locale=locale,
+            )
+            for release_id in groups
+        }
+        for release_id, release_items in groups.items():
+            if cancel_check and cancel_check():
+                for future in futures.values():
+                    future.cancel()
+                break
+            try:
+                metadata_rows = futures[release_id].result()
+            except Exception as exc:
+                logger.warning(
+                    "Spotify release metadata %s failed: %s", release_id, exc,
+                )
+                continue
+
+            by_track_id = {
+                str(row.get("spotify_id") or "").strip(): row
+                for row in metadata_rows
+                if str(row.get("spotify_id") or "").strip()
+            }
+            by_position = {
+                _spotify_album_position(row, position): row
+                for position, row in enumerate(metadata_rows, start=1)
+            }
+            for item in release_items:
+                spotify_id = str(item.get("spotify_id") or "").strip()
+                position = _spotify_album_position(item, 0)
+                metadata = by_track_id.get(spotify_id) or by_position.get(position)
+                if not metadata:
+                    continue
+                if not item.get("thumbnail_url") and metadata.get("thumbnail_url"):
+                    item["thumbnail_url"] = _ensure_high_res_spotify_image(
+                        str(metadata["thumbnail_url"]),
+                    )
+                try:
+                    current_duration = int(item.get("duration_sec") or 0)
+                except (TypeError, ValueError):
+                    current_duration = 0
+                try:
+                    provider_duration = int(metadata.get("duration_sec") or 0)
+                except (TypeError, ValueError):
+                    provider_duration = 0
+                if current_duration <= 0 and provider_duration > 0:
+                    item["duration_sec"] = provider_duration
+                    item["duration_str"] = _spotify_duration_text(provider_duration)
+
+
 class _SpotifyArtistReleaseRegistry:
     """Canonicalize stable releases across artist discovery roles.
 
@@ -1902,6 +2004,11 @@ def scrape_spotify_artist(
         finally:
             browser.close()
 
+    _hydrate_spotify_artist_release_metadata(
+        items,
+        locale=locale,
+        cancel_check=cancel_check,
+    )
     for item in items:
         _emit_pending_track(item, on_item if metadata_only else None)
     if not metadata_only:

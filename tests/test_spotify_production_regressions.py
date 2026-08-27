@@ -35,6 +35,40 @@ def _embed_html(track_id: str) -> str:
     )
 
 
+def _album_embed_html() -> str:
+    entity = {
+        "type": "album",
+        "id": "release-1",
+        "uri": "spotify:album:release-1",
+        "name": "Release",
+        "visualIdentity": {"image": [
+            {
+                "url": "https://image.spotify.invalid/cover-300.jpg",
+                "maxWidth": 300,
+                "maxHeight": 300,
+            },
+            {
+                "url": "https://image.spotify.invalid/cover-640.jpg",
+                "maxWidth": 640,
+                "maxHeight": 640,
+            },
+        ]},
+        "trackList": [{
+            "title": "Song",
+            "subtitle": "Artist",
+            "uri": "spotify:track:track1",
+            "uid": "not-the-provider-track-id",
+            "duration": 242000,
+        }],
+    }
+    payload = {"props": {"pageProps": {"state": {"data": {"entity": entity}}}}}
+    return (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(payload)
+        + "</script>"
+    )
+
+
 @pytest.mark.parametrize(
     ("track_id", "title", "artists", "duration"),
     [
@@ -149,6 +183,35 @@ def test_artwork_failure_is_nonfatal_to_structured_track_metadata():
     assert metadata["title"] == "Shallow"
     assert metadata["artist_credits"] == ["Lady Gaga", "Bradley Cooper"]
     assert metadata["thumbnail_url"] == ""
+
+
+def test_album_embed_returns_square_provider_artwork_duration_and_track_id(
+    monkeypatch,
+):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return _album_embed_html().encode("utf-8")
+
+    monkeypatch.setattr(
+        "utils.spotify_resolver.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    rows = SpotifyResolver._embed_fallback("album", "release-1")
+
+    assert len(rows) == 1
+    assert rows[0]["spotify_id"] == "track1"
+    assert rows[0]["spotify_url"].endswith("/track/track1")
+    assert rows[0]["thumbnail_url"].endswith("cover-640.jpg")
+    assert rows[0]["duration_sec"] == 242
+    assert rows[0]["album_index"] == 1
 
 
 def test_inconclusive_strict_path_invokes_general_fallback_and_ranks_real_candidates(
@@ -310,6 +373,30 @@ def test_valid_spotify_strict_miss_uses_legacy_search_and_does_not_block_peer(
 
 
 pytestmark_qt = pytest.mark.skipif(os.name != "nt", reason="Qt queue regression is Windows-only")
+
+
+@pytestmark_qt
+def test_spotify_queue_card_square_crops_provider_artwork_and_shows_duration():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QColor, QPixmap
+    from PySide6.QtWidgets import QApplication
+    from ui.components.track_card import TrackCard
+
+    app = QApplication.instance() or QApplication([])
+    card = TrackCard(
+        "Song", "Artist", duration="4:02", platform="spotify",
+        thumbnail_url="https://image.spotify.invalid/cover.jpg",
+    )
+    landscape = QPixmap(160, 90)
+    landscape.fill(QColor("#663399"))
+
+    card.set_thumbnail(landscape)
+
+    assert card._thumb_lbl.width() == card._thumb_lbl.height() == 64
+    assert card._thumb_lbl.pixmap().width() == 64
+    assert card._thumb_lbl.pixmap().height() == 64
+    assert card._dur_badge.text() == "4:02"
+    app.processEvents()
 
 
 @pytestmark_qt

@@ -2,6 +2,7 @@
 
 from core.scraper import (
     _SpotifyArtistReleaseRegistry,
+    _hydrate_spotify_artist_release_metadata,
     _spotify_album_position,
     _spotify_album_id_from_url,
     _spotify_artist_base_url,
@@ -140,6 +141,69 @@ def test_spotify_album_position_survives_appears_on_credit_filtering():
     assert _spotify_album_position({"album_index": 3}, 1) == 3
     assert _spotify_album_position({"album_index": ""}, 2) == 2
     assert _spotify_album_position({"album_index": "invalid"}, 4) == 4
+
+
+def test_spotify_artist_release_metadata_hydrates_artwork_and_duration(monkeypatch):
+    from utils.spotify_resolver import SpotifyResolver
+
+    items = [{
+        "title": "Second",
+        "spotify_id": "track-2",
+        "source_release_id": "release-1",
+        "album_index": 2,
+        "thumbnail_url": "",
+        "duration_sec": 0,
+        "duration_str": "",
+    }]
+    release_rows = [{
+        "title": "First", "spotify_id": "track-1", "album_index": 1,
+        "thumbnail_url": "https://image.spotify.invalid/cover-640.jpg",
+        "duration_sec": 181,
+    }, {
+        "title": "Second", "spotify_id": "track-2", "album_index": 2,
+        "thumbnail_url": "https://image.spotify.invalid/cover-640.jpg",
+        "duration_sec": 242,
+    }]
+    monkeypatch.setattr(
+        SpotifyResolver, "_embed_fallback",
+        lambda *_args, **_kwargs: [dict(row) for row in release_rows],
+    )
+
+    _hydrate_spotify_artist_release_metadata(
+        items, locale="he-IL", max_workers=1,
+    )
+
+    assert items[0]["thumbnail_url"].endswith("cover-640.jpg")
+    assert items[0]["duration_sec"] == 242
+    assert items[0]["duration_str"] == "4:02"
+
+
+def test_spotify_artist_hydration_never_replaces_existing_provider_metadata(
+    monkeypatch,
+):
+    from utils.spotify_resolver import SpotifyResolver
+
+    calls = []
+    monkeypatch.setattr(
+        SpotifyResolver, "_embed_fallback",
+        lambda *_args, **_kwargs: calls.append(True) or [],
+    )
+    items = [{
+        "spotify_id": "track-1",
+        "source_release_id": "release-1",
+        "album_index": 1,
+        "thumbnail_url": "https://image.spotify.invalid/original.jpg",
+        "duration_sec": 200,
+        "duration_str": "3:20",
+    }]
+
+    _hydrate_spotify_artist_release_metadata(
+        items, locale="en-US", max_workers=1,
+    )
+
+    assert calls == []
+    assert items[0]["thumbnail_url"].endswith("original.jpg")
+    assert items[0]["duration_str"] == "3:20"
 
 
 def test_direct_spotify_artist_import_discovers_sections_without_legacy_paths(
