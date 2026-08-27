@@ -169,6 +169,14 @@ IMPACT_RULES = (
         ),
     ),
     ImpactRule(
+        "URL/import catalogs",
+        (r"^core/(?:artist_catalog|playlist_parser)\.py$",),
+        review_required=(
+            "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
+            "docs/architecture/overview.md", "PRIVACY.md",
+        ),
+    ),
+    ImpactRule(
         "Tag Editor safety",
         (
             r"^core/(?:metadata_|undo_applied_batch|restore_preview|change_drafts|tag_actions|backup_manager)",

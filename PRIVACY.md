@@ -16,8 +16,8 @@ The exact requests depend on selected features and configuration.
 
 | Service | When used | Data normally sent |
 |---|---|---|
-| YouTube / YouTube Music | Search, metadata/extraction, downloads, channel/listing work, authenticated items when enabled | URLs/IDs, search terms, request headers and configured YouTube session cookies only when required |
-| Spotify web pages | Resolving/importing Spotify track/album/playlist/artist metadata through the browser-backed scraper | Spotify URL/ID and normal browser request metadata |
+| YouTube / YouTube Music | Search, metadata/extraction, downloads, channel/listing work, artist-category discovery, authenticated items when enabled | URLs/IDs, search terms, selected artist-category requests, request headers and configured YouTube session cookies only when required |
+| Spotify web pages | Resolving/importing Spotify track/album/playlist/artist metadata, including artist-category discovery and selected-category expansion, through the browser-backed scraper | Spotify URL/ID, selected public artist categories and normal browser request metadata |
 | User-configured Spotify search proxy | Spotify **search** in the Search panel | Search query, requested result limit and optional `X-App-Token` |
 | BananaFlow official website | Opening the application download page after the user approves that action | Requested localized download page and normal connection metadata; the website publishes its own privacy information |
 | GitHub API / Releases | App update checks, an explicitly approved packaged-component update, and (after such an update) a control-manifest refresh at most once per 24 hours before reusing its overlay | Repository/version/asset request, downloaded public component manifest/bundle and normal connection metadata |
@@ -29,6 +29,8 @@ The exact requests depend on selected features and configuration.
 | Other user-selected sites supported by yt-dlp/generic extraction | URL inspection/download | Selected URL and the headers/cookies explicitly configured for that operation |
 
 Spotify audio is not downloaded from Spotify servers. Spotify metadata is used to identify a separate source, normally YouTube/YouTube Music.
+
+For an artist import, category discovery reads the public sections exposed by the selected artist page. Only categories selected by the user are expanded into tracks. Duplicate comparison and the user's keep/remove decisions happen locally before queue insertion and are not uploaded to BananaFlow.
 
 ### Spotify search vs Spotify URL import
 
