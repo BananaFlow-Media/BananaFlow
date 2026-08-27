@@ -166,6 +166,60 @@ def test_selected_ytm_categories_are_the_only_releases_scraped(monkeypatch):
     assert tracks[0]["source_url"] == discovery.url
 
 
+def test_ytm_release_found_in_two_selected_shelves_is_expanded_once(monkeypatch):
+    discovery = ArtistCatalogDiscovery(
+        url="https://music.youtube.com/channel/UC1",
+        platform=SourcePlatform.YOUTUBE_MUSIC,
+        artist_name="Artist",
+        sections=[
+            ArtistCatalogSection("album", releases=({
+                "id": "MPRE-release", "type": "album", "title": "Release",
+            },)),
+            ArtistCatalogSection("single", releases=({
+                "id": "MPRE-release", "type": "single", "title": "Release",
+            },)),
+        ],
+    )
+    captured = {}
+
+    def fake_scrape(_url, **kwargs):
+        captured["releases"] = kwargs["releases"]
+        return "Artist", []
+
+    monkeypatch.setattr("core.scraper.scrape_ytm_artist", fake_scrape)
+
+    scrape_artist_catalog(discovery, ["album", "single"])
+
+    assert len(captured["releases"]) == 1
+    assert captured["releases"][0]["id"] == "MPRE-release"
+    assert captured["releases"][0]["type"] == "album"
+    assert captured["releases"][0]["discovery_roles"] == ["album", "single"]
+
+
+def test_ytm_same_named_releases_without_ids_are_not_merged(monkeypatch):
+    discovery = ArtistCatalogDiscovery(
+        url="https://music.youtube.com/channel/UC1",
+        platform=SourcePlatform.YOUTUBE_MUSIC,
+        artist_name="Artist",
+        sections=[
+            ArtistCatalogSection("album", releases=({"title": "Greatest Hits"},)),
+            ArtistCatalogSection("single", releases=({"title": "Greatest Hits"},)),
+        ],
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "core.scraper.scrape_ytm_artist",
+        lambda _url, **kwargs: captured.setdefault("result", (
+            "Artist", kwargs["releases"],
+        )),
+    )
+
+    tracks = scrape_artist_catalog(discovery, ["album", "single"])
+
+    assert len(tracks) == 2
+    assert [track["type"] for track in tracks] == ["album", "single"]
+
+
 def test_selected_spotify_labels_are_forwarded_and_pending(monkeypatch):
     discovery = ArtistCatalogDiscovery(
         url="https://open.spotify.com/artist/abc",

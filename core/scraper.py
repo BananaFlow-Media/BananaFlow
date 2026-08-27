@@ -1219,6 +1219,7 @@ _SPOTIFY_CATEGORY_NAMES = {
     "all": "דיסקוגרפיה",
     "album": "אלבומים",
     "single": "סינגלים ו-EP",
+    "ep": "סינגלים ו-EP",
     "compilation": "אוספים",
     "appears_on": "מופיע באוספים",
 }
@@ -1388,16 +1389,21 @@ def _select_spotify_filter(page, provider_label: str) -> bool:
 
 
 def _spotify_release_type(section_key: str, metadata: str, total_tracks: int) -> str:
+    lower = str(metadata or "").casefold()
+    explicit_labels = (
+        ("compilation", r"(?:^|\n)\s*(?:compilation|אוסף)\s*(?:[·•|]|$)"),
+        ("album", r"(?:^|\n)\s*(?:album|אלבום)\s*(?:[·•|]|$)"),
+        ("single", r"(?:^|\n)\s*(?:single|סינגל)\s*(?:[·•|]|$)"),
+        ("ep", r"(?:^|\n)\s*ep\s*(?:[·•|]|$)"),
+    )
+    for release_type, pattern in explicit_labels:
+        if re.search(pattern, lower):
+            return release_type
     if section_key == "compilation":
         return "compilation"
     if section_key == "album":
         return "album"
     if section_key in {"single", "all"}:
-        lower = str(metadata or "").casefold()
-        if "album" in lower or "אלבום" in lower:
-            return "album"
-        if "compilation" in lower or "אוסף" in lower:
-            return "compilation"
         return "ep" if "ep" in lower or total_tracks > 1 else "single"
     return section_key
 
@@ -1425,15 +1431,123 @@ def _spotify_release_id_from_grid(grid) -> str:
     return _spotify_album_id_from_url(href)
 
 
+def _spotify_release_occurrence_key(
+    *,
+    section_key: str,
+    release_id: str,
+    release_title: str,
+    spotify_id: str,
+    position: int,
+    track_title: str,
+) -> tuple[str, int, str]:
+    """Identify one placement without merging legitimate repeated tracks."""
+    if release_id:
+        release_scope = f"id:{release_id}"
+    else:
+        normalized_release = re.sub(
+            r"\s+", " ", str(release_title or "").strip().casefold(),
+        )
+        release_scope = f"fallback:{section_key}:{normalized_release}"
+    normalized_track = re.sub(
+        r"\s+", " ", str(track_title or "").strip().casefold(),
+    )
+    return release_scope, int(position or 0), spotify_id or normalized_track
+
+
+def _spotify_album_position(item: dict, fallback: int) -> int:
+    """Keep the original album position after filtering an embedded release."""
+    try:
+        position = int(item.get("album_index") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+    return position if position > 0 else fallback
+
+
+class _SpotifyArtistReleaseRegistry:
+    """Canonicalize stable releases across artist discovery roles.
+
+    A complete release is expanded only under its first selected role.  An
+    incomplete release may be revisited under another role so a transient or
+    virtualized partial grid cannot turn deduplication into missing tracks.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, dict] = {}
+
+    @staticmethod
+    def _sync_roles(entry: dict) -> None:
+        roles = list(entry["discovery_roles"])
+        for item in entry["items"]:
+            item["discovery_roles"] = list(roles)
+
+    def begin(
+        self,
+        release_id: str,
+        discovery_role: str,
+    ) -> tuple[bool, str, list[str]]:
+        """Return whether to scan plus canonical section and known roles."""
+        stable_id = str(release_id or "").strip()
+        if not stable_id:
+            return True, discovery_role, [discovery_role]
+        entry = self._entries.get(stable_id)
+        if entry is None:
+            return True, discovery_role, [discovery_role]
+
+        if discovery_role not in entry["discovery_roles"]:
+            entry["discovery_roles"].append(discovery_role)
+            self._sync_roles(entry)
+        expected = int(entry["expected_total"] or 0)
+        complete = expected > 0 and len(entry["items"]) >= expected
+        should_scan = entry["canonical_section"] == discovery_role or not complete
+        return (
+            should_scan,
+            str(entry["canonical_section"]),
+            list(entry["discovery_roles"]),
+        )
+
+    def commit(
+        self,
+        release_id: str,
+        canonical_section: str,
+        discovery_roles: list[str],
+        items: list[dict],
+        *,
+        expected_total: int = 0,
+    ) -> None:
+        stable_id = str(release_id or "").strip()
+        if not stable_id:
+            return
+        entry = self._entries.get(stable_id)
+        if entry is None:
+            if not items:
+                return
+            entry = {
+                "canonical_section": canonical_section,
+                "discovery_roles": [],
+                "items": [],
+                "expected_total": 0,
+            }
+            self._entries[stable_id] = entry
+        for role in discovery_roles:
+            if role not in entry["discovery_roles"]:
+                entry["discovery_roles"].append(role)
+        entry["items"].extend(items)
+        entry["expected_total"] = max(
+            int(entry["expected_total"] or 0), int(expected_total or 0),
+        )
+        self._sync_roles(entry)
+
+
 def _collect_spotify_discography_tracks(
     page,
     *,
     artist_name: str,
     section_key: str,
-    seen_occurrences: set[tuple[str, str, str]],
+    seen_occurrences: set[tuple[str, int, str]],
+    release_registry: _SpotifyArtistReleaseRegistry,
     cancel_check: Optional[Callable[[], bool]],
 ) -> list[dict]:
-    """Collect visible track-list grids while preserving cross-section copies."""
+    """Collect grids while canonicalizing stable releases across sections."""
     items: list[dict] = []
     stagnant_count = 0
     try:
@@ -1463,6 +1577,12 @@ def _collect_spotify_discography_tracks(
             rows = grid.locator("div[data-testid='tracklist-row']").all()
             if not rows:
                 continue
+            last_track = rows[-1]
+            should_scan, canonical_section, discovery_roles = release_registry.begin(
+                release_id, section_key,
+            )
+            if not should_scan:
+                continue
             try:
                 container = grid.evaluate_handle(
                     "el => el.closest('div:has(h1), div:has(h2), div:has(img), "
@@ -1474,16 +1594,31 @@ def _collect_spotify_discography_tracks(
                     metadata.casefold(),
                 )
                 total_tracks = int(count_match.group(1)) if count_match else len(rows)
+                declared_total_tracks = (
+                    int(count_match.group(1)) if count_match else 0
+                )
                 thumb = grid.evaluate(
                     "el => el.closest('section, div')?.querySelector('img')?.src || ''"
                 ) or ""
             except Exception:
-                metadata, total_tracks, thumb = "", len(rows), ""
-            release_type = _spotify_release_type(section_key, metadata, total_tracks)
-            category = _SPOTIFY_CATEGORY_NAMES.get(section_key, section_key)
-            if section_key == "all":
+                metadata, total_tracks, declared_total_tracks, thumb = "", len(rows), 0, ""
+            release_type = _spotify_release_type(
+                canonical_section, metadata, total_tracks,
+            )
+            catalog_section = (
+                "single"
+                if release_type == "ep"
+                else release_type
+                if release_type in _SPOTIFY_CATEGORY_NAMES
+                else canonical_section
+            )
+            category = _SPOTIFY_CATEGORY_NAMES.get(
+                catalog_section, catalog_section,
+            )
+            if catalog_section == "all":
                 category = _SPOTIFY_CATEGORY_NAMES.get(release_type, "דיסקוגרפיה")
 
+            grid_items: list[dict] = []
             for position, row in enumerate(rows, start=1):
                 last_track = row
                 try:
@@ -1494,14 +1629,16 @@ def _collect_spotify_discography_tracks(
                     track_title = title_el.inner_text().strip()
                     href = (link.get_attribute("href") or "") if link.count() else ""
                     spotify_id = _spotify_id_from_url(href)
-                    occurrence = (
-                        section_key,
-                        release_id or release_title.casefold(),
-                        spotify_id or f"{position}:{track_title.casefold()}",
+                    occurrence = _spotify_release_occurrence_key(
+                        section_key=canonical_section,
+                        release_id=release_id,
+                        release_title=release_title,
+                        spotify_id=spotify_id,
+                        position=position,
+                        track_title=track_title,
                     )
                     if occurrence in seen_occurrences:
                         continue
-                    seen_occurrences.add(occurrence)
                     artist_links = row.locator("a[href*='/artist/']").all()
                     artist_credits = _read_spotify_artist_credits(artist_links, page)
                     track_title, artist, artist_credits = _validated_spotify_display_metadata(
@@ -1523,7 +1660,8 @@ def _collect_spotify_discography_tracks(
                         "album": release_title,
                         "parent_artist": artist_name,
                         "category": category,
-                        "catalog_section": section_key,
+                        "catalog_section": catalog_section,
+                        "discovery_roles": list(discovery_roles),
                         "source_release_id": release_id,
                         "release_type": release_type,
                         "album_index": position,
@@ -1539,10 +1677,19 @@ def _collect_spotify_discography_tracks(
                             if spotify_id else ""
                         ),
                     }
+                    seen_occurrences.add(occurrence)
                     items.append(item)
+                    grid_items.append(item)
                     added_any = True
                 except Exception as exc:
                     logger.debug("Spotify artist row skipped: %s", exc)
+            release_registry.commit(
+                release_id,
+                canonical_section,
+                discovery_roles,
+                grid_items,
+                expected_total=declared_total_tracks,
+            )
         stagnant_count = 0 if added_any else stagnant_count + 1
         if last_track:
             last_track.scroll_into_view_if_needed()
@@ -1568,6 +1715,8 @@ def _collect_spotify_appears_on(
     artist_url: str,
     artist_name: str,
     locale: str,
+    seen_occurrences: set[tuple[str, int, str]],
+    release_registry: _SpotifyArtistReleaseRegistry,
     cancel_check: Optional[Callable[[], bool]],
 ) -> list[dict]:
     """Expand Appears On release cards and retain tracks credited to the artist."""
@@ -1598,6 +1747,11 @@ def _collect_spotify_appears_on(
     for album_id, album_title in album_ids.items():
         if cancel_check and cancel_check():
             break
+        should_scan, canonical_section, discovery_roles = release_registry.begin(
+            album_id, "appears_on",
+        )
+        if not should_scan:
+            continue
         try:
             release_tracks = SpotifyResolver._embed_fallback(
                 "album", album_id, locale=locale,
@@ -1609,20 +1763,54 @@ def _collect_spotify_appears_on(
             item for item in release_tracks
             if _spotify_credit_matches_artist(item, artist_name)
         ]
-        for position, item in enumerate(matching, start=1):
+        release_items: list[dict] = []
+        for fallback_position, item in enumerate(matching, start=1):
+            position = _spotify_album_position(item, fallback_position)
+            occurrence = _spotify_release_occurrence_key(
+                section_key=canonical_section,
+                release_id=album_id,
+                release_title=album_title,
+                spotify_id=str(item.get("spotify_id") or ""),
+                position=position,
+                track_title=str(item.get("title") or ""),
+            )
+            if occurrence in seen_occurrences:
+                continue
+            seen_occurrences.add(occurrence)
+            release_type = (
+                "compilation"
+                if canonical_section == "appears_on"
+                else _spotify_release_type(canonical_section, "", len(matching))
+            )
+            category = _SPOTIFY_CATEGORY_NAMES.get(
+                canonical_section, canonical_section,
+            )
+            if canonical_section == "all":
+                category = _SPOTIFY_CATEGORY_NAMES.get(
+                    release_type, "דיסקוגרפיה",
+                )
             item.update({
                 "album": album_title,
                 "parent_artist": artist_name,
-                "category": _SPOTIFY_CATEGORY_NAMES["appears_on"],
-                "catalog_section": "appears_on",
+                "category": category,
+                "catalog_section": canonical_section,
+                "discovery_roles": list(discovery_roles),
                 "source_release_id": album_id,
-                "release_type": "compilation",
+                "release_type": release_type,
                 "album_index": position,
                 "total_tracks": len(matching),
                 "platform": "spotify",
                 "url": "",
             })
             items.append(item)
+            release_items.append(item)
+        release_registry.commit(
+            album_id,
+            canonical_section,
+            discovery_roles,
+            release_items,
+            expected_total=len(matching),
+        )
     return items
 
 
@@ -1638,20 +1826,23 @@ def scrape_spotify_artist(
     on_section: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, List[Dict]]:
     """Scrape selected Spotify artist categories after explicit discovery."""
+    discovered_artist = ""
     if selected_sections is None:
-        return _scrape_spotify_artist_legacy(
-            url,
-            on_item=on_item,
-            cookies_file=cookies_file,
-            metadata_only=metadata_only,
-            cancel_check=cancel_check,
-            locale=locale,
+        discovered_artist, discovered_sections = discover_spotify_artist_sections(
+            url, locale=locale,
         )
+        selected_sections = {
+            str(section["key"]): str(section.get("provider_label") or "")
+            for section in discovered_sections
+        }
+    if not selected_sections:
+        return discovered_artist or "Unknown Artist", []
 
     artist_url = _spotify_artist_base_url(url)
     items: list[dict] = []
     artist_name = ""
-    seen_occurrences: set[tuple[str, str, str]] = set()
+    seen_occurrences: set[tuple[str, int, str]] = set()
+    release_registry = _SpotifyArtistReleaseRegistry()
     sync_playwright = _sync_playwright_for("Spotify selected artist categories")
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -1691,6 +1882,7 @@ def scrape_spotify_artist(
                         artist_name=artist_name,
                         section_key=key,
                         seen_occurrences=seen_occurrences,
+                        release_registry=release_registry,
                         cancel_check=cancel_check,
                     ))
             if "appears_on" in selected_sections and not (
@@ -1703,6 +1895,8 @@ def scrape_spotify_artist(
                     artist_url=artist_url,
                     artist_name=artist_name,
                     locale=locale,
+                    seen_occurrences=seen_occurrences,
+                    release_registry=release_registry,
                     cancel_check=cancel_check,
                 ))
         finally:
@@ -1879,6 +2073,10 @@ def scrape_ytm_artist(
                     ),
                     "category": release.get("category_name", ""),
                     "catalog_section": release.get("type", "album"),
+                    "discovery_roles": list(
+                        release.get("discovery_roles")
+                        or [release.get("type", "album")]
+                    ),
                     "source_release_id": release.get("id", ""),
                     "source_id": vid,
                     "album_index": t_idx,

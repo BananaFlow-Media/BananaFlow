@@ -133,13 +133,9 @@ def scrape_artist_catalog(
     if discovery.platform == SourcePlatform.YOUTUBE_MUSIC:
         from core.scraper import scrape_ytm_artist
 
-        releases: list[dict] = []
-        for section in discovery.sections:
-            if section.key not in selected:
-                continue
-            if on_section:
-                on_section(section.key)
-            releases.extend(dict(release) for release in section.releases)
+        releases = _canonical_selected_releases(
+            discovery.sections, selected, on_section=on_section,
+        )
         _title, tracks = scrape_ytm_artist(
             discovery.url,
             releases=releases,
@@ -184,6 +180,55 @@ def scrape_artist_catalog(
                 track["url"] = f"ytsearch1:{query} audio"
             track.setdefault("match_status", "pending")
     return deduplicate_catalog_occurrences(tracks)
+
+
+def _canonical_selected_releases(
+    sections: Iterable[ArtistCatalogSection],
+    selected: set[str],
+    *,
+    on_section: Optional[Callable[[str], None]] = None,
+) -> list[dict]:
+    """Return each stable provider release once while retaining shelf roles.
+
+    A release may be advertised in more than one artist shelf.  Its stable
+    provider ID is the identity; the shelf is discovery provenance, not part
+    of that identity.  Releases without a stable ID remain separate because a
+    title-only merge could erase two legitimate same-named editions.
+    """
+    releases: list[dict] = []
+    by_id: dict[str, dict] = {}
+    for section in sections:
+        if section.key not in selected:
+            continue
+        if on_section:
+            on_section(section.key)
+        for raw_release in section.releases:
+            release = dict(raw_release)
+            release.setdefault("type", section.key)
+            existing_roles = release.get("discovery_roles") or []
+            if isinstance(existing_roles, str):
+                existing_roles = [existing_roles]
+            roles = list(dict.fromkeys([
+                *existing_roles, section.key,
+            ]))
+            release["discovery_roles"] = roles
+            release_id = str(release.get("id") or "").strip()
+            canonical = by_id.get(release_id) if release_id else None
+            if canonical is None:
+                releases.append(release)
+                if release_id:
+                    by_id[release_id] = release
+                continue
+
+            canonical["discovery_roles"] = list(dict.fromkeys([
+                *canonical.get("discovery_roles", []), *roles,
+            ]))
+            for key, value in release.items():
+                if key in {"type", "category_name", "discovery_roles"}:
+                    continue
+                if value and not canonical.get(key):
+                    canonical[key] = value
+    return releases
 
 
 def _identity_text(value: object) -> str:
