@@ -18,6 +18,7 @@ The main English/Hebrew user manuals are written for ordinary non-programmer use
 - `ui/controllers/` — coordination between UI and backend.
 - `ui/workers/` — `QThread` bridges for long-running work.
 - `core/` — backend engines, persistence and services; no Qt symbols.
+- Artist imports use `core/artist_catalog.py` for provider-neutral category discovery and duplicate decisions; Qt orchestration stays in `ui/controllers/artist_flow_controller.py` and its workers/dialogs.
 - `utils/` — shared backend helpers; no Qt symbols.
 - `packaging/` + `scripts/` — release assembly, staged components and build/test tooling; Windows in-place upgrades must remove obsolete packaged downloader trees before copying their replacements.
 - `tests/` — pytest suite; supported full gate is isolated per test file.
