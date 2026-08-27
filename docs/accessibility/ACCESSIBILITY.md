@@ -17,6 +17,7 @@ Accessibility is a product requirement, not a final polish pass.
 - Interactive widgets, including icon-only controls, expose meaningful accessible names and roles.
 - Status is not conveyed by color alone; provide text/icon/state semantics.
 - Progress and errors have textual representations.
+- Artist-category and duplicate-review dialogs use real checkboxes with readable category, release and position labels. Exact/probable confidence and selection state are expressed in text, not by icon or color alone; category-level and release-level “Only …” actions remain available through keyboard focus.
 
 ## RTL and mixed-direction content
 

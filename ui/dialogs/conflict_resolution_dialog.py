@@ -283,8 +283,8 @@ class ConflictResolutionDialog(StyledDialog):
             b.setFixedHeight(28)
             return b
 
-        row.addWidget(_btn(t("conflict_keep_videos_btn"),    lambda: self._apply_all("non_playlist", True)))
-        row.addWidget(_btn(t("conflict_keep_playlists_btn"), lambda: self._apply_all("playlist", True)))
+        row.addWidget(_btn(t("conflict_keep_videos_btn"),    lambda: self._select_only("non_playlist")))
+        row.addWidget(_btn(t("conflict_keep_playlists_btn"), lambda: self._select_only("playlist")))
         row.addWidget(_btn(t("conflict_keep_both_btn"),       lambda: self._apply_all("all", True)))
         row.addWidget(_btn(t("conflict_clear_all_btn"),        lambda: self._apply_all("all", False)))
         row.addStretch()
@@ -295,6 +295,13 @@ class ConflictResolutionDialog(StyledDialog):
     def _apply_all(self, side: str, value: bool) -> None:
         for card in self._cards:
             card.check_all(side, value)
+
+    def _select_only(self, side: str) -> None:
+        """Keep one side exclusively; the button labels promise “only”."""
+        other_side = "playlist" if side == "non_playlist" else "non_playlist"
+        for card in self._cards:
+            card.check_all(side, True)
+            card.check_all(other_side, False)
 
     def _on_ok(self) -> None:
         self.decisions = [card.build_decision() for card in self._cards]

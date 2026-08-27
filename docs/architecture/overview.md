@@ -42,6 +42,29 @@ URL / search result
 
 Spotify URL metadata can be obtained through the app's Spotify scraping/resolution path. Spotify **search** can use the optional configured proxy API. Spotify audio is not downloaded from Spotify servers; metadata is used to identify a separate media source.
 
+Spotify and YouTube Music artist URLs use a staged catalog flow:
+
+```text
+artist URL
+→ background category discovery
+→ user category selection (skipped when only one exists)
+→ background expansion with stable-release canonicalization
+→ partial recovery from another selected role when needed
+→ release-scoped provider metadata hydration (artwork + duration)
+→ collapse exact repeated release occurrences
+→ plain-Python cross-release/category duplicate grouping
+→ per-occurrence user decisions
+→ queue
+→ lazy Spotify-to-YouTube resolution
+→ batch-level target-collision guard
+```
+
+`core.artist_catalog` owns provider-neutral discovery models, YouTube Music release-ID canonicalization, exact repeated-occurrence collapse, duplicate confidence and decision application without importing Qt. `ArtistFlowController` owns the modal sequence; `ArtistCatalogDiscoveryWorker` and `ArtistCatalogScrapeWorker` keep provider/network work off the GUI thread. Spotify uses a scrape-local release registry: the first selected role owns a stable release ID, later roles are retained as `discovery_roles`, and a complete release is not expanded again. When the declared count shows the first grid was partial, another role may contribute only missing placements. Provider releases without stable IDs stay separate instead of being merged by title. Explicit provider release-type metadata takes precedence over the discovery tab. Because Spotify's artist grid does not expose cover art or duration in every row, selected stable releases are hydrated through bounded parallel public-embed requests before queue delivery; track IDs join the metadata back to rows, with release position as a same-release fallback.
+
+Stable Spotify track IDs and YouTube video IDs produce exact recording groups. Metadata-only comparisons are intentionally conservative and are presented as probable rather than silently removed. A location includes the canonical release and track position, so duplicates inside one category remain reviewable and a deliberate repeated placement at another position is not silently removed.
+
+Spotify matching remains lazy so removed catalog occurrences do not cause unnecessary searches. `DownloadOrchestrator` maintains a thread-safe, batch-local claim registry for concrete YouTube video IDs. Compatible occurrences of the same recording may share a target. If distinct Spotify recording identities claim one video, the later claimant invalidates only its cached mapping and performs at most two fresh searches while excluding every URL form of the claimed video. Failure to obtain a distinct concrete match is surfaced as a per-track error; the orchestrator never silently submits the colliding target. This adds no persisted schema and uses the existing match-cache invalidation contract.
+
 ### Tag Editor
 
 ```text

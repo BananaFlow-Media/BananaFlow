@@ -178,6 +178,137 @@ class TestOrchestratorLazyResolve:
         assert engine.downloaded_urls == []
 
 
+class TestBatchTargetCollisionRecovery:
+    _SHARED = "https://music.youtube.com/watch?v=AAAAAAAAAAA"
+    _REPLACEMENT = "https://music.youtube.com/watch?v=BBBBBBBBBBB"
+
+    @staticmethod
+    def _spotify_job(key: str, spotify_id: str, title: str, url: str):
+        req = _req(f"placeholder://{key}")
+        req.youtube_reliability_mode = "fast"
+        req.spotify_match_identity = {
+            "spotify_id": spotify_id,
+            "spotify_key_kind": "spotify_id",
+            "title": title,
+            "artist": "Artist",
+            "album": "Album",
+            "duration_sec": 200,
+        }
+        req.url_resolver = lambda _ev, _url=url: _url
+        return key, req
+
+    def test_distinct_spotify_tracks_that_resolve_to_one_video_are_rematched(
+        self, monkeypatch,
+    ):
+        engine = _FakeEngine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=2)
+        invalidated = []
+        refreshed = []
+        monkeypatch.setattr(
+            "core.scraper.invalidate_track_match",
+            lambda identity, expected_url: invalidated.append(
+                (identity["spotify_id"], expected_url)
+            ) or True,
+        )
+
+        def refresh(identity, **kwargs):
+            refreshed.append((identity["spotify_id"], kwargs))
+            return self._REPLACEMENT
+
+        monkeypatch.setattr("core.scraper.resolve_track_to_youtube", refresh)
+        jobs = [
+            self._spotify_job("one", "spotify-one", "First", self._SHARED),
+            self._spotify_job("two", "spotify-two", "Second", self._SHARED),
+        ]
+
+        result = orch.run_batch(jobs)
+
+        assert result.failed == 0
+        assert sorted(engine.downloaded_urls) == sorted([self._SHARED, self._REPLACEMENT])
+        assert len(invalidated) == 1
+        assert len(refreshed) == 1
+        excluded = refreshed[0][1]["exclude_urls"]
+        assert self._SHARED in excluded
+        assert "https://www.youtube.com/watch?v=AAAAAAAAAAA" in excluded
+        assert refreshed[0][1]["force_refresh"] is True
+
+    def test_same_spotify_recording_may_intentionally_use_the_same_video(
+        self, monkeypatch,
+    ):
+        engine = _FakeEngine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=2)
+        monkeypatch.setattr(
+            "core.scraper.resolve_track_to_youtube",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("the same recording must not be rematched")
+            ),
+        )
+        jobs = [
+            self._spotify_job("album", "same-spotify-id", "Song", self._SHARED),
+            self._spotify_job("single", "same-spotify-id", "Song", self._SHARED),
+        ]
+
+        result = orch.run_batch(jobs)
+
+        assert result.failed == 0
+        assert engine.downloaded_urls == [self._SHARED, self._SHARED]
+
+    def test_equivalent_recording_with_different_release_ids_may_share_video(
+        self, monkeypatch,
+    ):
+        engine = _FakeEngine()
+        orch = DownloadOrchestrator(engine=engine, callbacks=_NullCallbacks(), max_workers=2)
+        monkeypatch.setattr(
+            "core.scraper.resolve_track_to_youtube",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("an equivalent recording kept twice must not be rematched")
+            ),
+        )
+        album_key, album_req = self._spotify_job(
+            "album", "album-track-id", "Song", self._SHARED,
+        )
+        single_key, single_req = self._spotify_job(
+            "single", "single-track-id", "Song", self._SHARED,
+        )
+        single_req.spotify_match_identity["duration_sec"] = 202
+
+        result = orch.run_batch([(album_key, album_req), (single_key, single_req)])
+
+        assert result.failed == 0
+        assert engine.downloaded_urls == [self._SHARED, self._SHARED]
+
+    def test_unresolved_collision_is_failed_instead_of_downloading_a_double(
+        self, monkeypatch,
+    ):
+        engine = _FakeEngine()
+        callbacks = type(
+            "Callbacks",
+            (),
+            {
+                "__getattr__": lambda self, _name: lambda *args, **kwargs: None,
+                "on_track_error": lambda self, key, error: self.errors.append((key, error)),
+                "errors": [],
+            },
+        )()
+        callbacks.errors = []
+        orch = DownloadOrchestrator(engine=engine, callbacks=callbacks, max_workers=2)
+        monkeypatch.setattr("core.scraper.invalidate_track_match", lambda *_args: True)
+        monkeypatch.setattr(
+            "core.scraper.resolve_track_to_youtube",
+            lambda *_args, **_kwargs: "ytsearch1:Artist Second audio",
+        )
+        jobs = [
+            self._spotify_job("one", "spotify-one", "First", self._SHARED),
+            self._spotify_job("two", "spotify-two", "Second", self._SHARED),
+        ]
+
+        result = orch.run_batch(jobs)
+
+        assert result.failed == 1
+        assert engine.downloaded_urls == [self._SHARED]
+        assert callbacks.errors[0][1].message_key == "err_spotify_target_collision"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Intra-resolve cancellation
 # ──────────────────────────────────────────────────────────────────────────────

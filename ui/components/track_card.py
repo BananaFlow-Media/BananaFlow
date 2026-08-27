@@ -466,29 +466,43 @@ class TrackCard(QFrame):
         return self._status
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
-        """Load and scale the thumbnail while preserving native aspect ratio."""
+        """Scale artwork for the card; Spotify covers are square-cropped."""
         if pixmap.isNull():
             return
-            
+
         w = pixmap.width()
         h = pixmap.height()
         target_h = _THUMB_H
-        
+
+        if self._platform == "spotify":
+            target_w = target_h
+            scaled = pixmap.scaled(
+                target_w, target_h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            left = max(0, (scaled.width() - target_w) // 2)
+            top = max(0, (scaled.height() - target_h) // 2)
+            scaled = scaled.copy(left, top, target_w, target_h)
+            self._thumb_lbl.setFixedSize(target_w, target_h)
+            self._thumb_lbl.setPixmap(scaled)
+            return
+
         # If the image is square (or very close), make the container square
         if w > 0 and h > 0 and (w / h) < 1.2:
             target_w = _THUMB_H
         else:
             target_w = _THUMB_W
-            
+
         self._thumb_lbl.setFixedSize(target_w, target_h)
-        
+
         # Scale to fit within target bounds (KeepAspectRatio)
         scaled = pixmap.scaled(
             target_w, target_h,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            Qt.TransformationMode.SmoothTransformation,
         )
-        
+
         self._thumb_lbl.setPixmap(scaled)
 
     def set_progress(self, fraction: float) -> None:

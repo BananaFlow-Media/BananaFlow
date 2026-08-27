@@ -254,10 +254,13 @@ def test_unrelated_markdown_edit_does_not_satisfy_downloader_reviews(monkeypatch
 def test_previously_unmapped_sensitive_files_cannot_use_unrelated_markdown(monkeypatch):
     cases = {
         "core/hls_downloader.py": "downloader/reliability",
+        "core/match_errors.py": "downloader/reliability",
         "utils/security.py": "authentication/privacy",
         "utils/paths.py": "persistence/config",
         "core/operation_manifest.py": "Tag Editor safety",
         "core/providers/musicbrainz_provider.py": "external metadata services",
+        "core/artist_catalog.py": "URL/import catalogs",
+        "core/playlist_parser.py": "URL/import catalogs",
     }
     for path, expected_rule in cases.items():
         _set_pr(monkeypatch, [path, "CHANGELOG.md"])

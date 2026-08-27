@@ -1426,8 +1426,34 @@ class AppWindow(FluentWindow):
             ctrl.status_update.connect(self._on_activity_status)
             ctrl.finished.connect(lambda: self._on_channel_flow_finished(ctrl))
             ctrl.run()
+        elif (
+            platform in (SourcePlatform.SPOTIFY, SourcePlatform.YOUTUBE_MUSIC)
+            and kind == UrlKind.ARTIST
+        ):
+            from ui.controllers.artist_flow_controller import ArtistFlowController
+
+            ctrl = ArtistFlowController(
+                artist_url=url,
+                platform=platform,
+                config=self._cfg,
+                parent_widget=self,
+                parent=self,
+            )
+            ctrl.tracks_ready.connect(
+                lambda tracks: [self._add_track_to_queue(track) for track in tracks]
+            )
+            ctrl.status_update.connect(self._on_activity_status)
+            ctrl.finished.connect(lambda: self._on_artist_flow_finished(ctrl))
+            ctrl.run()
         else:
             self._fetch_ctrl.fetch(url)
+
+    def _on_artist_flow_finished(self, ctrl) -> None:
+        self._last_url_kind = UrlKind.ARTIST
+        if ctrl.artist_name:
+            self._last_playlist_title = ctrl.artist_name
+        if self._status_bar.state == StatusState.INDETERMINATE:
+            self._status_bar.reset_to_idle()
 
     def _on_channel_flow_finished(self, ctrl) -> None:
         self._last_url_kind = UrlKind.ARTIST
@@ -1577,9 +1603,15 @@ class AppWindow(FluentWindow):
             index=idx,
             title=get("title", "Unknown"),
             artist=get("artist", ""),
-            duration=get("duration", "") if isinstance(data, dict) else get("duration_str", ""),
+            duration=(
+                (get("duration", "") or get("duration_str", ""))
+                if isinstance(data, dict) else get("duration_str", "")
+            ),
             platform=get("platform", "youtube"),
-            track_url=get("track_url", "") if isinstance(data, dict) else get("url", ""),
+            track_url=(
+                (get("track_url", "") or get("url", ""))
+                if isinstance(data, dict) else get("url", "")
+            ),
             album=get("album", ""),
             parent_artist=get("parent_artist", ""),
             release_type=get("release_type", ""),

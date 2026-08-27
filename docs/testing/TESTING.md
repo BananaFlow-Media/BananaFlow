@@ -70,6 +70,10 @@ The gate validates internal Markdown references, canonical documentation structu
 - Reproduce bugs with a failing test before or with the fix.
 - Do not use live credentials, cookies or realistic secret fixtures.
 - Network-dependent behavior must be mocked in ordinary tests.
+- Artist-catalog duplicate tests must distinguish an exact repeated release
+  occurrence from a recording kept in separate releases. Spotify matching
+  tests must verify that distinct source identities cannot silently claim the
+  same concrete YouTube video and that bounded rematching remains deterministic.
 - Filesystem-destructive tests use disposable temporary directories/files only.
 - New Qt work must cover teardown/cancellation ownership when threads/timers/callbacks are involved.
 - New user-facing strings must preserve i18n coverage.

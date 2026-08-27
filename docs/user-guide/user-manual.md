@@ -38,6 +38,18 @@ BananaFlow gives you one desktop app for:
 
 Completed downloads are written to your chosen folder and added to History.
 
+### Importing a whole artist or YouTube channel
+
+When you paste a YouTube channel URL, BananaFlow discovers the channel tabs and asks which ones to scan (for example Videos or Playlists). When you paste a Spotify or YouTube Music artist URL, it similarly discovers the categories that actually exist for that artist—such as Albums, Singles & EPs, Live performances, Videos, Compilations or Appears On. If only one importable category exists, BananaFlow scans it automatically; otherwise you choose one or more categories first.
+
+During catalog expansion, BananaFlow treats a stable Spotify or YouTube Music release ID as the release identity. If that release was advertised in more than one selected category, those categories are retained as discovery roles but its tracks are imported once. A partial Spotify grid may still be revisited through another role to recover missing positions. Releases without a stable ID are never merged by title alone.
+
+Spotify artist rows receive their duration and square release cover from Spotify's public release metadata before they enter the queue. The Spotify cover remains the preferred artwork when the track is later matched to a downloadable YouTube/YouTube Music source; the matched video's rectangular thumbnail does not replace it.
+
+After the selected categories are scanned, BananaFlow checks for the same recording appearing in genuinely separate releases or categories—including two albums or two singles inside one category. Exact provider IDs are treated as exact matches; a conservative title/artist/duration comparison may be shown as a probable match for review. For every group you can keep only one category or release, keep both/all occurrences, clear all, or adjust each occurrence separately. A Live, Remix or Remaster title is not silently merged with a differently named studio version. If a provider accidentally returns the exact same release position twice, BananaFlow collapses that repeated row before it reaches the queue. Repeated placements at different positions remain separate.
+
+Spotify tracks are matched to separate downloadable sources only after the queue is ready. If two different Spotify recordings unexpectedly resolve to the same concrete YouTube video, BananaFlow invalidates the suspicious match and searches again while excluding the already-used video. If a distinct trustworthy match still cannot be found, the suspect track fails with an explanation instead of silently downloading a second copy of another track. Two occurrences that represent the same recording may intentionally share the same source when you chose to keep both releases.
+
 ## 4. Spotify: link import and text search are different
 
 ### Pasting a Spotify link
@@ -65,6 +77,8 @@ A higher bitrate cannot restore quality that was already missing from the origin
 The default output location is under `Downloads/BananaFlow`, unless you change it in Settings. Collections such as playlists/albums can be organized into subfolders and numbered automatically.
 
 When BananaFlow finds an existing file, the duplicate policy can skip, warn or overwrite according to your settings and the current workflow. Read the prompt before confirming an overwrite.
+
+The artist/channel duplicate review described above happens before items enter the queue and controls which source locations are imported. It is separate from the existing-file policy, which runs later against files already present in the output folder.
 
 ## 7. Search
 

@@ -10,6 +10,7 @@ This directory is the documentation entry point. It distinguishes **current norm
 | User-documentation index | [`user-guide/README.md`](user-guide/README.md) |
 | Full English user reference | [`user-guide/user-manual.md`](user-guide/user-manual.md) |
 | Full Hebrew user reference | [`user-guide/user-guide-he.md`](user-guide/user-guide-he.md) |
+| Artist category import and duplicate-review behavior | [`user-guide/user-manual.md`](user-guide/user-manual.md#importing-a-whole-artist-or-youtube-channel) |
 | CLI reference | [`user-guide/cli.md`](user-guide/cli.md) |
 | Contributor workflow | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 | Test strategy and commands | [`testing/TESTING.md`](testing/TESTING.md) |

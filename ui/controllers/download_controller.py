@@ -402,6 +402,8 @@ class DownloadController(QObject):
                     # ── CATEGORY MAPPING ──────────────────────────────────────
                     if kind == "album":
                          cat_name = "אלבומים"
+                    elif kind == "compilation":
+                        cat_name = category or "אוספים"
                     elif (is_live or kind == "performance") and not is_spotify:
                         cat_name = "הופעות חיות"
                     elif category in ("סינגלים ו-EP", "סינגלים וגרסאות EP", "סינגלים ומיני אלבומים"):
@@ -423,6 +425,7 @@ class DownloadController(QObject):
                     
                     is_grouped = (
                         (kind == "album") or
+                        (kind == "compilation") or
                         (kind == "ep") or
                         (cat_name == "אלבומים") or
                         (cat_name in ("סינגלים ומיני אלבומים", "סינגלים ו-EP", "סינגלים וגרסאות EP") and (card.total_tracks > 1 or kind == "ep")) or

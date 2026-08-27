@@ -13,6 +13,12 @@ media source, normally YouTube or YouTube Music. It does not download Spotify
 audio streams. A metadata match can be imperfect; the user should verify the
 selected source and resulting tags.
 
+For whole-artist imports, the app may inspect public release categories and
+expand only the categories the user selects. Category selection and duplicate
+review—including bounded re-search when two different Spotify recordings map
+to one YouTube video—do not change the user's responsibility to follow the
+service's terms, rate limits, copyright rules, and other applicable restrictions.
+
 ## User responsibility
 
 Use the application only for material you are legally entitled to access,

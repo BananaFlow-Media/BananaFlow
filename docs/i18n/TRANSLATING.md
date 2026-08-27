@@ -30,6 +30,7 @@ The English and Hebrew full user guides are companions, not independent products
 - settings and defaults that users rely on;
 - current limitations/troubleshooting;
 - Spotify search vs Spotify URL-import behavior;
+- artist-catalog category/release names and duplicate-confidence wording (Albums, Singles & EPs, Compilations, Appears On, exact/probable, category-level and release-level “Only …”);
 - release/update behavior.
 
 A behavior change documented in one guide requires review of the other in the same PR.

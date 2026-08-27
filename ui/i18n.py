@@ -704,6 +704,43 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "import_channel_expanding_playlists": "Expanding playlists: {current}/{total}",
         "import_channel_scrape_error": "Scrape error: {msg}",
 
+        # ── Spotify / YouTube Music artist import ─────────────────────────────
+        "import_artist_title": "Import Artist Catalog",
+        "import_artist_discovering": "Discovering available categories…",
+        "import_artist_with_name": "Import: {name}",
+        "import_artist_sections_found": "Found {n} categories — choose what to scan:",
+        "import_artist_one_section": "Only {section} is available. Scanning it now…",
+        "import_artist_scan_selected": "Scan selected categories",
+        "import_artist_items_count": "{n:,} releases",
+        "import_artist_scanning": "Scanning selected categories…",
+        "import_artist_scanning_section": "Scanning: {section}…",
+        "import_artist_scan_complete": "Scan complete — {n:,} tracks",
+        "import_artist_error_prefix": "Could not discover artist categories: {error}",
+        "import_artist_scrape_error": "Catalog scan failed: {msg}",
+        "import_artist_cancelling": "Stopping the catalog scan…",
+        "artist_section_all": "All releases",
+        "artist_section_album": "Albums",
+        "artist_section_single": "Singles & EPs",
+        "artist_section_performance": "Live performances",
+        "artist_section_video": "Videos",
+        "artist_section_playlist": "Playlists",
+        "artist_section_compilation": "Compilations",
+        "artist_section_appears_on": "Appears On",
+        "catalog_conflict_title": "Review duplicate tracks",
+        "catalog_conflict_subtitle": "Found {n} tracks that appear in more than one release or category",
+        "catalog_conflict_explanation": "Choose every location you want to keep. “Only …” keeps that release or category and clears the other copies.",
+        "catalog_duplicate_exact": "Exact match",
+        "catalog_duplicate_probable": "Probable match — review",
+        "catalog_conflict_only": "Only {category}",
+        "catalog_conflict_only_release": "Only {release}",
+        "catalog_conflict_keep_all": "Keep all",
+        "catalog_conflict_clear_all": "Clear all",
+        "catalog_conflict_confirm": "Add selected copies",
+        "artist_flow_discovering": "Discovering artist categories…",
+        "artist_flow_duplicates": "Reviewing {n} duplicate groups…",
+        "artist_flow_adding": "Adding {n} tracks to the queue…",
+        "artist_flow_cancelled": "Artist import cancelled",
+
         # ── Search result card ──────────────────────────────────────────────────
         "search_card_add_btn": "＋  Add",
         "search_card_browse_btn": "Browse  →",
@@ -1451,6 +1488,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "folder_singles_eps_variants": "Singles & EPs",
         "folder_albums": "Albums",
         "folder_live_performances": "Live Performances",
+        "folder_compilations": "Compilations",
+        "folder_appears_on": "Appears On",
 
         # ── About ───────────────────────────────────────────────────────────────
         "about_app": "About",
@@ -2141,6 +2180,43 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "import_channel_scanning_tab": "סורק: {tab}…",
         "import_channel_expanding_playlists": "מרחיב פלייליסטים: {current}/{total}",
         "import_channel_scrape_error": "שגיאת סריקה: {msg}",
+
+        # ── ייבוא אמן מ-Spotify / YouTube Music ───────────────────────────────
+        "import_artist_title": "ייבוא קטלוג אמן",
+        "import_artist_discovering": "מאתר קטגוריות זמינות…",
+        "import_artist_with_name": "ייבוא: {name}",
+        "import_artist_sections_found": "נמצאו {n} קטגוריות — בחר מה לסרוק:",
+        "import_artist_one_section": "זמינה רק הקטגוריה {section}. הסריקה מתחילה כעת…",
+        "import_artist_scan_selected": "סרוק קטגוריות נבחרות",
+        "import_artist_items_count": "{n:,} מהדורות",
+        "import_artist_scanning": "סורק קטגוריות נבחרות…",
+        "import_artist_scanning_section": "סורק: {section}…",
+        "import_artist_scan_complete": "הסריקה הושלמה — {n:,} רצועות",
+        "import_artist_error_prefix": "לא ניתן היה לאתר את קטגוריות האמן: {error}",
+        "import_artist_scrape_error": "סריקת הקטלוג נכשלה: {msg}",
+        "import_artist_cancelling": "עוצר את סריקת הקטלוג…",
+        "artist_section_all": "כל המהדורות",
+        "artist_section_album": "אלבומים",
+        "artist_section_single": "סינגלים ומיני־אלבומים",
+        "artist_section_performance": "הופעות חיות",
+        "artist_section_video": "סרטונים",
+        "artist_section_playlist": "פלייליסטים",
+        "artist_section_compilation": "אוספים",
+        "artist_section_appears_on": "מופיע באוספים",
+        "catalog_conflict_title": "סקירת רצועות כפולות",
+        "catalog_conflict_subtitle": "נמצאו {n} רצועות שמופיעות ביותר ממהדורה או קטגוריה אחת",
+        "catalog_conflict_explanation": "בחר בכל מיקום שברצונך לשמור. „רק…” משאיר את המהדורה או הקטגוריה שנבחרה ומסיר את שאר העותקים.",
+        "catalog_duplicate_exact": "התאמה ודאית",
+        "catalog_duplicate_probable": "התאמה משוערת — מומלץ לבדוק",
+        "catalog_conflict_only": "רק {category}",
+        "catalog_conflict_only_release": "רק {release}",
+        "catalog_conflict_keep_all": "השאר הכול",
+        "catalog_conflict_clear_all": "נקה הכול",
+        "catalog_conflict_confirm": "הוסף עותקים נבחרים",
+        "artist_flow_discovering": "מאתר קטגוריות אמן…",
+        "artist_flow_duplicates": "סוקר {n} קבוצות כפילויות…",
+        "artist_flow_adding": "מוסיף {n} רצועות לתור…",
+        "artist_flow_cancelled": "ייבוא האמן בוטל",
 
         # ── Search result card ──────────────────────────────────────────────────
         "search_card_add_btn": "＋  הוסף",
@@ -2854,6 +2930,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "folder_singles_eps_variants": "סינגלים ומיני אלבומים",
         "folder_albums": "אלבומים",
         "folder_live_performances": "הופעות חיות",
+        "folder_compilations": "אוספים",
+        "folder_appears_on": "מופיע באוספים",
 
         # ── About ───────────────────────────────────────────────────────────────
         "about_app": "אודות",
@@ -2985,6 +3063,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "err_spotify_metadata_invalid_detail": (
             "Spotify החזיר פרטי רצועה חסרים, פגומים או מזוהמים בתוכן מהעמוד. "
             "הרצועה נשארה ללא פתרון ולא נוספה לתור ההורדה."
+        ),
+        "err_spotify_target_collision_title": "התאמת Spotify דורשת בדיקה",
+        "err_spotify_target_collision_detail": (
+            "שתי רצועות Spotify שונות הותאמו לאותה הקלטת YouTube. "
+            "BananaFlow חיפשה שוב אך לא מצאה התאמה נפרדת ואמינה, ולכן "
+            "הרצועה הזו לא הורדה כעותק כפול."
         ),
         "err_browser_cookie_access_title": "לא ניתן לקרוא עוגיות דפדפן בבטחה",
         "err_browser_cookie_access_detail": (
@@ -4330,6 +4414,8 @@ _FOLDER_KEY_MAP: Dict[str, str] = {
     "סינגלים וגרסאות EP":   "folder_singles_eps",
     "אלבומים":              "folder_albums",
     "הופעות חיות":          "folder_live_performances",
+    "אוספים":               "folder_compilations",
+    "מופיע באוספים":        "folder_appears_on",
 }
 
 

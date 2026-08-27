@@ -128,6 +128,7 @@ IMPACT_RULES = (
         (
             r"^error_handler\.py$",
             r"^core/downloader\.py$", r"^core/download_orchestrator\.py$",
+            r"^core/match_errors\.py$",
             r"^core/retry_policy\.py$", r"^core/youtube_reliability\.py$",
             r"^core/(?:hls_downloader|universal_extractor)\.py$",
             r"^utils/yt_dlp_opts\.py$",
@@ -166,6 +167,14 @@ IMPACT_RULES = (
             "docs/user-guide/spotify-proxy-api.md", "docs/user-guide/user-manual.md",
             "docs/user-guide/user-guide-he.md", "PRIVACY.md",
             "docs/architecture/overview.md",
+        ),
+    ),
+    ImpactRule(
+        "URL/import catalogs",
+        (r"^core/(?:artist_catalog|playlist_parser)\.py$",),
+        review_required=(
+            "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
+            "docs/architecture/overview.md", "PRIVACY.md",
         ),
     ),
     ImpactRule(

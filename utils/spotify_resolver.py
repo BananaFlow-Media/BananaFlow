@@ -153,8 +153,8 @@ class _SpotifyNextDataParser(HTMLParser):
             self._capturing = False
 
 
-def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
-    """Parse a public Spotify embed response into exact track metadata."""
+def _spotify_embed_entity(html: str) -> dict:
+    """Return the exactly scoped entity from one public Spotify embed page."""
     parser = _SpotifyNextDataParser()
     parser.feed(html or "")
     parser.close()
@@ -164,7 +164,36 @@ def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
         data = json.loads(parser.payload)
         entity = data["props"]["pageProps"]["state"]["data"]["entity"]
     except Exception as exc:
-        raise RuntimeError(f"Could not parse structured Spotify embed data: {exc}") from exc
+        raise RuntimeError(
+            f"Could not parse structured Spotify embed data: {exc}"
+        ) from exc
+    if not isinstance(entity, dict):
+        raise RuntimeError("Spotify embed entity is malformed")
+    return entity
+
+
+def _spotify_embed_artwork(entity: dict) -> str:
+    """Pick the largest valid provider-owned image from an embed entity."""
+    images = (entity.get("visualIdentity") or {}).get("image") or []
+    artwork_candidates: list[tuple[int, str]] = []
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        url = str(image.get("url") or "").strip()
+        if not url.startswith(("https://", "http://")):
+            continue
+        try:
+            width = int(image.get("maxWidth") or image.get("width") or 0)
+            height = int(image.get("maxHeight") or image.get("height") or 0)
+        except (TypeError, ValueError):
+            width = height = 0
+        artwork_candidates.append((width * height, url))
+    return max(artwork_candidates, default=(0, ""))[1]
+
+
+def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
+    """Parse a public Spotify embed response into exact track metadata."""
+    entity = _spotify_embed_entity(html)
 
     entity_id = str(entity.get("id") or "")
     uri = str(entity.get("uri") or "")
@@ -190,20 +219,7 @@ def parse_spotify_embed_track_html(html: str, expected_track_id: str) -> dict:
     # which may point at recommendation cards or unrelated Spotify UI.
     # Artwork is optional: a missing/malformed image must never invalidate
     # otherwise usable track metadata.
-    images = (entity.get("visualIdentity") or {}).get("image") or []
-    artwork_candidates: list[tuple[int, str]] = []
-    for image in images if isinstance(images, list) else []:
-        if not isinstance(image, dict):
-            continue
-        url = str(image.get("url") or "").strip()
-        if not url.startswith(("https://", "http://")):
-            continue
-        try:
-            area = int(image.get("maxWidth") or 0) * int(image.get("maxHeight") or 0)
-        except (TypeError, ValueError):
-            area = 0
-        artwork_candidates.append((area, url))
-    thumbnail_url = max(artwork_candidates, default=(0, ""))[1]
+    thumbnail_url = _spotify_embed_artwork(entity)
     return {
         "title": title,
         "artist": ", ".join(artist_names),
@@ -534,22 +550,7 @@ class SpotifyResolver:
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch Spotify embed page: {exc}") from exc
 
-        m = re.search(
-            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-            html,
-            re.DOTALL,
-        )
-        if not m:
-            raise RuntimeError(
-                "Could not find internal data in Spotify embed page. "
-                "Spotify may have changed their embed structure."
-            )
-
-        try:
-            data   = json.loads(m.group(1))
-            entity = data["props"]["pageProps"]["state"]["data"]["entity"]
-        except Exception as exc:
-            raise RuntimeError(f"Error parsing Spotify embed JSON: {exc}") from exc
+        entity = _spotify_embed_entity(html)
 
         items: list[dict] = []
 
@@ -575,13 +576,46 @@ class SpotifyResolver:
                 on_item(d)
 
         elif entity_type in ("album", "playlist"):
-            for track in entity.get("trackList", []):
+            entity_id_value = str(entity.get("id") or "").strip()
+            entity_uri = str(entity.get("uri") or "").strip()
+            entity_kind = str(entity.get("type") or "").casefold()
+            if entity_kind != entity_type or (
+                entity_id
+                and entity_id_value != entity_id
+                and entity_uri != f"spotify:{entity_type}:{entity_id}"
+            ):
+                raise SpotifyMetadataInvalid(
+                    "Spotify structured data is not the requested release"
+                )
+            release_id = entity_id_value or entity_id
+            release_title = str(
+                entity.get("name") or entity.get("title") or ""
+            ).strip()
+            artwork = _spotify_embed_artwork(entity)
+            for position, track in enumerate(entity.get("trackList", []), start=1):
                 title  = track.get("title") or "Unknown Title"
                 artist = track.get("subtitle") or "Unknown Artist"
                 ms     = _ms(track)
-                uid    = track.get("uid") or ""
-                spotify_url = f"https://open.spotify.com/track/{uid}" if uid else ""
-                d = cls._make_dict(title, artist, ms, "", spotify_url)
+                track_uri = str(track.get("uri") or "").strip()
+                uri_match = re.fullmatch(
+                    r"spotify:track:([A-Za-z0-9]+)", track_uri,
+                )
+                track_id = uri_match.group(1) if uri_match else ""
+                spotify_url = (
+                    f"https://open.spotify.com/track/{track_id}"
+                    if track_id else ""
+                )
+                d = cls._make_dict(
+                    title, artist, ms, artwork, spotify_url,
+                    album_type=entity_kind,
+                )
+                d.update({
+                    "spotify_id": track_id,
+                    "album": release_title,
+                    "album_index": position,
+                    "source_release_id": release_id,
+                    "release_type": entity_kind,
+                })
                 items.append(d)
                 if on_item:
                     on_item(d)

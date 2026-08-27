@@ -85,6 +85,54 @@ _HEARTBEAT_INTERVAL = 0.5
 # artist catalog.
 _RESOLVER_MAX_WORKERS = 2
 _RESOLVER_BUFFER_PER_DOWNLOAD_WORKER = 2
+_SPOTIFY_TARGET_REFRESH_LIMIT = 2
+
+
+def _identity_text(value: object) -> str:
+    return re.sub(r"[^\w]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def _same_spotify_recording(left: dict, right: dict) -> bool:
+    """Whether two source identities intentionally represent one recording."""
+    left_id = str(left.get("spotify_id") or "").strip()
+    right_id = str(right.get("spotify_id") or "").strip()
+    if left_id and right_id and left_id == right_id:
+        return True
+    if (
+        _identity_text(left.get("title")) != _identity_text(right.get("title"))
+        or _identity_text(left.get("artist")) != _identity_text(right.get("artist"))
+    ):
+        return False
+    try:
+        left_duration = int(float(left.get("duration_sec") or 0))
+        right_duration = int(float(right.get("duration_sec") or 0))
+    except (TypeError, ValueError):
+        return False
+    if left_duration > 0 and right_duration > 0:
+        return abs(left_duration - right_duration) <= 2
+    return bool(
+        _identity_text(left.get("album"))
+        and _identity_text(left.get("album")) == _identity_text(right.get("album"))
+    )
+
+
+def _youtube_target_id(url: str) -> str:
+    from utils.artwork_cleaner import extract_youtube_video_id
+
+    return extract_youtube_video_id(url)
+
+
+def _youtube_target_variants(url: str) -> set[str]:
+    video_id = _youtube_target_id(url)
+    if not video_id:
+        return {url} if url else set()
+    return {
+        url,
+        f"https://music.youtube.com/watch?v={video_id}",
+        f"https://www.youtube.com/watch?v={video_id}",
+        f"https://youtube.com/watch?v={video_id}",
+        f"https://youtu.be/{video_id}",
+    }
 
 
 def _safe_subdir_name(key: str) -> str:
@@ -214,6 +262,13 @@ class DownloadOrchestrator:
         # at the same instant is handed out instead — see _resolve_lazy_url.
         self._resolving_keys: set[str] = set()
         self._pending_resolver_requests: dict[str, DownloadRequest] = {}
+        # A batch-level guard for a suspicious resolver outcome: two distinct
+        # Spotify recordings must not silently download the same YouTube video.
+        # Compatible source occurrences (the same Spotify id, or the same
+        # title/artist/duration recording kept in two releases) may share it.
+        self._spotify_target_lock = threading.Lock()
+        self._spotify_target_claims: dict[str, list[dict]] = {}
+        self._spotify_job_targets: dict[str, str] = {}
         # First-writer-wins record of how each job ended up being disposed
         # of: "paused" (an outside Global Pause captured it for a later
         # resume) or "terminal" (it completed, failed or was cancelled).
@@ -627,6 +682,9 @@ class DownloadOrchestrator:
         self._active_requests.clear()
         self._resolving_keys.clear()
         self._pending_resolver_requests.clear()
+        with self._spotify_target_lock:
+            self._spotify_target_claims.clear()
+            self._spotify_job_targets.clear()
         self._job_outcomes.clear()
         self._phase_model.reset()
         with self._phase_state_lock:
@@ -1414,6 +1472,117 @@ class DownloadOrchestrator:
                 gate_idle_total, idle_pct, serial_work,
             )
 
+    def _claim_spotify_target(
+        self,
+        key: str,
+        identity: dict,
+        url: str,
+    ) -> set[str]:
+        """Claim a YouTube video for one Spotify recording.
+
+        An empty return means the claim is safe (or the URL is not a concrete
+        YouTube target).  A non-empty return contains every URL spelling that
+        a refresh must exclude because another, different recording already
+        owns that video in this batch.
+        """
+        target_id = _youtube_target_id(url)
+        if not target_id:
+            return set()
+        with self._spotify_target_lock:
+            current_target = self._spotify_job_targets.get(key)
+            if current_target == target_id:
+                return set()
+
+            existing = [
+                claim for claim in self._spotify_target_claims.get(target_id, [])
+                if claim["key"] != key
+            ]
+            incompatible = [
+                claim for claim in existing
+                if not _same_spotify_recording(identity, claim["identity"])
+            ]
+            if incompatible:
+                excluded = set(_youtube_target_variants(url))
+                for claim in incompatible:
+                    excluded.update(_youtube_target_variants(claim["url"]))
+                return excluded
+
+            if current_target:
+                old_claims = self._spotify_target_claims.get(current_target, [])
+                old_claims[:] = [claim for claim in old_claims if claim["key"] != key]
+                if not old_claims:
+                    self._spotify_target_claims.pop(current_target, None)
+
+            self._spotify_target_claims.setdefault(target_id, []).append({
+                "key": key,
+                "identity": dict(identity),
+                "url": url,
+            })
+            self._spotify_job_targets[key] = target_id
+        return set()
+
+    def _ensure_distinct_spotify_target(
+        self,
+        key: str,
+        req: DownloadRequest,
+        cancel_ev: threading.Event,
+    ) -> bool:
+        """Rematch a suspicious cross-track YouTube target collision.
+
+        Returns True when cancellation won.  If bounded refreshes cannot
+        produce a concrete distinct target, raises a typed error so the track
+        fails visibly instead of silently downloading another song's video.
+        """
+        identity = req.spotify_match_identity or {}
+        if not identity or not _youtube_target_id(req.url):
+            return False
+
+        excluded = self._claim_spotify_target(key, identity, req.url)
+        if not excluded:
+            return False
+
+        from core.match_errors import SpotifyTargetCollision
+        from core.scraper import invalidate_track_match, resolve_track_to_youtube
+
+        self._enter_phase(key, TrackPhase.MATCHING)
+        candidate = req.url
+        for _attempt in range(_SPOTIFY_TARGET_REFRESH_LIMIT):
+            if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+                self._mark_cancelled(key)
+                return True
+
+            invalidate_track_match(identity, candidate)
+            replacement = resolve_track_to_youtube(
+                identity,
+                cookies_file=req.cookies_file,
+                cancel_check=cancel_ev.is_set,
+                force_refresh=True,
+                exclude_urls=set(excluded),
+            )
+            if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+                self._mark_cancelled(key)
+                return True
+            if not _youtube_target_id(replacement):
+                raise SpotifyTargetCollision(
+                    "spotify target collision remained unresolved after rematch"
+                )
+
+            next_excluded = self._claim_spotify_target(key, identity, replacement)
+            if not next_excluded:
+                req.url = replacement
+                self._aggregator.mark_resolution_source(key, "live")
+                logger.info(
+                    "[Orchestrator] Re-resolved a conflicting Spotify target "
+                    "for %s before download", key,
+                )
+                return False
+            candidate = replacement
+            excluded.update(next_excluded)
+
+        raise SpotifyTargetCollision(
+            "spotify target collision remained unresolved after bounded rematches"
+        )
+
     # ── Per-job runner (pool thread) ──────────────────────────────────────────
 
     @staticmethod
@@ -1439,7 +1608,8 @@ class DownloadOrchestrator:
         happens in parallel across workers while only the downloads themselves
         serialize. Returns True if the job was cancelled (caller should abort).
         The track stays visually "queued" during the match — no matching/YouTube
-        wording is surfaced. A bad/failed match never sinks the job.
+        wording is surfaced. Ordinary search misses retain the legacy fallback;
+        only a proved cross-track target collision may fail closed later.
         """
         if req.url_resolver is None:
             return False
@@ -1561,6 +1731,9 @@ class DownloadOrchestrator:
         """
         if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
             self._mark_cancelled(key)
+            return
+
+        if self._ensure_distinct_spotify_target(key, req, cancel_ev):
             return
 
         if conservative_youtube:
@@ -1836,6 +2009,8 @@ class DownloadOrchestrator:
                             "target for %s; retrying the proved recording", key,
                         )
                         req.url = replacement
+                        if self._ensure_distinct_spotify_target(key, req, cancel_ev):
+                            return
                         _err.clear()
                         self._engine.download(req)
             if _err:

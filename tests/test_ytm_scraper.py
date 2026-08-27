@@ -49,3 +49,90 @@ def test_resolve_ytm_artist_id_from_handle(monkeypatch):
     url = "https://music.youtube.com/@noyfadlon"
     assert _resolve_ytm_artist_id(url) == "UCresolvedartist123"
     assert _FakeYoutubeDL.received_url == url
+
+
+def test_artist_shelf_types_include_videos_playlists_and_featured():
+    from utils.ytm_scraper import _ARTIST_SHELF_TYPES
+
+    assert _ARTIST_SHELF_TYPES["Videos"] == "video"
+    assert _ARTIST_SHELF_TYPES["פלייליסטים"] == "playlist"
+    assert _ARTIST_SHELF_TYPES["Featured on"] == "appears_on"
+
+
+def test_discovery_keeps_album_single_and_video_shelves(monkeypatch):
+    from utils import ytm_scraper
+
+    def shelf(label, renderer):
+        return {
+            "musicCarouselShelfRenderer": {
+                "header": {
+                    "musicCarouselShelfBasicHeaderRenderer": {
+                        "title": {"runs": [{"text": label}]},
+                    }
+                },
+                "contents": [{"musicTwoRowItemRenderer": renderer}],
+            }
+        }
+
+    def renderer(title, *, playlist_id="", video_id=""):
+        result = {
+            "title": {"runs": [{"text": title}]},
+            "navigationEndpoint": {
+                "watchEndpoint": {"videoId": video_id} if video_id else {},
+            },
+        }
+        if playlist_id:
+            result["thumbnailOverlay"] = {
+                "musicItemThumbnailOverlayRenderer": {
+                    "content": {
+                        "musicPlayButtonRenderer": {
+                            "playNavigationEndpoint": {
+                                "watchPlaylistEndpoint": {"playlistId": playlist_id},
+                            }
+                        }
+                    }
+                }
+            }
+        return result
+
+    response = {
+        "header": {
+            "musicVisualHeaderRenderer": {
+                "title": {"runs": [{"text": "Artist"}]},
+            }
+        },
+        "contents": [
+            shelf("Albums", renderer("Album", playlist_id="PL_ALBUM")),
+            shelf("Singles", renderer("Single", playlist_id="PL_SINGLE")),
+            shelf("Videos", renderer("Video", video_id="VIDEO_ID")),
+        ],
+    }
+    monkeypatch.setattr(ytm_scraper, "_resolve_ytm_artist_id", lambda _url: "UC1")
+    monkeypatch.setattr(ytm_scraper, "_call_api", lambda *args, **kwargs: response)
+
+    artist, sections = ytm_scraper.discover_ytm_artist_catalog(
+        "https://music.youtube.com/channel/UC1"
+    )
+
+    assert artist == "Artist"
+    assert list(sections) == ["album", "single", "video"]
+    assert sections["video"][0]["id"] == "VIDEO_ID"
+    assert sections["single"][0]["category_name"] == "סינגלים ו-EP"
+
+
+def test_legacy_ytm_artist_fetch_still_excludes_video_shelf(monkeypatch):
+    from utils import ytm_scraper
+
+    monkeypatch.setattr(
+        ytm_scraper,
+        "discover_ytm_artist_catalog",
+        lambda _url: ("Artist", {
+            "album": [{"id": "album"}],
+            "single": [{"id": "single"}],
+            "performance": [{"id": "live"}],
+            "video": [{"id": "video"}],
+        }),
+    )
+
+    releases = ytm_scraper.fetch_ytm_artist_releases("https://music.youtube.com/channel/UC1")
+    assert [release["id"] for release in releases] == ["album", "single", "live"]
