@@ -4,7 +4,7 @@ Status: **Current / normative contract for optional Spotify text search**
 
 This API is used only for **Spotify text search in BananaFlow's Search panel**. It is not required to paste/import a Spotify track, album, playlist or artist URL; URL import uses BananaFlow's Spotify scraper/resolution path.
 
-Artist-category discovery, selected-category expansion and cross-category duplicate review are also part of that direct URL-import path. They do not call this proxy API.
+Artist-category discovery, selected-category expansion, cross-release/category duplicate review and Spotify-to-YouTube target-collision recovery are also part of that direct URL-import path. They do not call this proxy API.
 
 ## Endpoint
 

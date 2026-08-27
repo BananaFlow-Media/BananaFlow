@@ -49,12 +49,17 @@ artist URL
 → background category discovery
 → user category selection (skipped when only one exists)
 → background expansion of selected categories
-→ plain-Python cross-category duplicate grouping
+→ collapse exact repeated release occurrences
+→ plain-Python cross-release/category duplicate grouping
 → per-occurrence user decisions
 → queue
+→ lazy Spotify-to-YouTube resolution
+→ batch-level target-collision guard
 ```
 
-`core.artist_catalog` owns provider-neutral discovery models, duplicate confidence and decision application without importing Qt. `ArtistFlowController` owns the modal sequence; `ArtistCatalogDiscoveryWorker` and `ArtistCatalogScrapeWorker` keep provider/network work off the GUI thread. Stable Spotify track IDs and YouTube video IDs produce exact groups. Metadata-only comparisons are intentionally conservative and are presented as probable rather than silently removed.
+`core.artist_catalog` owns provider-neutral discovery models, exact repeated-occurrence collapse, duplicate confidence and decision application without importing Qt. `ArtistFlowController` owns the modal sequence; `ArtistCatalogDiscoveryWorker` and `ArtistCatalogScrapeWorker` keep provider/network work off the GUI thread. Stable Spotify track IDs and YouTube video IDs produce exact groups. Metadata-only comparisons are intentionally conservative and are presented as probable rather than silently removed. A location includes the release and track position, so duplicates inside one category remain reviewable.
+
+Spotify matching remains lazy so removed catalog occurrences do not cause unnecessary searches. `DownloadOrchestrator` maintains a thread-safe, batch-local claim registry for concrete YouTube video IDs. Compatible occurrences of the same recording may share a target. If distinct Spotify recording identities claim one video, the later claimant invalidates only its cached mapping and performs at most two fresh searches while excluding every URL form of the claimed video. Failure to obtain a distinct concrete match is surfaced as a per-track error; the orchestrator never silently submits the colliding target. This adds no persisted schema and uses the existing match-cache invalidation contract.
 
 ### Tag Editor
 

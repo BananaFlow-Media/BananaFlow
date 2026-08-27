@@ -85,8 +85,8 @@ Download + resolution: `downloader.py`, `download_orchestrator.py`
 Scraping + search: `scraper.py` (Playwright scrapers for Spotify / YTM /
 YouTube channels), `search_engine.py`, `channel_tab_discoverer.py`,
 `duplicate_detector.py`, `spotify_match_scorer.py`,
-`artist_catalog.py` (Spotify/YTM category discovery models and conservative
-cross-category duplicate decisions),
+`artist_catalog.py` (Spotify/YTM category discovery models, repeated-occurrence
+collapse and conservative cross-release/category duplicate decisions),
 `spotify_request_builder.py` (the Spotify two-stage matching contract —
 identity, lazy resolver and admission rule — shared by the GUI and the CLI).
 

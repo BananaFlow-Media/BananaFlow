@@ -15,8 +15,9 @@ selected source and resulting tags.
 
 For whole-artist imports, the app may inspect public release categories and
 expand only the categories the user selects. Category selection and duplicate
-review do not change the user's responsibility to follow the service's terms,
-rate limits, copyright rules, and other applicable restrictions.
+review—including bounded re-search when two different Spotify recordings map
+to one YouTube video—do not change the user's responsibility to follow the
+service's terms, rate limits, copyright rules, and other applicable restrictions.
 
 ## User responsibility
 

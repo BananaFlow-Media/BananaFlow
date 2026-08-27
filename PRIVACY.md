@@ -30,7 +30,7 @@ The exact requests depend on selected features and configuration.
 
 Spotify audio is not downloaded from Spotify servers. Spotify metadata is used to identify a separate source, normally YouTube/YouTube Music.
 
-For an artist import, category discovery reads the public sections exposed by the selected artist page. Only categories selected by the user are expanded into tracks. Duplicate comparison and the user's keep/remove decisions happen locally before queue insertion and are not uploaded to BananaFlow.
+For an artist import, category discovery reads the public sections exposed by the selected artist page. Only categories selected by the user are expanded into tracks. Exact repeated release rows are collapsed locally; cross-release/category comparison and the user's keep/remove decisions also happen locally before queue insertion and are not uploaded to BananaFlow. If two different Spotify recordings later resolve to the same concrete YouTube video, BananaFlow may make up to two additional source-resolution attempts for the affected track while excluding the already-claimed video; those attempts transmit the same title/artist/album/duration metadata already used for normal YouTube/YouTube Music matching.
 
 ### Spotify search vs Spotify URL import
 

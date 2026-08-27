@@ -68,7 +68,7 @@ This threat model focuses on security properties of the desktop application and 
 
 - Unsigned Windows binaries cannot provide publisher identity through Authenticode; checksums/attestations help integrity/provenance but are not a substitute for code signing.
 - Browser automation and third-party extraction operate against changing remote services and may expose ordinary network metadata.
-- Artist-category labels, release cards and track metadata are untrusted remote input. Discovery/expansion stays in background workers, duplicate decisions remain local, and remote text must not be treated as a path or instruction.
+- Artist-category labels, release cards and track metadata are untrusted remote input. Discovery/expansion stays in background workers, duplicate decisions remain local, and remote text must not be treated as a path or instruction. Spotify target-collision recovery is bounded, invalidates only the affected cache entry and fails closed rather than silently reusing another recording's concrete video target.
 - Cookies remain sensitive even when protected at rest; same-user malware is not defeated by DPAPI/file permissions.
 - Third-party dependencies and upstream services can change or be compromised; release review and automated scanning reduce but do not eliminate supply-chain risk.
 - Generic-site extraction processes untrusted remote pages and must remain isolated from credentials not required for that operation.

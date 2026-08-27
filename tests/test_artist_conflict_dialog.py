@@ -39,6 +39,27 @@ def test_catalog_only_category_is_exclusive_per_group(app):
     dialog.close()
 
 
+def test_catalog_only_release_is_exclusive_when_category_is_shared(app):
+    from ui.dialogs.catalog_conflict_dialog import CatalogConflictDialog
+
+    tracks = [
+        {
+            "title": "Song", "catalog_section": "album",
+            "album": "Original", "source_release_id": "release-a",
+        },
+        {
+            "title": "Song", "catalog_section": "album",
+            "album": "Deluxe", "source_release_id": "release-b",
+        },
+    ]
+    group = CatalogDuplicateGroup("g", "Song", "exact", (0, 1))
+    dialog = CatalogConflictDialog([group], tracks)
+
+    dialog._cards[0].select_only_release("release-b")
+    assert dialog._cards[0].selected_indices() == {1}
+    dialog.close()
+
+
 def test_youtube_only_videos_clears_playlist_copy(app):
     from ui.dialogs.conflict_resolution_dialog import ConflictResolutionDialog
 

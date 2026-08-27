@@ -727,11 +727,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "artist_section_compilation": "Compilations",
         "artist_section_appears_on": "Appears On",
         "catalog_conflict_title": "Review duplicate tracks",
-        "catalog_conflict_subtitle": "Found {n} tracks that appear in more than one category",
-        "catalog_conflict_explanation": "Choose every location you want to keep. “Only …” keeps that category and clears the other copies.",
+        "catalog_conflict_subtitle": "Found {n} tracks that appear in more than one release or category",
+        "catalog_conflict_explanation": "Choose every location you want to keep. “Only …” keeps that release or category and clears the other copies.",
         "catalog_duplicate_exact": "Exact match",
         "catalog_duplicate_probable": "Probable match — review",
         "catalog_conflict_only": "Only {category}",
+        "catalog_conflict_only_release": "Only {release}",
         "catalog_conflict_keep_all": "Keep all",
         "catalog_conflict_clear_all": "Clear all",
         "catalog_conflict_confirm": "Add selected copies",
@@ -2203,11 +2204,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "artist_section_compilation": "אוספים",
         "artist_section_appears_on": "מופיע באוספים",
         "catalog_conflict_title": "סקירת רצועות כפולות",
-        "catalog_conflict_subtitle": "נמצאו {n} רצועות שמופיעות ביותר מקטגוריה אחת",
-        "catalog_conflict_explanation": "בחר בכל מיקום שברצונך לשמור. „רק…” משאיר את הקטגוריה שנבחרה ומסיר את שאר העותקים.",
+        "catalog_conflict_subtitle": "נמצאו {n} רצועות שמופיעות ביותר ממהדורה או קטגוריה אחת",
+        "catalog_conflict_explanation": "בחר בכל מיקום שברצונך לשמור. „רק…” משאיר את המהדורה או הקטגוריה שנבחרה ומסיר את שאר העותקים.",
         "catalog_duplicate_exact": "התאמה ודאית",
         "catalog_duplicate_probable": "התאמה משוערת — מומלץ לבדוק",
         "catalog_conflict_only": "רק {category}",
+        "catalog_conflict_only_release": "רק {release}",
         "catalog_conflict_keep_all": "השאר הכול",
         "catalog_conflict_clear_all": "נקה הכול",
         "catalog_conflict_confirm": "הוסף עותקים נבחרים",
@@ -3061,6 +3063,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "err_spotify_metadata_invalid_detail": (
             "Spotify החזיר פרטי רצועה חסרים, פגומים או מזוהמים בתוכן מהעמוד. "
             "הרצועה נשארה ללא פתרון ולא נוספה לתור ההורדה."
+        ),
+        "err_spotify_target_collision_title": "התאמת Spotify דורשת בדיקה",
+        "err_spotify_target_collision_detail": (
+            "שתי רצועות Spotify שונות הותאמו לאותה הקלטת YouTube. "
+            "BananaFlow חיפשה שוב אך לא מצאה התאמה נפרדת ואמינה, ולכן "
+            "הרצועה הזו לא הורדה כעותק כפול."
         ),
         "err_browser_cookie_access_title": "לא ניתן לקרוא עוגיות דפדפן בבטחה",
         "err_browser_cookie_access_detail": (

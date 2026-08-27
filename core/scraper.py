@@ -291,6 +291,12 @@ def _spotify_id_from_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _spotify_album_id_from_url(url: str) -> str:
+    """Extract the bare Spotify album id from an album URL, or "" if absent."""
+    match = re.search(r"/album/([A-Za-z0-9]+)", url or "")
+    return match.group(1) if match else ""
+
+
 def _spotify_cache_key(td: Dict) -> Tuple[str, str]:
     """Return ``(spotify_key, key_kind)`` for a track dict.
 
@@ -1396,6 +1402,29 @@ def _spotify_release_type(section_key: str, metadata: str, total_tracks: int) ->
     return section_key
 
 
+def _spotify_release_id_from_grid(grid) -> str:
+    """Read the closest release link that owns one Spotify track-list grid."""
+    try:
+        href = grid.evaluate(
+            """el => {
+                let node = el.parentElement;
+                while (node && node.tagName !== 'MAIN') {
+                    const links = [...node.querySelectorAll('a[href*="/album/"]')]
+                        .map(link => link.getAttribute('href'))
+                        .filter(Boolean);
+                    const unique = [...new Set(links)];
+                    if (unique.length === 1) return unique[0];
+                    if (unique.length > 1) return '';
+                    node = node.parentElement;
+                }
+                return '';
+            }"""
+        ) or ""
+    except Exception:
+        return ""
+    return _spotify_album_id_from_url(href)
+
+
 def _collect_spotify_discography_tracks(
     page,
     *,
@@ -1422,6 +1451,7 @@ def _collect_spotify_discography_tracks(
         last_track = None
         for grid in grids:
             release_title = grid.get_attribute("aria-label") or ""
+            release_id = _spotify_release_id_from_grid(grid)
             if not release_title or release_title == artist_name:
                 try:
                     release_title = grid.evaluate(
@@ -1466,7 +1496,7 @@ def _collect_spotify_discography_tracks(
                     spotify_id = _spotify_id_from_url(href)
                     occurrence = (
                         section_key,
-                        release_title.casefold(),
+                        release_id or release_title.casefold(),
                         spotify_id or f"{position}:{track_title.casefold()}",
                     )
                     if occurrence in seen_occurrences:
@@ -1494,6 +1524,7 @@ def _collect_spotify_discography_tracks(
                         "parent_artist": artist_name,
                         "category": category,
                         "catalog_section": section_key,
+                        "source_release_id": release_id,
                         "release_type": release_type,
                         "album_index": position,
                         "total_tracks": total_tracks,
@@ -1552,7 +1583,7 @@ def _collect_spotify_appears_on(
         for link in page.locator("main a[href*='/album/']").all():
             try:
                 href = link.get_attribute("href") or ""
-                album_id = _spotify_id_from_url(href)
+                album_id = _spotify_album_id_from_url(href)
                 label = (link.get_attribute("aria-label") or link.inner_text() or "").strip()
                 label = next((line.strip() for line in label.splitlines() if line.strip()), label)
                 if album_id:
@@ -1584,6 +1615,7 @@ def _collect_spotify_appears_on(
                 "parent_artist": artist_name,
                 "category": _SPOTIFY_CATEGORY_NAMES["appears_on"],
                 "catalog_section": "appears_on",
+                "source_release_id": album_id,
                 "release_type": "compilation",
                 "album_index": position,
                 "total_tracks": len(matching),
@@ -1847,6 +1879,7 @@ def scrape_ytm_artist(
                     ),
                     "category": release.get("category_name", ""),
                     "catalog_section": release.get("type", "album"),
+                    "source_release_id": release.get("id", ""),
                     "source_id": vid,
                     "album_index": t_idx,
                     "total_tracks": total_tracks,

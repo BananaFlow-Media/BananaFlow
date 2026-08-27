@@ -205,6 +205,12 @@ ERROR_TEXTS_EN: dict[str, str] = {
         "Spotify returned missing, malformed, or page-polluted track details. "
         "This track was left unresolved and was not added to the download queue.",
 
+    "err_spotify_target_collision_title": "Spotify match needs review",
+    "err_spotify_target_collision_detail":
+        "Two different Spotify tracks matched the same YouTube recording. "
+        "BananaFlow searched again but could not find a distinct trustworthy "
+        "match, so this track was not downloaded as a duplicate.",
+
     "err_geo_restricted_title": "Geo-restricted content",
     "err_geo_restricted_detail":
         "This content is not available in your country.\n\n"
@@ -496,6 +502,12 @@ def classify_error(
     network calls are made either way.
     """
     raw_msg = str(exc)
+
+    from core.match_errors import SpotifyTargetCollision
+    if isinstance(exc, SpotifyTargetCollision):
+        return _make_error(
+            "err_spotify_target_collision", ErrorSeverity.WARNING, raw_msg,
+        )
 
     # ── yt-dlp DownloadError ──────────────────────────────────────────────────
     # yt-dlp wraps its errors in DownloadError with a verbose message string.

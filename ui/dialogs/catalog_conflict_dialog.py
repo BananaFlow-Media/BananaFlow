@@ -23,6 +23,15 @@ def _category_name(track: dict) -> str:
     return t(f"artist_section_{section}") if section else str(track.get("category") or "")
 
 
+def _release_key(track: dict) -> str:
+    return str(
+        track.get("source_release_id")
+        or track.get("release_id")
+        or track.get("album")
+        or ""
+    )
+
+
 class _OccurrenceRow(QFrame):
     def __init__(self, index: int, track: dict, parent=None) -> None:
         super().__init__(parent)
@@ -64,15 +73,31 @@ class _CatalogDuplicateCard(QFrame):
             str(row.track.get("catalog_section") or "")
             for row in self.rows if row.track.get("catalog_section")
         })
-        for category in categories:
-            button = PushButton(t("catalog_conflict_only", category=t(
-                f"artist_section_{category}",
-            )))
-            set_button_role(button, "secondary")
-            button.clicked.connect(
-                lambda _checked=False, key=category: self.select_only_category(key)
-            )
-            choices.addWidget(button)
+        if len(categories) > 1:
+            for category in categories:
+                button = PushButton(t("catalog_conflict_only", category=t(
+                    f"artist_section_{category}",
+                )))
+                set_button_role(button, "secondary")
+                button.clicked.connect(
+                    lambda _checked=False, key=category: self.select_only_category(key)
+                )
+                choices.addWidget(button)
+        releases: dict[str, str] = {}
+        for row in self.rows:
+            release_key = _release_key(row.track)
+            if release_key:
+                releases.setdefault(release_key, str(row.track.get("album") or release_key))
+        if len(categories) == 1 and len(releases) > 1:
+            for release_key, release_label in releases.items():
+                button = PushButton(t(
+                    "catalog_conflict_only_release", release=release_label,
+                ))
+                set_button_role(button, "secondary")
+                button.clicked.connect(
+                    lambda _checked=False, key=release_key: self.select_only_release(key)
+                )
+                choices.addWidget(button)
         choices.addStretch()
         layout.addLayout(choices)
         for row in self.rows:
@@ -84,6 +109,10 @@ class _CatalogDuplicateCard(QFrame):
     def select_only_category(self, category: str) -> None:
         for row in self.rows:
             row.checkbox.setChecked(str(row.track.get("catalog_section") or "") == category)
+
+    def select_only_release(self, release_key: str) -> None:
+        for row in self.rows:
+            row.checkbox.setChecked(_release_key(row.track) == release_key)
 
     def set_all(self, checked: bool) -> None:
         for row in self.rows:

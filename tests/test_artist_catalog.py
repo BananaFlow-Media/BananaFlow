@@ -6,6 +6,7 @@ from core.artist_catalog import (
     ArtistCatalogDiscovery,
     ArtistCatalogSection,
     apply_catalog_decisions,
+    deduplicate_catalog_occurrences,
     detect_catalog_duplicates,
     discover_artist_catalog,
     scrape_artist_catalog,
@@ -21,6 +22,9 @@ def _track(
     duration: int = 180,
     spotify_id: str = "",
     video_id: str = "",
+    album: str = "Release",
+    position: int = 1,
+    release_id: str = "",
 ) -> dict:
     return {
         "title": title,
@@ -31,6 +35,9 @@ def _track(
         "source_id": video_id,
         "catalog_section": section,
         "category": section,
+        "album": album,
+        "album_index": position,
+        "source_release_id": release_id,
     }
 
 
@@ -73,12 +80,36 @@ def test_live_and_studio_versions_are_not_collapsed():
     assert detect_catalog_duplicates(tracks) == []
 
 
-def test_duplicates_inside_one_category_do_not_open_cross_category_review():
+def test_same_occurrence_repeated_inside_one_category_is_not_reviewed():
     tracks = [
         _track("Song", "album", spotify_id="same"),
         _track("Song", "album", spotify_id="same"),
     ]
     assert detect_catalog_duplicates(tracks) == []
+
+
+def test_duplicates_across_releases_inside_one_category_are_reviewed():
+    tracks = [
+        _track("Song", "album", spotify_id="same", album="Original", release_id="a"),
+        _track("Song", "album", spotify_id="same", album="Deluxe", release_id="b"),
+    ]
+    groups = detect_catalog_duplicates(tracks)
+    assert len(groups) == 1
+    assert groups[0].confidence == "exact"
+    assert groups[0].indices == (0, 1)
+
+
+def test_exact_repeat_of_a_release_occurrence_is_collapsed_once():
+    original = _track(
+        "Song", "album", spotify_id="same", album="Album", position=3,
+        release_id="release-1",
+    )
+    duplicate = dict(original)
+    other_release = dict(original, album="Album Deluxe", source_release_id="release-2")
+
+    assert deduplicate_catalog_occurrences(
+        [original, duplicate, other_release]
+    ) == [original, other_release]
 
 
 def test_decisions_keep_selected_occurrence_and_preserve_order():
@@ -158,3 +189,33 @@ def test_selected_spotify_labels_are_forwarded_and_pending(monkeypatch):
     assert captured["metadata_only"] is True
     assert tracks[0]["match_status"] == "pending"
     assert tracks[0]["url"].startswith("ytsearch1:")
+
+
+def test_artist_scan_collapses_a_provider_returning_the_whole_release_twice(
+    monkeypatch,
+):
+    discovery = ArtistCatalogDiscovery(
+        url="https://open.spotify.com/artist/abc",
+        platform=SourcePlatform.SPOTIFY,
+        artist_name="Artist",
+        sections=[ArtistCatalogSection("album", "Albums")],
+    )
+    occurrence = {
+        "title": "Song",
+        "artist": "Artist",
+        "album": "Only Album",
+        "album_index": 1,
+        "duration_sec": 180,
+        "spotify_id": "track-id",
+        "catalog_section": "album",
+        "platform": "spotify",
+    }
+    monkeypatch.setattr(
+        "core.scraper.scrape_spotify_artist",
+        lambda *_args, **_kwargs: ("Artist", [occurrence, dict(occurrence)]),
+    )
+
+    tracks = scrape_artist_catalog(discovery, ["album"])
+
+    assert len(tracks) == 1
+    assert tracks[0]["spotify_id"] == "track-id"

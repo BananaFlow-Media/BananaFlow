@@ -183,7 +183,7 @@ def scrape_artist_catalog(
                 query = f"{track.get('artist', '')} {track.get('title', '')}".strip()
                 track["url"] = f"ytsearch1:{query} audio"
             track.setdefault("match_status", "pending")
-    return tracks
+    return deduplicate_catalog_occurrences(tracks)
 
 
 def _identity_text(value: object) -> str:
@@ -217,6 +217,31 @@ def _stable_identity(track: Mapping[str, object]) -> str:
     return ""
 
 
+def _catalog_location(track: Mapping[str, object]) -> tuple[str, str, int]:
+    """Return the release occurrence that owns one catalog row.
+
+    Category alone is not a location: the same recording can occur in two
+    different albums, singles or compilations inside the same category.  A
+    provider release id is preferred; older/fallback scrapers use the release
+    title.  Track position keeps a deliberate repeated recording inside one
+    release reviewable instead of silently collapsing it.
+    """
+    section = _identity_text(
+        track.get("catalog_section") or track.get("category") or track.get("release_type")
+    )
+    release = _identity_text(
+        track.get("source_release_id")
+        or track.get("release_id")
+        or track.get("album")
+        or track.get("release_title")
+    )
+    try:
+        position = int(track.get("album_index") or track.get("track_number") or 0)
+    except (TypeError, ValueError):
+        position = 0
+    return section, release, position
+
+
 def _probable_base(track: Mapping[str, object]) -> tuple[str, str]:
     return (
         _identity_text(track.get("title")),
@@ -229,6 +254,34 @@ def _duration(track: Mapping[str, object]) -> int:
         return int(float(track.get("duration_sec") or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def deduplicate_catalog_occurrences(tracks: Iterable[dict]) -> list[dict]:
+    """Collapse an exact row emitted twice for the same release position.
+
+    This is deliberately narrower than recording duplicate detection.  It
+    protects artist imports when a provider repeats a shelf/release while a
+    paginated or virtualised view is being expanded, but preserves the same
+    recording in a different release so the user can choose its metadata and
+    output location in the conflict dialog.
+    """
+    result: list[dict] = []
+    seen: set[tuple[str, tuple[str, str, int]]] = set()
+    for track in tracks:
+        identity = _stable_identity(track)
+        if not identity:
+            base = _probable_base(track)
+            duration = _duration(track)
+            if not all(base):
+                result.append(track)
+                continue
+            identity = f"metadata:{base[0]}:{base[1]}:{duration}"
+        occurrence = (identity, _catalog_location(track))
+        if occurrence in seen:
+            continue
+        seen.add(occurrence)
+        result.append(track)
+    return result
 
 
 def detect_catalog_duplicates(tracks: list[dict]) -> list[CatalogDuplicateGroup]:
@@ -282,10 +335,7 @@ def detect_catalog_duplicates(tracks: list[dict]) -> list[CatalogDuplicateGroup]
     for indices in components.values():
         if len(indices) < 2:
             continue
-        locations = {
-            str(tracks[index].get("catalog_section") or tracks[index].get("category") or "")
-            for index in indices
-        }
+        locations = {_catalog_location(tracks[index]) for index in indices}
         if len(locations) < 2:
             continue
         stable_values = {_stable_identity(tracks[index]) for index in indices}

@@ -1,9 +1,11 @@
 """Spotify artist category helpers remain locale-aware and deterministic."""
 
 from core.scraper import (
+    _spotify_album_id_from_url,
     _spotify_artist_base_url,
     _spotify_credit_matches_artist,
     _spotify_release_type,
+    _spotify_release_id_from_grid,
     _spotify_section_key,
 )
 
@@ -31,3 +33,31 @@ def test_release_type_distinguishes_album_ep_single_and_compilation():
 def test_appears_on_credit_filter_requires_exact_credit_not_substring():
     assert _spotify_credit_matches_artist({"artist": "Artist, Guest"}, "Artist")
     assert not _spotify_credit_matches_artist({"artist": "Artist Junior"}, "Artist")
+
+
+def test_release_id_uses_the_closest_album_link_for_a_track_grid():
+    class Grid:
+        @staticmethod
+        def evaluate(_script):
+            return "/album/21jF5jlMtzo94wbxmJ18aa"
+
+    assert _spotify_release_id_from_grid(Grid()) == "21jF5jlMtzo94wbxmJ18aa"
+
+
+def test_release_id_is_optional_when_spotify_dom_has_no_owner_link():
+    class Grid:
+        @staticmethod
+        def evaluate(_script):
+            return ""
+
+    assert _spotify_release_id_from_grid(Grid()) == ""
+
+
+def test_album_id_helper_does_not_confuse_tracks_and_albums():
+    assert (
+        _spotify_album_id_from_url(
+            "https://open.spotify.com/album/21jF5jlMtzo94wbxmJ18aa"
+        )
+        == "21jF5jlMtzo94wbxmJ18aa"
+    )
+    assert _spotify_album_id_from_url("https://open.spotify.com/track/abc") == ""
