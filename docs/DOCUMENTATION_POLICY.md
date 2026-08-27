@@ -45,7 +45,7 @@ the same documents, so the policy and CI map cannot silently lose a domain.
 
 | CI rule / changed area | Enforced documentation impact |
 |---|---|
-| <!-- impact-rule: downloader/reliability --> Downloader, orchestration, retry and yt-dlp options | Review `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/architecture/overview.md`, `docs/testing/TESTING.md`. |
+| <!-- impact-rule: downloader/reliability --> Downloader, orchestration, typed match errors, retry and yt-dlp options | Review `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `docs/architecture/overview.md`, `docs/testing/TESTING.md`. |
 | <!-- impact-rule: CLI --> `cli.py` | Update one of `docs/user-guide/cli.md`, `docs/user-guide/user-manual.md`; review both `docs/user-guide/cli.md`, `docs/user-guide/user-manual.md`. |
 | <!-- impact-rule: authentication/privacy --> Cookies, authentication, browser sessions and YouTube Doctor | Review `SECURITY.md`, `PRIVACY.md`, `docs/security/threat-model.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`. No global no-impact bypass. |
 | <!-- impact-rule: Spotify/search --> Spotify, YouTube Music and search integration | Review `docs/user-guide/spotify-proxy-api.md`, `docs/user-guide/user-manual.md`, `docs/user-guide/user-guide-he.md`, `PRIVACY.md`, `docs/architecture/overview.md`. |

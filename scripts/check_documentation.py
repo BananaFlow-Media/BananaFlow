@@ -128,6 +128,7 @@ IMPACT_RULES = (
         (
             r"^error_handler\.py$",
             r"^core/downloader\.py$", r"^core/download_orchestrator\.py$",
+            r"^core/match_errors\.py$",
             r"^core/retry_policy\.py$", r"^core/youtube_reliability\.py$",
             r"^core/(?:hls_downloader|universal_extractor)\.py$",
             r"^utils/yt_dlp_opts\.py$",
