@@ -367,7 +367,7 @@ def test_valid_spotify_strict_miss_uses_legacy_search_and_does_not_block_peer(
     assert result.failed == 0
     assert set(engine.urls) == {
         "https://www.youtube.com/watch?v=official1",
-        "ytsearch1:Artist Song audio",
+        "ytsearch1:Artist Song",
     }
     assert callbacks.errors == []
 

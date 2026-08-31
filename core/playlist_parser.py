@@ -88,10 +88,12 @@ class TrackMeta:
     index:          int   = 0           # 1-based position in the result list (for sorting)
     album_index:    int   = 0           # 1-based position in the album/release (for filename)
     disc_number:    int   = 0           # 1-based disc, 0 = no disc context (multi-disc releases)
+    disc_total:     int   = 0           # total discs when the provider reports it
     url:            str   = ""          # canonical watch/track URL
     title:          str   = "Unknown Title"
     artist:         str   = ""          # uploader / artist name
     album:          str   = ""          # album / playlist title
+    collection_title: str = ""          # source album/playlist/release identity
     parent_artist:  str   = ""          # cleaned root artist for organization
     release_type:   str   = ""          # album/single/playlist/performance/compilation
 
@@ -385,6 +387,12 @@ def _entry_to_track(
         title=cleaned_title,
         artist=cleaned_artist,
         album=(entry.get("album") or entry.get("playlist_title") or album or "").strip(),
+        collection_title=(
+            entry.get("collection_title")
+            or entry.get("playlist_title")
+            or album
+            or ""
+        ).strip(),
         duration_sec=duration_sec,
         duration_str=TrackMeta.format_duration(duration_sec),
         thumbnail_url=clean_artwork_url(
@@ -400,6 +408,7 @@ def _entry_to_track(
         release_type=entry.get("release_type", ""),
         album_index=entry.get("album_index", 0) or entry.get("playlist_index", 0),
         disc_number=entry.get("disc_number", 0),
+        disc_total=entry.get("disc_total", 0) or entry.get("disc_count", 0),
         selected=True,
     )
 
@@ -486,11 +495,13 @@ class PlaylistParser:
                 title=track_data.get("title", f"Item {idx}"),
                 artist=track_data.get("artist", ""),
                 album=track_data.get("album", ""),
+                collection_title=track_data.get("collection_title", ""),
                 parent_artist=track_data.get("parent_artist") or "",
                 release_type=track_data.get("release_type", ""),
                 category=track_data.get("category", ""),
                 album_index=track_data.get("album_index", 0),
                 disc_number=track_data.get("disc_number", 0),
+                disc_total=track_data.get("disc_total", 0),
                 thumbnail_url=track_data.get("thumbnail_url", ""),
                 duration_str=track_data.get("duration_str", ""),
                 duration_sec=track_data.get("duration_sec"),

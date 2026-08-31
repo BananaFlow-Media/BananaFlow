@@ -19,6 +19,7 @@ Zero GUI imports.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 
 # Conservative defaults for YouTube downloads. These are intentionally
@@ -27,6 +28,10 @@ from urllib.parse import urlparse
 CONSERVATIVE_MAX_PARALLEL_YOUTUBE = 1
 CONSERVATIVE_DELAY_RANGE          = (5.0, 10.0)   # seconds, between YouTube jobs
 CONSERVATIVE_FRAGMENT_CONCURRENCY = 1
+# Mirrors yt-dlp's documented ``-t sleep`` extraction-request pacing. The
+# orchestrator spaces top-level jobs; this covers the otherwise invisible
+# player/API requests made inside one yt-dlp extraction.
+YOUTUBE_REQUEST_SLEEP_SECONDS     = 0.75
 
 # Exact hostnames only — checked against the parsed URL's hostname, not
 # via substring search. A substring check would treat
@@ -55,3 +60,9 @@ def is_youtube_url(url: str) -> bool:
     except ValueError:
         return False
     return bool(hostname) and hostname.lower() in _YOUTUBE_HOSTS
+
+
+def is_youtube_target(target: str) -> bool:
+    """True for a concrete YouTube URL or an yt-dlp YouTube search request."""
+    text = str(target or "").strip().casefold()
+    return is_youtube_url(text) or bool(re.match(r"^ytsearch\d*:", text))

@@ -8,8 +8,10 @@ best-reasonable path after strict matching is inconclusive.
 
 The network path starts with a flat yt-dlp search.  Decisive results avoid the
 old eager extraction of every result; ambiguous results receive bounded deep
-validation.  This keeps the common path cheap without making speed a reason to
-accept an unproved cover, remix, or performance.
+validation.  When the primary wording has no usable candidate, a bounded set
+of identity-preserving query variants is searched before declaring a miss.
+This keeps the common path cheap without making speed a reason to accept an
+unproved cover, remix, or performance.
 """
 
 from __future__ import annotations
@@ -21,10 +23,16 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable, Iterable, Optional
 
+from core.download_recovery import (
+    YouTubeRateLimited,
+    rate_limit_error_from_messages,
+)
+from core.youtube_reliability import YOUTUBE_REQUEST_SLEEP_SECONDS
+
 logger = logging.getLogger(__name__)
 
 # Cache rows made by older matchers are intentionally invisible.
-MATCH_ALGO_VERSION = 5
+MATCH_ALGO_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -613,6 +621,72 @@ def _rank(matches: Iterable[MatchResult]) -> list[MatchResult]:
     )
 
 
+def _search_text(value: str) -> str:
+    """Normalize provider punctuation without discarding Unicode words."""
+    normalized = unicodedata.normalize("NFKC", value or "")
+    return " ".join(re.sub(r"[^\w\s]+", " ", normalized, flags=re.UNICODE).split())
+
+
+def youtube_identity_search_text(title: str, artist: str) -> str:
+    """Build the normalized artist-title wording used by the final fallback."""
+    clean_title = _search_text(title)
+    clean_artist = _search_text(artist)
+    return " ".join(part for part in (clean_artist, clean_title) if part)
+
+
+def youtube_search_query_variants(
+    title: str,
+    artist: str,
+    album: str = "",
+) -> tuple[str, ...]:
+    """Return bounded search wordings that preserve recording identity.
+
+    Every variant contains both the artist and title.  The album is optional
+    context only; there is deliberately no title-only or generic ``audio``
+    fallback because either can turn a discovery miss into the wrong song.
+    """
+    raw_title = " ".join(unicodedata.normalize("NFKC", title or "").split())
+    raw_artist = " ".join(unicodedata.normalize("NFKC", artist or "").split())
+    if not raw_title or not raw_artist:
+        return ()
+
+    clean_title = _search_text(raw_title)
+    clean_artist = _search_text(raw_artist)
+    clean_album = _search_text(album)
+    if not clean_title or not clean_artist:
+        return ()
+
+    proposed = [
+        f"{raw_artist} {raw_title}",
+        youtube_identity_search_text(clean_title, clean_artist),
+        f"{clean_title} {clean_artist}",
+    ]
+    if clean_album:
+        proposed.append(f"{clean_artist} {clean_title} {clean_album}")
+
+    variants: list[str] = []
+    seen: set[str] = set()
+    for query in proposed:
+        query = " ".join(query.split())
+        key = query.casefold()
+        if query and key not in seen:
+            seen.add(key)
+            variants.append(query)
+    return tuple(variants)
+
+
+def _rank_unique(matches: Iterable[MatchResult]) -> list[MatchResult]:
+    """Rank matches deterministically and retain the best row per URL."""
+    unique: list[MatchResult] = []
+    seen_urls: set[str] = set()
+    for match in _rank(matches):
+        if match.url in seen_urls:
+            continue
+        seen_urls.add(match.url)
+        unique.append(match)
+    return unique
+
+
 def _search(
     query: str,
     *,
@@ -623,9 +697,10 @@ def _search(
     from utils.logger import SilentLogger
     from utils.yt_dlp_opts import build_base_ydl_opts, temp_cookies_copy
 
+    capture = SilentLogger()
     with temp_cookies_copy(cookies_file) as cookie_copy:
         opts = build_base_ydl_opts(
-            cookies_file=cookie_copy, logger=SilentLogger(), quiet=True,
+            cookies_file=cookie_copy, logger=capture, quiet=True,
             retries=1, socket_timeout=8, respect_po_token_circuit=True,
         )
         opts.update({
@@ -634,9 +709,21 @@ def _search(
             "no_warnings": True,
             "extractor_retries": 1,
             "ignoreerrors": True,
+            "sleep_interval_requests": YOUTUBE_REQUEST_SLEEP_SECONDS,
         })
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(query, download=False) or {}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(query, download=False) or {}
+        except Exception as exc:
+            limited = rate_limit_error_from_messages(
+                str(exc), *capture.errors, *capture.warnings,
+            )
+            if limited is not None:
+                raise limited from exc
+            raise
+    limited = rate_limit_error_from_messages(*capture.errors, *capture.warnings)
+    if limited is not None:
+        raise limited
     return [entry for entry in (info.get("entries") or []) if entry]
 
 
@@ -654,19 +741,36 @@ def _deep_validate_urls(
     from utils.yt_dlp_opts import build_base_ydl_opts, temp_cookies_copy
 
     validated: list[MatchResult] = []
+    capture = SilentLogger()
     with temp_cookies_copy(cookies_file) as cookie_copy:
         opts = build_base_ydl_opts(
-            cookies_file=cookie_copy, logger=SilentLogger(), quiet=True,
+            cookies_file=cookie_copy, logger=capture, quiet=True,
             retries=1, socket_timeout=8, respect_po_token_circuit=True,
         )
-        opts.update({"skip_download": True, "no_warnings": True, "extractor_retries": 1})
+        opts.update({
+            "skip_download": True,
+            "no_warnings": True,
+            "extractor_retries": 1,
+            "sleep_interval_requests": YOUTUBE_REQUEST_SLEEP_SECONDS,
+        })
         with yt_dlp.YoutubeDL(opts) as ydl:
             for url in urls:
+                capture.clear()
                 try:
                     entry = ydl.extract_info(url, download=False) or {}
                 except Exception as exc:  # one unavailable result must not sink the rest
+                    limited = rate_limit_error_from_messages(
+                        str(exc), *capture.errors, *capture.warnings,
+                    )
+                    if limited is not None:
+                        raise limited from exc
                     logger.debug("[MatchScorer] deep validation failed for %s: %s", url, exc)
                     continue
+                limited = rate_limit_error_from_messages(
+                    *capture.errors, *capture.warnings,
+                )
+                if limited is not None:
+                    raise limited
                 match = _entry_match(entry, title, artist, duration_sec, album)
                 if match:
                     validated.append(match)
@@ -684,21 +788,41 @@ def find_best_youtube_match(
     path_observer: Optional[Callable[[str], None]] = None,
     album: str = "",
     allow_reasonable_fallback: bool = False,
+    search_variants: bool = True,
 ) -> Optional[MatchResult]:
-    """Return the strict match, or an explicitly requested reasonable fallback."""
-    excluded = exclude_urls or set()
-    query = f"ytsearch{max(1, min(max_candidates, 10))}:{artist} {title}".strip()
-    try:
-        entries = _search(query, extract_flat=True, cookies_file=cookies_file)
-    except Exception as exc:
-        logger.debug("[MatchScorer] flat search failed: %s", exc)
-        entries = []
+    """Return the strict match, or an explicitly requested reasonable fallback.
 
-    flat = _rank(
-        match for entry in entries
-        if (match := _entry_match(entry, title, artist, duration_sec, album)) is not None
-        and match.url not in excluded
-    )
+    The exact artist-title wording is searched first.  Extra bounded wordings
+    are used only when that first result set contains no candidate that passes
+    either the strict or reasonable identity gates.
+    """
+    excluded = exclude_urls or set()
+    query_limit = max(1, min(max_candidates, 10))
+    queries = youtube_search_query_variants(title, artist, album)
+    if not queries:
+        if path_observer:
+            path_observer("conservative_miss")
+        return None
+
+    matches: list[MatchResult] = []
+
+    def _search_variant(query_text: str) -> None:
+        query = f"ytsearch{query_limit}:{query_text}"
+        try:
+            entries = _search(query, extract_flat=True, cookies_file=cookies_file)
+        except YouTubeRateLimited:
+            raise
+        except Exception as exc:
+            logger.debug("[MatchScorer] flat search failed for %r: %s", query_text, exc)
+            return
+        matches.extend(
+            match for entry in entries
+            if (match := _entry_match(entry, title, artist, duration_sec, album)) is not None
+            and match.url not in excluded
+        )
+
+    _search_variant(queries[0])
+    flat = _rank_unique(matches)
     safe_flat = [item for item in flat if item.safe and item.confidence >= min_confidence]
 
     # A complete, well-separated flat result is already proven. A close
@@ -713,6 +837,27 @@ def find_best_youtube_match(
                 path_observer("flat")
             return best
 
+    primary_has_usable_candidate = bool(safe_flat) or any(
+        is_reasonable_fallback_match(item) for item in flat
+    )
+    if search_variants and not primary_has_usable_candidate:
+        for query_text in queries[1:]:
+            _search_variant(query_text)
+            flat = _rank_unique(matches)
+            safe_flat = [
+                item for item in flat
+                if item.safe and item.confidence >= min_confidence
+            ]
+
+            if safe_flat:
+                best = safe_flat[0]
+                runner_score = safe_flat[1].score if len(safe_flat) > 1 else -1.0
+                if best.evidence_quality == "complete" and best.score - runner_score >= 8.0:
+                    best.breakdown["resolution_path"] = "flat_variants"
+                    if path_observer:
+                        path_observer("flat_variants")
+                    return best
+
     # Validate at most the three strongest semantic candidates. This is the
     # quality guard omitted by the original flat-search experiment.
     validation_urls = [item.url for item in flat[:3]]
@@ -723,6 +868,8 @@ def find_best_youtube_match(
             validation_urls, title=title, artist=artist,
             duration_sec=duration_sec, cookies_file=cookies_file, album=album,
         )) if validation_urls else []
+    except YouTubeRateLimited:
+        raise
     except Exception as exc:
         logger.debug("[MatchScorer] bounded validation failed: %s", exc)
         deep = []

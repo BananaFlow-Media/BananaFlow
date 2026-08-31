@@ -282,4 +282,4 @@ class TestResolveToYtmUrl:
         monkeypatch.setattr("core.spotify_match_scorer.find_best_youtube_match", lambda *a, **k: None)
 
         url = _resolve_to_ytm_url("Nonexistent Song", "Nonexistent Artist", 224)
-        assert url == "ytsearch1:Nonexistent Artist Nonexistent Song audio"
+        assert url == "ytsearch1:Nonexistent Artist Nonexistent Song"

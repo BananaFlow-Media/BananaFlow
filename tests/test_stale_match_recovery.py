@@ -139,5 +139,5 @@ def test_empty_lazy_match_is_repaired_before_engine_submission(tmp_path):
     )
     assert result.failed == 0
     assert result.completed == 1
-    assert engine.urls == ["ytsearch1:Artist Song audio"]
+    assert engine.urls == ["ytsearch1:Artist Song"]
     assert callbacks.errors == []

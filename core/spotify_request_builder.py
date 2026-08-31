@@ -113,6 +113,8 @@ def build_spotify_resolver(
         resolved = resolve_track_to_youtube(
             _td, cookies_file=_cookies,
             cancel_check=lambda: ev is not None and ev.is_set(),
+            rate_wait_callback=getattr(_resolve, "rate_wait_callback", None),
+            recovery_coordinator=getattr(_resolve, "recovery_coordinator", None),
         )
         _resolve.resolve_source = _td.get("_match_source", "live")
         return _clean(resolved)

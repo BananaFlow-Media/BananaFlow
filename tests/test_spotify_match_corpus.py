@@ -8,6 +8,7 @@ from core.spotify_match_scorer import (
     _rank,
     find_best_youtube_match,
     match_from_metadata,
+    youtube_search_query_variants,
 )
 from utils.metadata_cleaner import clean_title_and_artist
 from scripts.validate_spotify_matching import independent_recording_oracle
@@ -95,6 +96,75 @@ def test_ambiguous_flat_search_deep_validates_at_most_three(monkeypatch):
     find_best_youtube_match("Song", "Artist", 200, path_observer=paths.append)
     assert len(seen) <= 3
     assert "deep_validation" in paths
+
+
+def test_search_query_variants_keep_artist_and_title_identity():
+    variants = youtube_search_query_variants(
+        "HO’ADERES—VEHAMUNAH!", "Ruvi New", "Faith: Collection",
+    )
+
+    assert variants == (
+        "Ruvi New HO’ADERES—VEHAMUNAH!",
+        "Ruvi New HO ADERES VEHAMUNAH",
+        "HO ADERES VEHAMUNAH Ruvi New",
+        "Ruvi New HO ADERES VEHAMUNAH Faith Collection",
+    )
+    assert all("Ruvi New" in query for query in variants)
+    assert all("HO" in query and "VEHAMUNAH" in query for query in variants)
+    assert all("audio" not in query.casefold() for query in variants)
+
+
+def test_empty_primary_search_uses_normalized_variant_and_scores_result(monkeypatch):
+    queries = []
+
+    def fake_search(query, **_kwargs):
+        queries.append(query)
+        if query == "ytsearch8:Ruvi New HO ADERES VEHAMUNAH":
+            return [{
+                "id": "right",
+                "title": "Ruvi New - HO'ADERES VEHAMUNAH",
+                "channel": "Ruvi New - Topic",
+                "artists": [{"name": "Ruvi New"}],
+                "duration": 203,
+            }]
+        return []
+
+    monkeypatch.setattr("core.spotify_match_scorer._search", fake_search)
+    monkeypatch.setattr(
+        "core.spotify_match_scorer._deep_validate_urls", lambda *_a, **_k: [],
+    )
+
+    result = find_best_youtube_match(
+        "HO’ADERES—VEHAMUNAH!", "Ruvi New", 203,
+    )
+
+    assert result is not None
+    assert result.url.endswith("right")
+    assert result.breakdown["resolution_path"] == "flat_variants"
+    assert queries == [
+        "ytsearch8:Ruvi New HO’ADERES—VEHAMUNAH!",
+        "ytsearch8:Ruvi New HO ADERES VEHAMUNAH",
+    ]
+
+
+def test_decisive_primary_search_does_not_issue_extra_variants(monkeypatch):
+    queries = []
+    entries = [{
+        "id": "right",
+        "title": "Adele - Easy On Me",
+        "channel": "Adele - Topic",
+        "artists": [{"name": "Adele"}],
+        "duration": 224,
+    }]
+    monkeypatch.setattr(
+        "core.spotify_match_scorer._search",
+        lambda query, **_kwargs: queries.append(query) or entries,
+    )
+
+    result = find_best_youtube_match("Easy On Me", "Adele", 224)
+
+    assert result is not None
+    assert queries == ["ytsearch8:Adele Easy On Me"]
 
 
 def test_metadata_cleaner_preserves_recording_version_markers():

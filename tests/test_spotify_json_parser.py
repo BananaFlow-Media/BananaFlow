@@ -16,6 +16,7 @@ def test_extract_spotify_data_from_json_playlist():
                         "name": "Easy On Me",
                         "uri": "spotify:track:4tv53J43423423",
                         "duration_ms": 224000,
+                        "disc_number": 2,
                         "artists": [
                             {"name": "Adele", "type": "artist"}
                         ],
@@ -38,6 +39,9 @@ def test_extract_spotify_data_from_json_playlist():
     assert items[0]["title"] == "Easy On Me"
     assert items[0]["artist"] == "Adele"
     assert items[0]["album"] == "30"
+    assert items[0]["collection_title"] == "My Great Hits"
+    assert items[0]["disc_number"] == 2
+    assert items[0]["disc_total"] == 2
     assert items[0]["duration_sec"] == 224
     assert "https://i.scdn.co/image/" in items[0]["thumbnail_url"]
 
@@ -73,6 +77,7 @@ def test_parse_spotify_json_fallback_script_tag():
     assert items[0]["title"] == "Track One"
     assert items[0]["artist"] == "Mock Artist"
     assert items[0]["duration_sec"] == 150
+    assert items[0]["collection_title"] == "Mock Album"
 
 
 def test_parse_spotify_json_fallback_js_assignment():
@@ -106,3 +111,4 @@ def test_parse_spotify_json_fallback_js_assignment():
     assert items[0]["title"] == "Track Two"
     assert items[0]["artist"] == "Second Artist"
     assert items[0]["duration_sec"] == 180
+    assert items[0]["collection_title"] == "Dynamic Playlist"

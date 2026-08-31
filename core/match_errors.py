@@ -13,6 +13,10 @@ class SpotifyTargetCollision(RuntimeError):
     """Distinct Spotify recordings could not obtain distinct YouTube targets."""
 
 
+class YouTubeSearchNoResults(LookupError):
+    """yt-dlp completed a ytsearch request whose playlist contained 0 items."""
+
+
 _MEDIA_UNAVAILABLE_RE = re.compile(
     r"private video|video unavailable|has been removed|no longer available|"
     r"video (?:was )?deleted|this video is unavailable",

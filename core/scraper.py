@@ -17,6 +17,12 @@ import logging
 import re
 import threading
 import yt_dlp
+from core.download_recovery import (
+    DownloadRecoveryCoordinator,
+    YouTubeRateLimited,
+    rate_limit_error_from_messages,
+    shared_download_recovery_coordinator,
+)
 from utils.yt_dlp_opts import build_parse_ydl_opts as _build_parse_ydl_opts
 from utils.logger import SilentLogger as _SilentLogger
 from utils.playwright_check import require_playwright_or_raise
@@ -27,6 +33,137 @@ if TYPE_CHECKING:
     from playwright.sync_api import Page  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+_YTM_ALBUM_CATALOG_CACHE_LIMIT = 32
+_ytm_album_catalog_lock = threading.Lock()
+_ytm_album_catalog_cache: dict[tuple[str, str, str], tuple[dict, ...]] = {}
+
+
+class _YTMAlbumCatalogFlight:
+    """One process-local release expansion shared by concurrent tracks."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.rows: tuple[dict, ...] = ()
+        self.error: Optional[BaseException] = None
+
+
+_ytm_album_catalog_flights: dict[
+    tuple[str, str, str], _YTMAlbumCatalogFlight,
+] = {}
+
+
+def _ytm_album_catalog(yt, artist: str, album: str) -> list[dict]:
+    """Return a bounded, cached YTMusic album catalog for one release.
+
+    Song search can omit obscure album cuts even when YTMusic exposes the
+    complete release.  This lookup searches albums only after the ordinary
+    song variants miss, verifies both release and primary-artist identity,
+    then expands at most two releases.  Raw rows are cached per client class
+    and release so a 20-track album does not repeat the same network work.
+    """
+    from core.spotify_match_scorer import (
+        _artist_evidence,
+        _fold,
+        _similarity,
+        parse_artist_credits,
+        youtube_identity_search_text,
+    )
+
+    clean_album = " ".join((album or "").split())
+    clean_artist = " ".join((artist or "").split())
+    if not clean_album or not clean_artist:
+        return []
+    client_type = type(yt)
+    key = (
+        f"{client_type.__module__}.{client_type.__qualname__}",
+        _fold(clean_artist),
+        _fold(clean_album),
+    )
+    with _ytm_album_catalog_lock:
+        cached = _ytm_album_catalog_cache.get(key)
+        if cached is not None:
+            return [dict(row) for row in cached]
+        flight = _ytm_album_catalog_flights.get(key)
+        owner = flight is None
+        if owner:
+            flight = _YTMAlbumCatalogFlight()
+            _ytm_album_catalog_flights[key] = flight
+
+    if not owner:
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        return [dict(row) for row in flight.rows]
+
+    try:
+        query = youtube_identity_search_text(clean_album, clean_artist)
+        releases = yt.search(query, filter="albums", limit=5) or []
+        primary_artist = parse_artist_credits(clean_artist).primary or clean_artist
+        ranked_releases: list[tuple[float, str, str, tuple[str, ...]]] = []
+        for release in releases:
+            if not isinstance(release, dict):
+                continue
+            browse_id = str(
+                release.get("browseId") or release.get("browse_id") or ""
+            ).strip()
+            release_title = str(release.get("title") or "").strip()
+            raw_artists = release.get("artists") or []
+            artist_names = tuple(
+                str(item.get("name") or "").strip()
+                for item in raw_artists
+                if isinstance(item, dict) and item.get("name")
+            )
+            album_similarity = _similarity(_fold(clean_album), _fold(release_title))
+            artist_evidence = _artist_evidence(
+                primary_artist, "", "", artist_names,
+            )
+            if browse_id and album_similarity >= 0.72 and artist_evidence >= 0.72:
+                ranked_releases.append(
+                    (
+                        album_similarity + artist_evidence,
+                        browse_id,
+                        release_title,
+                        artist_names,
+                    )
+                )
+
+        rows: list[dict] = []
+        seen_video_ids: set[str] = set()
+        for _score, browse_id, release_title, release_artists in sorted(
+            ranked_releases, reverse=True,
+        )[:2]:
+            release = yt.get_album(browse_id) or {}
+            for raw_track in release.get("tracks") or []:
+                if not isinstance(raw_track, dict):
+                    continue
+                video_id = str(raw_track.get("videoId") or "").strip()
+                if not video_id or video_id in seen_video_ids:
+                    continue
+                seen_video_ids.add(video_id)
+                row = dict(raw_track)
+                if not row.get("artists") and release_artists:
+                    row["artists"] = [{"name": name} for name in release_artists]
+                if not row.get("album"):
+                    row["album"] = {"name": release_title or clean_album}
+                rows.append(row)
+
+        frozen_rows = tuple(dict(row) for row in rows)
+        flight.rows = frozen_rows
+        with _ytm_album_catalog_lock:
+            _ytm_album_catalog_cache[key] = frozen_rows
+            while len(_ytm_album_catalog_cache) > _YTM_ALBUM_CATALOG_CACHE_LIMIT:
+                oldest = next(iter(_ytm_album_catalog_cache))
+                _ytm_album_catalog_cache.pop(oldest, None)
+        return [dict(row) for row in frozen_rows]
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    finally:
+        flight.done.set()
+        with _ytm_album_catalog_lock:
+            if _ytm_album_catalog_flights.get(key) is flight:
+                _ytm_album_catalog_flights.pop(key, None)
 
 
 def _emit_pending_track(
@@ -122,7 +259,6 @@ def _resolve_to_ytm_url(
 
     title, artist_credits = validate_spotify_track_metadata(title, [artist])
     artist = ", ".join(artist_credits)
-    query = f"{artist} {title}" if artist else title
     excluded = exclude_urls or set()
     ytm_matches = []
     best_ytm_match = None
@@ -130,27 +266,43 @@ def _resolve_to_ytm_url(
 
     try:
         from ytmusicapi import YTMusic
-        from core.spotify_match_scorer import match_from_metadata
+        from core.spotify_match_scorer import (
+            is_reasonable_fallback_match,
+            match_from_metadata,
+            youtube_search_query_variants,
+        )
 
         yt = YTMusic()
-        results = yt.search(query, filter="songs", limit=5)
-        if results:
-            def _dur_secs(r: dict) -> int:
-                d = r.get("duration_seconds")
-                if d:
-                    return int(d)
-                d_str = r.get("duration", "")
-                if d_str and ":" in d_str:
-                    parts = d_str.split(":")
-                    try:
-                        if len(parts) == 2:
-                            return int(parts[0]) * 60 + int(parts[1])
-                        if len(parts) == 3:
-                            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                    except (ValueError, TypeError):
-                        pass
-                return 0
+        queries = youtube_search_query_variants(title, artist, album)
 
+        def _dur_secs(r: dict) -> int:
+            d = r.get("duration_seconds")
+            if d:
+                return int(d)
+            d_str = r.get("duration", "")
+            if d_str and ":" in d_str:
+                parts = d_str.split(":")
+                try:
+                    if len(parts) == 2:
+                        return int(parts[0]) * 60 + int(parts[1])
+                    if len(parts) == 3:
+                        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                except (ValueError, TypeError):
+                    pass
+            return 0
+
+        seen_ytm_urls: set[str] = set()
+        for query_index, query in enumerate(queries):
+            if query_index > 0 and cancel_check and cancel_check():
+                return ""
+            try:
+                results = yt.search(query, filter="songs", limit=5) or []
+            except Exception as exc:
+                limited = rate_limit_error_from_messages(str(exc))
+                if limited is not None:
+                    raise limited from exc
+                logger.debug("[Scraper] YTM search failed for %r: %s", query, exc)
+                continue
             for r in results:
                 vid = r.get("videoId")
                 if not vid:
@@ -168,8 +320,9 @@ def _resolve_to_ytm_url(
                 spotify_dur = duration_sec if duration_sec > 0 else None
 
                 candidate_url = f"https://music.youtube.com/watch?v={vid}"
-                if candidate_url in excluded:
+                if candidate_url in excluded or candidate_url in seen_ytm_urls:
                     continue
+                seen_ytm_urls.add(candidate_url)
                 match = match_from_metadata(
                     url=candidate_url,
                     title=title,
@@ -190,15 +343,96 @@ def _resolve_to_ytm_url(
                 ):
                     best_ytm_match = match
 
-            if best_ytm_match:
+            if best_ytm_match and best_ytm_match.confidence >= 0.65:
                 logger.debug(
                     "[Scraper] Best safe YTM candidate: %s (score=%.1f, confidence=%.2f)",
                     best_ytm_match.url, best_ytm_match.score, best_ytm_match.confidence,
                 )
-                if best_ytm_match.confidence >= 0.65:
-                    return best_ytm_match.url
+                return best_ytm_match.url
 
+            # The ordinary path stays at one request when the primary wording
+            # already produced a usable identity candidate. Extra variants are
+            # reserved for genuine misses and obviously incompatible rows.
+            if query_index == 0 and any(
+                item.safe or is_reasonable_fallback_match(item)
+                for item in ytm_matches
+            ):
+                break
+
+        # An obscure album cut can be absent from song-search results while
+        # still present in a complete YTMusic release. Expand only after every
+        # identity-preserving song query missed, and keep the same recording
+        # gates when scoring the release's track rows.
+        if album and not any(
+            item.safe or is_reasonable_fallback_match(item)
+            for item in ytm_matches
+        ):
+            if cancel_check and cancel_check():
+                return ""
+            try:
+                album_rows = _ytm_album_catalog(yt, artist, album)
+            except Exception as exc:
+                limited = rate_limit_error_from_messages(str(exc))
+                if limited is not None:
+                    raise limited from exc
+                logger.debug(
+                    "[Scraper] YTM album lookup failed for %r / %r: %s",
+                    artist, album, exc,
+                )
+                album_rows = []
+            for r in album_rows:
+                vid = r.get("videoId")
+                if not vid:
+                    continue
+                candidate_url = f"https://music.youtube.com/watch?v={vid}"
+                if candidate_url in excluded or candidate_url in seen_ytm_urls:
+                    continue
+                seen_ytm_urls.add(candidate_url)
+                artists_list = r.get("artists") or []
+                artist_names = [
+                    item.get("name") or "" for item in artists_list
+                    if isinstance(item, dict)
+                ]
+                raw_album = r.get("album") or {}
+                yt_album = (
+                    raw_album.get("name") or raw_album.get("title") or ""
+                    if isinstance(raw_album, dict) else str(raw_album or "")
+                )
+                match = match_from_metadata(
+                    url=candidate_url,
+                    title=title,
+                    artist=artist,
+                    duration_sec=duration_sec if duration_sec > 0 else None,
+                    yt_title=r.get("title") or "",
+                    yt_channel=artist_names[0] if artist_names else "",
+                    yt_duration_sec=(
+                        _dur_secs(r) if _dur_secs(r) > 0 else None
+                    ),
+                    yt_artists=artist_names,
+                    spotify_album=album,
+                    yt_album=yt_album,
+                )
+                match.breakdown["resolution_path"] = "ytm_album"
+                ytm_matches.append(match)
+                if match.safe and (
+                    best_ytm_match is None
+                    or (match.score, match.url)
+                    > (best_ytm_match.score, best_ytm_match.url)
+                ):
+                    best_ytm_match = match
+            if best_ytm_match and best_ytm_match.confidence >= 0.65:
+                logger.info(
+                    "[Scraper] Found track through verified YTM album: %s",
+                    best_ytm_match.url,
+                )
+                return best_ytm_match.url
+
+    except YouTubeRateLimited:
+        raise
     except Exception as exc:
+        limited = rate_limit_error_from_messages(str(exc))
+        if limited is not None:
+            raise limited from exc
         logger.debug("[Scraper] ytmusicapi search or scoring failed: %s", exc)
 
     # A cancel between the cheap YTM search and the heavier yt-dlp fallback
@@ -215,6 +449,10 @@ def _resolve_to_ytm_url(
             title=title, artist=artist, duration_sec=spotify_dur,
             min_confidence=0.55, cookies_file=cookies_file,
             album=album, allow_reasonable_fallback=True,
+            search_variants=not any(
+                item.safe or is_reasonable_fallback_match(item)
+                for item in ytm_matches
+            ),
         )
         if excluded:
             match_kwargs["exclude_urls"] = excluded
@@ -228,7 +466,12 @@ def _resolve_to_ytm_url(
                 )
                 return yt_match.url
             best_general_match = yt_match
+    except YouTubeRateLimited:
+        raise
     except Exception as exc:
+        limited = rate_limit_error_from_messages(str(exc))
+        if limited is not None:
+            raise limited from exc
         logger.debug("[Scraper] General YouTube fallback search failed: %s", exc)
 
     # The strict YTM threshold is deliberately high. Retain a lower-confidence
@@ -263,6 +506,8 @@ def _resolve_to_ytm_url(
                 float(best.breakdown.get("ranking_score", best.score)),
             )
             return best.url
+    except YouTubeRateLimited:
+        raise
     except Exception as exc:
         logger.debug("[Scraper] Reasonable YTM ranking failed: %s", exc)
 
@@ -276,12 +521,19 @@ def _resolve_to_ytm_url(
 
 
 def spotify_legacy_search_request(title: str, artist: str) -> str:
-    """Build the final yt-dlp search request for valid Spotify metadata."""
+    """Build a conservative final yt-dlp search from valid Spotify metadata.
+
+    Decorative punctuation and the old forced ``audio`` suffix caused valid
+    niche tracks to produce an empty ytsearch playlist.  Keep both identifying
+    fields, but normalize punctuation and let YouTube rank the literal artist
+    and title rather than changing the recording identity.
+    """
     from utils.spotify_resolver import validate_spotify_track_metadata
+    from core.spotify_match_scorer import youtube_identity_search_text
 
     clean_title, artist_credits = validate_spotify_track_metadata(title, [artist])
     clean_artist = ", ".join(artist_credits)
-    query = " ".join(part for part in (clean_artist, clean_title, "audio") if part)
+    query = youtube_identity_search_text(clean_title, clean_artist)
     return f"ytsearch1:{query}"
 
 
@@ -323,10 +575,11 @@ def _spotify_cache_key(td: Dict) -> Tuple[str, str]:
 class _ResolutionFlight:
     """One process-local cold resolution shared by prefetch and download."""
 
-    def __init__(self) -> None:
+    def __init__(self, coordinator: DownloadRecoveryCoordinator) -> None:
         self.done = threading.Event()
         self.result = ""
         self.error: Optional[BaseException] = None
+        self.coordinator = coordinator
 
 
 _resolution_flights_lock = threading.Lock()
@@ -340,6 +593,8 @@ def resolve_track_to_youtube(
     *,
     force_refresh: bool = False,
     exclude_urls: Optional[set[str]] = None,
+    rate_wait_callback: Optional[Callable[[float], None]] = None,
+    recovery_coordinator: Optional[DownloadRecoveryCoordinator] = None,
 ) -> str:
     """Cache-aware resolution of one track dict to a YouTube URL.
 
@@ -357,6 +612,9 @@ def resolve_track_to_youtube(
 
     spotify_key, key_kind = _spotify_cache_key(td)
     cache = get_match_cache()
+    coordinator = (
+        recovery_coordinator or shared_download_recovery_coordinator()
+    )
 
     # A refresh skips the current row but does not delete it here. Stale-target
     # recovery already uses compare-and-delete with the failed URL; an
@@ -386,15 +644,32 @@ def resolve_track_to_youtube(
         flight = _resolution_flights.get(flight_key)
         owner = flight is None
         if owner:
-            flight = _ResolutionFlight()
+            flight = _ResolutionFlight(coordinator)
             _resolution_flights[flight_key] = flight
 
     if not owner:
+        last_reported_second: Optional[int] = None
         while not flight.done.wait(0.05):
             if cancel_check and cancel_check():
                 return ""
+            if rate_wait_callback is not None:
+                remaining = flight.coordinator.rate_remaining()
+                incident_active = flight.coordinator.rate_incident_active()
+                second = int(remaining + 0.999) if remaining > 0 else 0
+                if remaining > 0 and second != last_reported_second:
+                    last_reported_second = second
+                    rate_wait_callback(float(second))
+                elif (
+                    remaining <= 0
+                    and not incident_active
+                    and last_reported_second not in (None, 0)
+                ):
+                    last_reported_second = 0
+                    rate_wait_callback(0.0)
         if flight.error is not None:
             raise flight.error
+        if rate_wait_callback is not None and last_reported_second:
+            rate_wait_callback(0.0)
         td["_match_source"] = "shared"
         return flight.result
 
@@ -406,12 +681,64 @@ def resolve_track_to_youtube(
         )
         if exclude_urls:
             resolve_kwargs["exclude_urls"] = exclude_urls
-        url = _resolve_to_ytm_url(
-            td.get("title", ""),
-            td.get("artist", ""),
-            td.get("duration_sec") or 0,
-            **resolve_kwargs,
-        )
+        rate_key = f"spotify-resolve:{spotify_key}"
+        cancelled = cancel_check or (lambda: False)
+        while True:
+            permit = coordinator.wait_to_start(
+                rate_key,
+                cancelled,
+                on_rate_wait=rate_wait_callback,
+            )
+            if permit is None:
+                url = ""
+                break
+            if not coordinator.acquire_resolution_slot(cancelled):
+                coordinator.abandon_attempt(permit, rate_key)
+                url = ""
+                break
+            if not coordinator.is_start_permit_valid(permit, rate_key):
+                coordinator.release_resolution_slot()
+                coordinator.abandon_attempt(permit, rate_key)
+                continue
+            try:
+                url = _resolve_to_ytm_url(
+                    td.get("title", ""),
+                    td.get("artist", ""),
+                    td.get("duration_sec") or 0,
+                    **resolve_kwargs,
+                )
+            except YouTubeRateLimited as exc:
+                coordinator.release_resolution_slot()
+                delay, first_notice = coordinator.note_rate_limit(
+                    permit,
+                    rate_key,
+                    str(exc),
+                    retry_after_s=exc.retry_after_s,
+                )
+                if first_notice:
+                    logger.warning(
+                        "[YouTube rate limit] Pausing all requests for %.0fs; "
+                        "the same Spotify match will be the canary",
+                        delay,
+                    )
+                continue
+            except Exception as exc:
+                coordinator.release_resolution_slot()
+                coordinator.complete_attempt(permit)
+                raise
+            except BaseException:
+                coordinator.release_resolution_slot()
+                coordinator.complete_attempt(permit)
+                raise
+            else:
+                coordinator.release_resolution_slot()
+                coordinator.complete_attempt(permit)
+                if permit.canary and rate_wait_callback is not None:
+                    # Countdown expiry admits only this same-track probe. Keep
+                    # unrelated UI work paused until the probe actually proves
+                    # that YouTube traffic can resume.
+                    rate_wait_callback(0.0)
+                break
 
         if url and not url.startswith("ytsearch"):
             cache.put(spotify_key, url, None, MATCH_ALGO_VERSION, key_kind=key_kind)
@@ -597,7 +924,19 @@ def _scrape_standard_ydl(url: str, platform_label: str, on_item: Optional[Callab
         raw_title = info.get("title") or info.get("playlist_title") or "Unknown"
         # Strip YouTube Music's "Album - " prefix that yt-dlp returns verbatim
         playlist_title = re.sub(r"^Album\s*-\s*", "", raw_title, flags=re.IGNORECASE).strip() if platform_label == "ytmusic" else raw_title
-        entries = info.get("entries") or [info]
+        entries = list(info.get("entries") or [info])
+        reported_disc_total = 0
+        for candidate in entries:
+            if not candidate:
+                continue
+            try:
+                reported_disc_total = max(
+                    reported_disc_total,
+                    int(candidate.get("disc_count") or candidate.get("disc_total") or 0),
+                    int(candidate.get("disc_number") or 0),
+                )
+            except (TypeError, ValueError):
+                continue
 
         for idx, entry in enumerate(entries, 1):
             if not entry: continue
@@ -614,11 +953,14 @@ def _scrape_standard_ydl(url: str, platform_label: str, on_item: Optional[Callab
                 "title": track_title,
                 "artist": artist,
                 "album": playlist_title,
+                "collection_title": playlist_title,
                 "url": target_url,
                 "thumbnail_url": _scraper_best_thumbnail(entry) or "",
                 "duration_sec": entry.get("duration"),
                 "platform": platform_label,
-                "album_index": entry.get("playlist_index") or idx
+                "album_index": entry.get("playlist_index") or idx,
+                "disc_number": entry.get("disc_number") or 0,
+                "disc_total": reported_disc_total,
             }
             items.append(track_dict)
             if on_item: on_item(track_dict)
@@ -730,6 +1072,7 @@ def _scrape_spotify_grid_on_page(page: Page, url: str, content_type_label: str, 
                     except: pass
                     track_dict = {
                         "title": track_title, "artist": artists, "album": scraped_title,
+                        "collection_title": scraped_title,
                         "url": "",  # resolved in parallel after browser closes
                         "album_index": len(seen), "thumbnail_url": final_thumb,
                         "duration_sec": duration_sec, "duration_str": duration_str or "??:??",
@@ -1760,6 +2103,7 @@ def _collect_spotify_discography_tracks(
                         "artist": artist,
                         "artist_credits": artist_credits,
                         "album": release_title,
+                        "collection_title": release_title,
                         "parent_artist": artist_name,
                         "category": category,
                         "catalog_section": catalog_section,
@@ -1893,6 +2237,7 @@ def _collect_spotify_appears_on(
                 )
             item.update({
                 "album": album_title,
+                "collection_title": album_title,
                 "parent_artist": artist_name,
                 "category": category,
                 "catalog_section": canonical_section,
@@ -2042,23 +2387,40 @@ def scrape_ytm_playlist(url: str, on_item: Optional[Callable[[Dict], None]] = No
                 "title": track_title,
                 "artist": artist,
                 "album": album,
+                "collection_title": title,
                 "url": f"https://music.youtube.com/watch?v={track['videoId']}",
                 "thumbnail_url": thumb_url,
                 "duration_sec": track.get('duration_seconds') or 0,
                 "platform": "ytmusic",
-                "album_index": idx
+                "release_type": "playlist",
+                "album_index": idx,
             }
             items.append(track_dict)
             if on_item: on_item(track_dict)
         return title, items
     except Exception as e:
         logger.error(f"[Scraper] ytmusicapi playlist failed: {e}. Falling back to yt-dlp.")
-        return _scrape_standard_ydl(url, "ytmusic", on_item)
+        title, items = _scrape_standard_ydl(url, "ytmusic", None)
+        for item in items:
+            item["release_type"] = "playlist"
+            if on_item:
+                on_item(item)
+        return title, items
 
 def scrape_ytm_album(url: str, on_item: Optional[Callable[[Dict], None]] = None) -> Tuple[str, List[Dict]]:
     """Dedicated entry for YouTube Music Albums."""
-    # YTM Albums use the exact same playlist endpoint logic
-    return scrape_ytm_playlist(url, on_item)
+    # YTM albums use the playlist endpoint, but their release identity must
+    # remain an album so filename numbering is not controlled by the playlist
+    # prefix setting.
+    def _on_album_item(item: Dict) -> None:
+        item["release_type"] = "album"
+        if on_item:
+            on_item(item)
+
+    title, items = scrape_ytm_playlist(url, _on_album_item)
+    for item in items:
+        item["release_type"] = "album"
+    return title, items
 
 def scrape_ytm_track(url: str, on_item: Optional[Callable[[Dict], None]] = None) -> Tuple[str, List[Dict]]:
     """Dedicated entry for YTM single tracks."""
@@ -2164,20 +2526,25 @@ def scrape_ytm_artist(
                     thumb_url = track["thumbnail"]["thumbnails"][-1]["url"]
                 from utils.artwork_cleaner import clean_artwork_url
                 thumb_url = clean_artwork_url(thumb_url, "ytmusic")
+                raw_release_type = release.get("type", "album")
+                if raw_release_type == "appears_on":
+                    release_type = "compilation"
+                elif raw_release_type == "single" and total_tracks > 1:
+                    release_type = "ep"
+                else:
+                    release_type = raw_release_type
+
                 track_dict = {
                     "title": track_title,
                     "artist": artist,
                     "album": album_title,
+                    "collection_title": album_title,
                     "parent_artist": artist_name,
                     "url": f"https://music.youtube.com/watch?v={vid}",
                     "thumbnail_url": thumb_url,
                     "duration_sec": int(track.get("duration_seconds") or track.get("lengthSeconds") or 0),
                     "platform": "ytmusic",
-                    "release_type": (
-                        "compilation"
-                        if release.get("type") == "appears_on"
-                        else release.get("type", "album")
-                    ),
+                    "release_type": release_type,
                     "category": release.get("category_name", ""),
                     "catalog_section": release.get("type", "album"),
                     "discovery_roles": list(
@@ -2384,6 +2751,7 @@ def _extract_spotify_data_from_json(
                         "duration_sec": duration_sec,
                         "thumbnail_url": thumb_url,
                         "track_id": track_id,
+                        "disc_number": node.get("disc_number") or node.get("discNumber") or 0,
                     })
 
             # Continue traversal
@@ -2401,8 +2769,18 @@ def _extract_spotify_data_from_json(
     scraped_title = container_title or f"Unknown Spotify {content_type}"
     items = []
     total = len(tracks_found)
+    disc_total = 0
+    for track in tracks_found:
+        try:
+            disc_total = max(disc_total, int(track.get("disc_number") or 0))
+        except (TypeError, ValueError):
+            continue
     for idx, t in enumerate(tracks_found, start=1):
         from core.match_errors import SpotifyMetadataInvalid
+        try:
+            disc_number = int(t.get("disc_number") or 0)
+        except (TypeError, ValueError):
+            disc_number = 0
         try:
             track_title, cleaned_artist, artist_names = _validated_spotify_display_metadata(
                 t["title"], t["artists"],
@@ -2425,8 +2803,11 @@ def _extract_spotify_data_from_json(
                 if match_status != "metadata_invalid" and artist_names else ""
             ),
             "album": t["album"] or scraped_title,
+            "collection_title": scraped_title,
             "url": "",  # resolved in parallel after browser closes
             "album_index": idx,
+            "disc_number": disc_number,
+            "disc_total": disc_total,
             "thumbnail_url": _ensure_high_res_spotify_image(t["thumbnail_url"]) if t["thumbnail_url"] else "",
             "duration_sec": t["duration_sec"],
             "duration_str": f"{t['duration_sec'] // 60}:{t['duration_sec'] % 60:02d}" if t["duration_sec"] > 0 else "??:??",

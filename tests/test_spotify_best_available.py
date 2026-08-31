@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -97,7 +98,125 @@ def test_no_discovered_candidate_returns_a_real_legacy_search_request(monkeypatc
 
     resolved = scraper._resolve_to_ytm_url("Valid Song", "Valid Artist", 200)
 
-    assert resolved == "ytsearch1:Valid Artist Valid Song audio"
+    assert resolved == "ytsearch1:Valid Artist Valid Song"
+
+
+def test_ytm_miss_uses_normalized_query_before_general_fallback(monkeypatch):
+    import core.scraper as scraper
+    import core.spotify_match_scorer as scorer
+    import ytmusicapi
+
+    queries = []
+
+    class VariantYTMusic:
+        def search(self, query, **_kwargs):
+            queries.append(query)
+            if query == "Ruvi New HO ADERES VEHAMUNAH":
+                return [{
+                    "videoId": "normalized-hit",
+                    "title": "HO'ADERES VEHAMUNAH",
+                    "artists": [{"name": "Ruvi New"}],
+                    "duration_seconds": 203,
+                }]
+            return []
+
+    monkeypatch.setattr(ytmusicapi, "YTMusic", VariantYTMusic)
+    monkeypatch.setattr(
+        scorer,
+        "_search",
+        lambda *_a, **_k: pytest.fail("general search should not be needed"),
+    )
+
+    resolved = scraper._resolve_to_ytm_url(
+        "HO’ADERES—VEHAMUNAH!", "Ruvi New", 203,
+    )
+
+    assert resolved == "https://music.youtube.com/watch?v=normalized-hit"
+    assert queries == [
+        "Ruvi New HO’ADERES—VEHAMUNAH!",
+        "Ruvi New HO ADERES VEHAMUNAH",
+    ]
+
+
+def test_legacy_search_normalizes_decorative_punctuation_without_title_only_fallback():
+    from core.scraper import spotify_legacy_search_request
+
+    request = spotify_legacy_search_request("HO’ADERES—VEHAMUNAH!", "Ruvi New")
+
+    assert request == "ytsearch1:Ruvi New HO ADERES VEHAMUNAH"
+    assert "audio" not in request.casefold()
+
+
+def test_album_catalog_recovers_hidden_cuts_once_per_release(monkeypatch):
+    import core.scraper as scraper
+    import core.spotify_match_scorer as scorer
+    import ytmusicapi
+
+    calls = {"albums": 0, "get_album": 0}
+    album_started = threading.Event()
+    release_album = threading.Event()
+
+    class AlbumYTMusic:
+        def search(self, _query, *, filter, limit):
+            if filter == "songs":
+                return []
+            assert filter == "albums"
+            assert limit == 5
+            calls["albums"] += 1
+            album_started.set()
+            assert release_album.wait(2.0)
+            return [{
+                "browseId": "MPRE-hidden-album",
+                "title": "Hidden Album",
+                "artists": [{"name": "Exact Artist"}],
+            }]
+
+        def get_album(self, browse_id):
+            assert browse_id == "MPRE-hidden-album"
+            calls["get_album"] += 1
+            return {"tracks": [
+                {
+                    "videoId": "hidden-cut-one",
+                    "title": "Hidden Cut One",
+                    "artists": [{"name": "Exact Artist"}],
+                    "duration_seconds": 181,
+                },
+                {
+                    "videoId": "hidden-cut-two",
+                    "title": "Hidden Cut Two",
+                    "artists": [{"name": "Exact Artist"}],
+                    "duration_seconds": 199,
+                },
+            ]}
+
+    monkeypatch.setattr(ytmusicapi, "YTMusic", AlbumYTMusic)
+    monkeypatch.setattr(
+        scorer, "_search",
+        lambda *_a, **_k: pytest.fail("album catalog should resolve before general search"),
+    )
+    with scraper._ytm_album_catalog_lock:
+        scraper._ytm_album_catalog_cache.clear()
+        scraper._ytm_album_catalog_flights.clear()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            scraper._resolve_to_ytm_url,
+            "Hidden Cut One", "Exact Artist", 181,
+            album="Hidden Album",
+        )
+        second_future = pool.submit(
+            scraper._resolve_to_ytm_url,
+            "Hidden Cut Two", "Exact Artist", 199,
+            album="Hidden Album",
+        )
+        assert album_started.wait(2.0)
+        release_album.set()
+        first = first_future.result(timeout=3.0)
+        second = second_future.result(timeout=3.0)
+
+    assert first == "https://music.youtube.com/watch?v=hidden-cut-one"
+    assert second == "https://music.youtube.com/watch?v=hidden-cut-two"
+    assert calls == {"albums": 1, "get_album": 1}
 
 
 def test_odeya_album_all_ten_produced_jobs_reach_the_engine(monkeypatch, tmp_path):
@@ -306,4 +425,4 @@ def test_empty_valid_lazy_resolution_is_repaired_before_engine_submission(tmp_pa
 
     assert result.completed == 1
     assert result.failed == 0
-    assert engine.urls == ["ytsearch1:Valid Artist Valid Song audio"]
+    assert engine.urls == ["ytsearch1:Valid Artist Valid Song"]
