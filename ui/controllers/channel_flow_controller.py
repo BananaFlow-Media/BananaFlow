@@ -22,7 +22,7 @@ Regular tab item (e.g. "סרטונים"):
 Playlist item:
     parent_artist = channel_name
     category      = "פלייליסטים"     → folder: {channel}/פלייליסטים/{playlist_name}/
-    release_type  = "ep"             → is_grouped=True + forced_index used
+    release_type  = "playlist"       → playlist numbering setting applies
     album         = playlist_name
     album_index   = playlist_index   → 01 - Title.mp3
     total_tracks  = len(playlist)
@@ -186,9 +186,9 @@ class ChannelFlowController(QObject):
                         "thumbnail_url": v.thumbnail_url,
                         "track_url":     v.url,
                         "album":         v.playlist_name,
+                        "collection_title": v.playlist_name,
                         "parent_artist": self._channel_name,
-                        # "ep" triggers is_grouped=True and forced_index in download_controller
-                        "release_type":  "ep",
+                        "release_type":  "playlist",
                         # ``category`` stays in its canonical Hebrew form so the
                         # download controller's category-based comparisons work
                         # unchanged. The folder path is localized later via
@@ -208,6 +208,7 @@ class ChannelFlowController(QObject):
                         "thumbnail_url": v.thumbnail_url,
                         "track_url":     v.url,
                         "album":         self._channel_name,
+                        "collection_title": "",
                         "parent_artist": self._channel_name,
                         "release_type":  "video",
                         "category":      v.tab_name,

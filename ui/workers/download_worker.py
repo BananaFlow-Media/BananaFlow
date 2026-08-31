@@ -39,7 +39,10 @@ from core.download_orchestrator import (
 )
 from core.history_db import HistoryDB
 from core.downloader import DownloadEngine, DownloadRequest
-from error_handler import ErrorInfo
+from core.batch_outcome import BatchOutcome
+from core.batch_progress import is_terminal_state
+from error_handler import ErrorInfo, classify_error
+from core.download_recovery import RecoveryDecision, UserActionRequest
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,12 @@ class _SignalAdapter:
 
     def on_track_error(self, key: str, error: ErrorInfo) -> None:
         self._w.job_error.emit(key, error)
+
+    def on_user_action_required(self, request: UserActionRequest) -> None:
+        self._w.user_action_required.emit(request)
+
+    def on_rate_limit_wait(self, key: str, remaining_seconds: float) -> None:
+        self._w.rate_limit_wait.emit(key, remaining_seconds)
 
     def on_overall_progress(self, fraction: float) -> None:
         self._w.overall_progress.emit(fraction)
@@ -137,8 +146,10 @@ class DownloadWorker(QThread):
     batch_snapshot   = Signal(object)          # core.batch_progress.BatchSnapshot
     status_msg       = Signal(str)
     job_error        = Signal(str, object)
+    user_action_required = Signal(object)
+    rate_limit_wait  = Signal(str, float)
     job_count_changed = Signal(int, int)
-    all_finished     = Signal(object)          # core.batch_outcome.BatchOutcome | None
+    all_finished     = Signal(object)          # core.batch_outcome.BatchOutcome
     track_thumbnail  = Signal(str, str)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -241,6 +252,9 @@ class DownloadWorker(QThread):
             logger.exception("[DownloadWorker] Batch failed with an unhandled error")
             from utils.security import redact_text
             self.status_msg.emit(redact_text(exc))
-            # Release the UI. A None outcome is the established "batch did
-            # not produce a result" value for this signal.
-            self.all_finished.emit(None)
+            err = classify_error(exc)
+            for job_key, _request in self._jobs:
+                state = self._orch.job_state(job_key)
+                if not is_terminal_state(state):
+                    self.job_error.emit(job_key, err)
+            self.all_finished.emit(BatchOutcome.STOPPED_BY_FATAL_ERROR)

@@ -507,6 +507,33 @@ class TestCliSpotifyRequests:
         assert req.forced_album is None
         assert resolver_calls == []
 
+    @pytest.mark.parametrize(
+        ("extra_args", "expected_filename_index"),
+        [([], 7), (["--no-number-playlists"], None)],
+    )
+    def test_playlist_numbering_flag_uses_original_position(
+        self, tmp_path, monkeypatch, resolver_calls, extra_args,
+        expected_filename_index,
+    ):
+        track = TrackMeta(
+            index=41,
+            album_index=7,
+            collection_title="CLI Playlist",
+            url="https://www.youtube.com/watch?v=abcdefghijk",
+            title="Playlist Song",
+            artist="YT Artist",
+            platform=SourcePlatform.YOUTUBE,
+            source_kind=UrlKind.PLAYLIST.name,
+            release_type="playlist",
+        )
+
+        jobs = _run_cli([track], tmp_path, monkeypatch, extra_args)
+
+        req = jobs[0][1]
+        assert req.filename_index == expected_filename_index
+        assert req.forced_index is None
+        assert req.playlist_name == "CLI Playlist"
+
     def test_list_mode_still_prints_every_track(self, tmp_path, monkeypatch, capsys):
         import cli as cli_module
         good = _pending_track(1, "Good", "sid1")

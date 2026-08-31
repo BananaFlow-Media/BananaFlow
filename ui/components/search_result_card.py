@@ -131,6 +131,15 @@ class SearchResultCard(QFrame):
             # Apply border radius if it was lost (though QLabel usually keeps it)
             self._thumb_label.update()
 
+    def set_source_selection_mode(self, enabled: bool) -> None:
+        """Relabel a track action when it repairs an existing queue item."""
+        if self._result.kind != ResultKind.TRACK or not hasattr(self, "_action_btn"):
+            return
+        self._action_btn.setText(
+            t("search_card_use_source_btn") if enabled else t("search_card_add_btn")
+        )
+        self._action_btn.setFixedWidth(104 if enabled else 72)
+
     # ── Build ──────────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
@@ -201,6 +210,7 @@ class SearchResultCard(QFrame):
             btn.setFixedSize(84, 30)
             btn.clicked.connect(lambda: self.browse_requested.emit(self._result))
 
+        self._action_btn = btn
         row.addWidget(btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
     def _build_thumb(self, kind: ResultKind) -> QLabel:

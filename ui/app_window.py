@@ -77,15 +77,28 @@ from ui.components.track_card     import TrackCard
 from ui.components.offline_banner import OfflineBanner
 from ui.components.status_icon    import StatusKind
 from core.batch_outcome           import BatchOutcome
+from core.download_recovery       import (
+    RecoveryDecision,
+    UserActionRequest,
+    shared_download_recovery_coordinator,
+)
 
 # ── Theme / i18n ───────────────────────────────────────────────────────────────
 from ui.i18n         import current_language, t, request_language_restart
-from ui.dialogs.styled_dialog import confirm, get_text, show_info, show_warning
+from ui.dialogs.styled_dialog import (
+    StyledMessageDialog,
+    confirm,
+    get_text,
+    show_info,
+    show_warning,
+)
 from ui.dialogs.update_prompt_dialog import UpdatePromptDialog
 from ui.dialogs.cookie_auth_dialog import ManualCookieImportDialog, ask_cookie_auth_choice
 from ui.theme_manager import ThemeManager, get_colors
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_ALTERNATIVE_DIALOG_RESULT = 2
 
 
 def _dim_hex(hex_color: str, factor: float = 0.85) -> str:
@@ -291,6 +304,15 @@ class AppWindow(FluentWindow):
 
         # Most recent whole-batch snapshot (drives the finish summary counts).
         self._last_snapshot = None
+
+        # Interactive repair of Spotify rows whose automatic YouTube match
+        # produced no usable source. The search panel stays reusable: outside
+        # this narrow mode its Add action behaves exactly as before.
+        self._source_repair_incident_id = ""
+        self._source_repair_key = ""
+        self._source_repair_total = 0
+        self._source_repair_completed = 0
+        self._source_repair_jobs = []
 
         # ── Misc background workers ───────────────────────────────────────────
         self._clipboard_worker: Optional[ClipboardWorker] = None
@@ -545,6 +567,9 @@ class AppWindow(FluentWindow):
             self._on_add_search_result_to_queue
         )
         self._search_panel.drill_down_requested.connect(self._on_search_drill_down)
+        self._search_panel.source_repair_cancelled.connect(
+            self._cancel_failure_source_repair
+        )
 
         self._search_ctrl.result_ready.connect(self._on_search_result_ready)
         self._search_ctrl.result_to_queue.connect(self._on_result_to_queue)
@@ -557,7 +582,15 @@ class AppWindow(FluentWindow):
         self._download_ctrl.batch_snapshot.connect(self._on_batch_snapshot)
         self._download_ctrl.downloading_changed.connect(self._dl_bar.set_downloading)
         self._download_ctrl.show_success_bar.connect(self._on_track_finished_ui)
-        self._download_ctrl.show_error_dialog.connect(self._on_track_error_ui)
+        self._download_ctrl.user_action_required.connect(
+            self._on_user_action_required_ui
+        )
+        self._download_ctrl.failure_incident_updated.connect(
+            self._on_failure_incident_updated_ui
+        )
+        self._download_ctrl.rate_limit_waiting.connect(
+            self._on_rate_limit_waiting_ui
+        )
         self._download_ctrl.batch_finished.connect(self._on_all_downloads_finished)
         self._download_ctrl.batch_started.connect(self._on_batch_started)
         self._download_ctrl.track_thumbnail.connect(self._on_track_thumbnail_update)
@@ -914,11 +947,13 @@ class AppWindow(FluentWindow):
                     thumbnail_url=item.get("thumbnail_url", ""),
                     platform=platform,
                     album=item.get("album", ""),
+                    collection_title=item.get("collection_title", ""),
                     parent_artist=item.get("parent_artist", ""),
                     release_type=item.get("release_type", ""),
                     category=item.get("category", ""),
                     album_index=item.get("album_index", 0),
                     disc_number=item.get("disc_number", 0),
+                    disc_total=item.get("disc_total", 0),
                     total_tracks=item.get("total_tracks", 0),
                     duration_sec=item.get("duration_sec"),
                     spotify_id=item.get("spotify_id", ""),
@@ -943,11 +978,13 @@ class AppWindow(FluentWindow):
                 "thumbnail_url": c.thumbnail_url,
                 "platform":      c.platform,
                 "album":         c.album,
+                "collection_title": getattr(c, "collection_title", ""),
                 "parent_artist": c.parent_artist,
                 "release_type":  c.release_type,
                 "category":      c.category,
                 "album_index":   c.album_index,
                 "disc_number":   getattr(c, "disc_number", 0),
+                "disc_total":    getattr(c, "disc_total", 0),
                 "total_tracks":  c.total_tracks,
                 "duration_sec":  getattr(c, "duration_sec", None),
                 "spotify_id":    getattr(c, "spotify_id", ""),
@@ -1033,78 +1070,570 @@ class AppWindow(FluentWindow):
             parent=self,
         )
 
-    def _on_track_error_ui(self, err: object, failing_url: str = "") -> None:
-        """Throttled error reporter to prevent 'messagebox storms' on batch failures."""
-        import time
-        now = time.time()
-        # Suppress popups if we showed one in the last 5 seconds
-        if hasattr(self, "_last_error_time") and (now - self._last_error_time < 5.0):
+    def _on_failure_incident_updated_ui(self, incident: object) -> None:
+        """Open or update one live non-modal dialog for an error group."""
+        incident_id = str(getattr(incident, "incident_id", "") or "")
+        if not incident_id:
             return
-            
-        self._last_error_time = now
+        incidents = getattr(self, "_download_failure_incidents", None)
+        if incidents is None:
+            incidents = {}
+            self._download_failure_incidents = incidents
+        incidents[incident_id] = incident
 
-        headline = t("err_generic_title")
-        detail = str(err)
+        # Source repair owns the search surface. Continue aggregating incident
+        # state, but serialize any unrelated dialog until the user finishes or
+        # cancels choosing alternatives.
+        repair_id = getattr(self, "_source_repair_incident_id", "")
+        if repair_id:
+            if incident_id != repair_id:
+                pending = getattr(self, "_pending_failure_incident_ids", None)
+                if pending is None:
+                    pending = []
+                    self._pending_failure_incident_ids = pending
+                if incident_id not in pending:
+                    pending.append(incident_id)
+            return
 
-        if hasattr(err, "headline"):
-            headline = err.headline
-            detail = err.detail
-        elif hasattr(err, "error_message"):
-            detail = err.error_message
+        active_id = getattr(self, "_active_failure_incident_id", "")
+        dialog = getattr(self, "_active_failure_incident_dialog", None)
+        if active_id == incident_id and dialog is not None:
+            title, text, details = self._failure_incident_text(incident)
+            dialog.update_message(title, text, details)
+            return
 
-        # Raw upstream text (yt-dlp / Playwright / DPAPI) is never shown in
-        # the dialog body — it goes into the collapsed "Show details" section
-        # so a non-technical user reads only the plain-language explanation.
+        pending = getattr(self, "_pending_failure_incident_ids", None)
+        if pending is None:
+            pending = []
+            self._pending_failure_incident_ids = pending
+        if active_id or dialog is not None:
+            if incident_id not in pending:
+                pending.append(incident_id)
+            return
+        self._open_failure_incident_dialog(incident_id)
+
+    def _failure_incident_text(self, incident: object) -> tuple[str, str, str]:
+        err = getattr(incident, "error", None)
+        if isinstance(err, ErrorInfo):
+            err = self._localized_error_info(err)
+        headline = str(getattr(err, "headline", t("err_generic_title")) or "")
+        detail = str(getattr(err, "detail", err) or "")
+        if str(getattr(err, "message_key", "") or "") == "err_no_search_results":
+            detail = f"{detail}\n\n{t('download_incident_no_result_help')}"
+        count = max(1, int(getattr(incident, "count", 1) or 1))
+        title = t(
+            "download_incident_title_one" if count == 1 else "download_incident_title_many",
+            count=count,
+            headline=headline,
+        )
+        if bool(getattr(incident, "stopped_all", False)):
+            prefix_key = (
+                "download_incident_all_stopped_one"
+                if count == 1 else "download_incident_all_stopped_many"
+            )
+        elif bool(getattr(incident, "authentication", False)):
+            prefix_key = (
+                "download_incident_auth_continuing_one"
+                if count == 1 else "download_incident_auth_continuing_many"
+            )
+        else:
+            prefix_key = (
+                "download_incident_local_continuing_one"
+                if count == 1 else "download_incident_local_continuing_many"
+            )
+        prefix = t(prefix_key, count=count)
+        text = f"{prefix}\n\n{detail}"
+
+        detail_lines: list[str] = []
+        raw_seen: set[str] = set()
+        for number, item in enumerate(getattr(incident, "items", []) or [], 1):
+            item_title = str(getattr(item, "title", "") or getattr(item, "key", ""))
+            item_url = str(getattr(item, "url", "") or "")
+            detail_lines.append(f"{number}. {item_title}")
+            if item_url:
+                detail_lines.append(f"   {item_url}")
+            raw = str(getattr(item, "raw", "") or "").strip()
+            if raw and raw not in raw_seen:
+                raw_seen.add(raw)
+                detail_lines.append(f"   {raw}")
+        return title, text, "\n".join(detail_lines)
+
+    def _open_failure_incident_dialog(self, incident_id: str) -> None:
+        incident = getattr(self, "_download_failure_incidents", {}).get(incident_id)
+        if incident is None:
+            self._open_next_failure_incident_dialog()
+            return
+        title, text, details = self._failure_incident_text(incident)
+        auth = bool(getattr(incident, "authentication", False))
+        no_result = str(
+            getattr(getattr(incident, "error", None), "message_key", "") or ""
+        ) == "err_no_search_results"
+        dialog = StyledMessageDialog(
+            title,
+            text,
+            self,
+            kind="question" if auth else "warning",
+            accept_text=(
+                t("download_incident_fix_auth_btn")
+                if auth else t("download_incident_retry_btn")
+            ),
+            cancel_text=t("download_incident_skip_btn"),
+            auxiliary_text=(
+                t("download_incident_find_alternatives_btn") if no_result else None
+            ),
+            show_cancel=True,
+            details=details,
+        )
+        self._download_recovery_workflow_active = True
+        self._active_failure_incident_id = incident_id
+        self._active_failure_incident_dialog = dialog
+        dialog.finished.connect(
+            lambda result, iid=incident_id, dlg=dialog:
+                self._finish_failure_incident_dialog(iid, dlg, result)
+        )
+        dialog.open()
+
+    def _finish_failure_incident_dialog(
+        self,
+        incident_id: str,
+        dialog: QDialog,
+        result: int,
+    ) -> None:
+        if getattr(self, "_active_failure_incident_dialog", None) is dialog:
+            self._active_failure_incident_dialog = None
+            self._active_failure_incident_id = ""
+        incident = getattr(self, "_download_failure_incidents", {}).get(incident_id)
+        retry = result == int(QDialog.DialogCode.Accepted)
+        find_alternatives = result == _SOURCE_ALTERNATIVE_DIALOG_RESULT
+        source_repair_started = False
+        keep_open = False
+        try:
+            if find_alternatives and incident is not None:
+                self._begin_failure_source_repair(incident_id)
+                source_repair_started = True
+            elif retry and incident is not None and bool(
+                getattr(incident, "authentication", False)
+            ):
+                retry = self._run_cookie_wizard_ui()
+                keep_open = not retry
+            if not keep_open and not find_alternatives:
+                decision = RecoveryDecision.RETRY if retry else RecoveryDecision.SKIP
+                self._download_ctrl.resolve_failure_incident(incident_id, decision)
+                getattr(self, "_download_failure_incidents", {}).pop(incident_id, None)
+        except Exception:
+            logger.exception("[AppWindow] Could not settle failure incident")
+            keep_open = True
+        finally:
+            dialog.deleteLater()
+            self._download_recovery_workflow_active = False
+
+        if source_repair_started:
+            return
+        if keep_open and incident is not None:
+            QTimer.singleShot(
+                0,
+                self,
+                lambda iid=incident_id: self._open_failure_incident_dialog(iid),
+            )
+        else:
+            QTimer.singleShot(0, self._open_next_failure_incident_dialog)
+
+    def _begin_failure_source_repair(self, incident_id: str) -> None:
+        incident = getattr(self, "_download_failure_incidents", {}).get(incident_id)
+        items = list(getattr(incident, "items", []) or []) if incident else []
+        if not items:
+            self._open_next_failure_incident_dialog()
+            return
+        self._source_repair_incident_id = incident_id
+        self._source_repair_key = ""
+        self._source_repair_total = len(items)
+        self._source_repair_completed = 0
+        self._source_repair_jobs = []
+        self._show_next_failure_source_repair()
+
+    def _show_next_failure_source_repair(self) -> None:
+        incident_id = getattr(self, "_source_repair_incident_id", "")
+        incident = getattr(self, "_download_failure_incidents", {}).get(incident_id)
+        items = list(getattr(incident, "items", []) or []) if incident else []
+        if not items:
+            self._finish_failure_source_repair()
+            return
+        item = items[0]
+        self._source_repair_key = str(getattr(item, "key", "") or "")
+        title = str(getattr(item, "title", "") or self._source_repair_key)
+        artist = str(getattr(item, "artist", "") or "")
+        duration_sec = getattr(item, "duration_sec", None)
+        display_parts = [f"{artist} — {title}" if artist else title]
+        if duration_sec is not None:
+            try:
+                from utils.time_format import seconds_to_str
+                display_parts.append(seconds_to_str(int(duration_sec)))
+            except (TypeError, ValueError):
+                pass
+        display_title = " · ".join(part for part in display_parts if part)
+        query = " ".join(part for part in (artist, title) if part).strip()
+        self._search_panel.begin_source_repair(
+            display_title,
+            self._source_repair_completed + 1,
+            self._source_repair_total,
+        )
+        self.switchTo(self._search_panel)
+        # The search controller owns cancelling any older worker. Force is
+        # intentional because a still-settling previous search must not leave
+        # this recovery screen empty.
+        self._search_panel.run_query(query, platform="youtube", force=True)
+
+    def _finish_failure_source_repair(self) -> None:
+        incident_id = getattr(self, "_source_repair_incident_id", "")
+        jobs = list(getattr(self, "_source_repair_jobs", []) or [])
+        self._source_repair_jobs = []
+        self._download_ctrl.start_failure_source_jobs(jobs)
+        self._source_repair_incident_id = ""
+        self._source_repair_key = ""
+        self._source_repair_total = 0
+        self._source_repair_completed = 0
+        self._search_panel.end_source_repair()
+        if incident_id:
+            getattr(self, "_download_failure_incidents", {}).pop(incident_id, None)
+        self.switchTo(self._queue_wrapper)
+        InfoBar.success(
+            title=t("search_source_repair_done_title"),
+            content=t("search_source_repair_done_text"),
+            orient=Qt.Orientation.Horizontal,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            duration=4000,
+            parent=self,
+        )
+        QTimer.singleShot(0, self._open_next_failure_incident_dialog)
+
+    def _cancel_failure_source_repair(self) -> None:
+        incident_id = getattr(self, "_source_repair_incident_id", "")
+        self._search_ctrl.cancel()
+        jobs = list(getattr(self, "_source_repair_jobs", []) or [])
+        self._source_repair_jobs = []
+        self._download_ctrl.start_failure_source_jobs(jobs)
+        self._source_repair_incident_id = ""
+        self._source_repair_key = ""
+        self._source_repair_total = 0
+        self._source_repair_completed = 0
+        self._search_panel.end_source_repair()
+        self.switchTo(self._queue_wrapper)
+        if incident_id in getattr(self, "_download_failure_incidents", {}):
+            QTimer.singleShot(
+                0, self, lambda iid=incident_id: self._open_failure_incident_dialog(iid)
+            )
+        else:
+            QTimer.singleShot(0, self._open_next_failure_incident_dialog)
+
+    def _open_next_failure_incident_dialog(self) -> None:
+        if getattr(self, "_active_failure_incident_dialog", None) is not None:
+            return
+        pending = getattr(self, "_pending_failure_incident_ids", [])
+        incidents = getattr(self, "_download_failure_incidents", {})
+        while pending:
+            incident_id = pending.pop(0)
+            if incident_id in incidents:
+                self._open_failure_incident_dialog(incident_id)
+                return
+
+    def _on_user_action_required_ui(self, request: UserActionRequest) -> None:
+        """Queue one non-nested error decision dialog.
+
+        ``QDialog.exec()`` starts a nested event loop. The old five-second
+        throttle allowed another worker signal to enter that loop and call
+        exec() again, eventually overflowing Qt's stack. ``open()`` returns to
+        the main loop immediately; the coordinator keeps downloads paused
+        until ``finished`` resolves this request.
+        """
+        if request.decision is not None:
+            return
+        pending = getattr(self, "_pending_download_error_requests", None)
+        if pending is None:
+            pending = []
+            self._pending_download_error_requests = pending
+        seen = getattr(self, "_download_error_request_ids", None)
+        if seen is None:
+            seen = set()
+            self._download_error_request_ids = seen
+        request_id = id(request)
+        if request_id in seen:
+            return
+        seen.add(request_id)
+        try:
+            if getattr(self, "_active_download_error_dialog", None) is not None:
+                pending.append(request)
+                return
+            self._open_user_action_dialog(request)
+        except Exception:  # noqa: BLE001 - never strand the producer thread
+            seen.discard(request_id)
+            failed_dialog = getattr(self, "_active_download_error_dialog", None)
+            if getattr(self, "_active_download_error_request", None) is request:
+                self._active_download_error_dialog = None
+                self._active_download_error_request = None
+            self._download_recovery_workflow_active = False
+            logger.exception("[AppWindow] Could not open download recovery dialog")
+            request.resolve(RecoveryDecision.SKIP)
+            if failed_dialog is not None:
+                try:
+                    failed_dialog.deleteLater()
+                except Exception:
+                    pass
+            if pending:
+                QTimer.singleShot(0, self._open_next_download_error_request)
+
+    def _open_user_action_dialog(self, request: UserActionRequest) -> None:
+        err = request.error
+        if isinstance(err, ErrorInfo):
+            err = self._localized_error_info(err)
+        headline = getattr(err, "headline", t("err_generic_title"))
+        detail = getattr(err, "detail", str(err))
         raw = str(getattr(err, "raw", "") or "")
         raw_error_text = f"{headline}\n{detail}\n{raw}"
-        browser_cookie_error = self._is_browser_cookie_error_text(raw_error_text)
-        auth_related = self._is_auth_error_text(raw_error_text)
+        message_key = str(getattr(err, "message_key", "") or "")
+        auth_related = message_key in {
+            "err_browser_cookie_access",
+            "err_cookies_expired",
+            "err_signin_required",
+        }
+        if not message_key:
+            auth_related = (
+                self._is_browser_cookie_error_text(raw_error_text)
+                or self._is_auth_error_text(raw_error_text)
+            )
         headline, detail = self._localized_error_text(headline, detail, raw)
 
-        if browser_cookie_error:
-            if confirm(
-                self,
-                headline,
-                detail,
-                accept_text=t("auth_wizard_open_btn"),
-                cancel_text=t("auth_wizard_close_btn"),
-                details=raw,
+        dialog = StyledMessageDialog(
+            headline,
+            detail,
+            self,
+            kind="question" if auth_related else "warning",
+            accept_text=(
+                t("auth_wizard_open_btn")
+                if auth_related else t("download_error_skip_btn")
+            ),
+            cancel_text=t("download_error_skip_btn"),
+            show_cancel=auth_related,
+            details=raw,
+        )
+        self._download_recovery_workflow_active = True
+        self._active_download_error_dialog = dialog
+        self._active_download_error_request = request
+        dialog.finished.connect(
+            lambda result, req=request, dlg=dialog, auth=auth_related:
+                self._finish_user_action_dialog(req, dlg, auth, result)
+        )
+        dialog.open()
+
+    def _finish_user_action_dialog(
+        self,
+        request: UserActionRequest,
+        dialog: QDialog,
+        auth_related: bool,
+        result: int,
+    ) -> None:
+        if getattr(self, "_active_download_error_dialog", None) is dialog:
+            self._active_download_error_dialog = None
+            self._active_download_error_request = None
+
+        decision = RecoveryDecision.SKIP
+        try:
+            if (
+                auth_related
+                and result == int(QDialog.DialogCode.Accepted)
+                and self._run_cookie_wizard_ui()
             ):
-                self._run_cookie_wizard_ui()
+                decision = RecoveryDecision.RETRY
+        except Exception:  # noqa: BLE001 - always release the waiting worker
+            logger.exception("[AppWindow] Authentication recovery failed")
+        finally:
+            try:
+                self._download_ctrl.resolve_user_action(request, decision)
+            except Exception:  # noqa: BLE001 - direct fallback always unblocks
+                logger.exception("[AppWindow] Could not forward recovery decision")
+                request.resolve(decision)
+            dialog.deleteLater()
+            getattr(self, "_download_error_request_ids", set()).discard(id(request))
+            self._download_recovery_workflow_active = False
+
+        pending = getattr(self, "_pending_download_error_requests", [])
+        if pending:
+            next_request = pending.pop(0)
+            if next_request.decision is not None:
+                getattr(self, "_download_error_request_ids", set()).discard(
+                    id(next_request)
+                )
+                QTimer.singleShot(0, self._open_next_download_error_request)
+            else:
+                getattr(self, "_download_error_request_ids", set()).discard(
+                    id(next_request)
+                )
+                QTimer.singleShot(
+                    0, self, lambda req=next_request: self._on_user_action_required_ui(req)
+                )
+
+    def _open_next_download_error_request(self) -> None:
+        pending = getattr(self, "_pending_download_error_requests", [])
+        while pending:
+            request = pending.pop(0)
+            if request.decision is not None:
+                getattr(self, "_download_error_request_ids", set()).discard(id(request))
+                continue
+            getattr(self, "_download_error_request_ids", set()).discard(id(request))
+            self._on_user_action_required_ui(request)
             return
 
-        # The substring lists below are matched against raw upstream error
-        # text (yt-dlp / Playwright / Windows DPAPI). They include Hebrew
-        # tokens because some error sources emit Hebrew — those are
-        # detection signatures, not UI text, and stay hardcoded.
-        if auth_related or any(x in detail for x in ["Please sign in", "sign in", "PO Token",
-                                      "account cookies", "אימות", "חשבון", "Cookies",
-                                      "DPAPI", "Chrome", "visitor_data"]):
-            if confirm(
-                self,
-                headline,
-                detail,
-                accept_text=t("auth_wizard_open_btn"),
-                cancel_text=t("auth_wizard_close_btn"),
-                details=raw,
-            ):
-                self._run_cookie_wizard_ui()
+    def _cancel_download_error_requests(self) -> None:
+        """Resolve and close every active/queued recovery question."""
+        if getattr(self, "_source_repair_incident_id", ""):
+            jobs = list(getattr(self, "_source_repair_jobs", []) or [])
+            self._source_repair_jobs = []
+            self._download_ctrl.discard_failure_source_jobs(jobs)
+            self._source_repair_incident_id = ""
+            self._source_repair_key = ""
+            self._source_repair_total = 0
+            self._source_repair_completed = 0
+            self._search_panel.end_source_repair()
+        incidents = getattr(self, "_download_failure_incidents", {})
+        for incident_id in list(incidents):
+            try:
+                self._download_ctrl.resolve_failure_incident(
+                    incident_id, RecoveryDecision.CANCEL
+                )
+            except Exception:
+                logger.exception("[AppWindow] Could not cancel failure incident")
+        incidents.clear()
+        getattr(self, "_pending_failure_incident_ids", []).clear()
+        incident_dialog = getattr(self, "_active_failure_incident_dialog", None)
+        self._active_failure_incident_dialog = None
+        self._active_failure_incident_id = ""
+        if incident_dialog is not None:
+            try:
+                incident_dialog.blockSignals(True)
+                incident_dialog.close()
+                incident_dialog.deleteLater()
+            except Exception:
+                pass
 
-        # 2. Handle Signature / Manual "Puzzle" solving
-        elif any(x in detail for x in ["Signature", "n challenge"]):
-            if confirm(
-                self,
-                headline,
-                detail,
-                accept_text=t("auth_wizard_manual_btn"),
-                cancel_text=t("auth_wizard_close_btn"),
-                details=raw,
-            ) and failing_url:
-                self._run_cookie_wizard_ui()
-        else:
-            show_warning(self, headline, detail, details=raw)
+        active_request = getattr(self, "_active_download_error_request", None)
+        if active_request is not None:
+            active_request.resolve(RecoveryDecision.CANCEL)
+        pending = getattr(self, "_pending_download_error_requests", [])
+        for request in list(pending):
+            request.resolve(RecoveryDecision.CANCEL)
+        pending.clear()
+        getattr(self, "_download_error_request_ids", set()).clear()
+        dialog = getattr(self, "_active_download_error_dialog", None)
+        if dialog is not None:
+            dialog.reject()
 
-    def _run_cookie_wizard_ui(self, prompt_for_url: bool = False) -> None:
+    def _show_async_warning(self, headline: str, detail: str) -> None:
+        """Defer unrelated async errors while download recovery owns dialogs."""
+        if getattr(self, "_download_recovery_workflow_active", False):
+            QTimer.singleShot(
+                200,
+                self,
+                lambda h=headline, d=detail: self._show_async_warning(h, d),
+            )
+            return
+        show_warning(self, headline, detail)
+
+    def _on_rate_limit_waiting_ui(self, remaining_seconds: float) -> None:
+        if remaining_seconds <= 0:
+            self._rate_limit_network_paused = False
+            dialog = getattr(self, "_rate_limit_dialog", None)
+            if dialog is not None:
+                self._rate_limit_dialog = None
+                dialog.close()
+                dialog.deleteLater()
+            return
+        coordinator = shared_download_recovery_coordinator()
+        rate = coordinator.rate_snapshot()
+        epoch = int(rate.get("epoch", 0) or 0)
+        if not getattr(self, "_rate_limit_network_paused", False):
+            self._rate_limit_network_paused = True
+            # Stop every optional YouTube-producing activity outside the
+            # download worker too. Existing provider calls settle
+            # cooperatively; no new fetch/search/prefetch is admitted below.
+            self._match_prefetcher.cancel()
+            self._fetch_ctrl.cancel()
+            self._search_ctrl.cancel()
+        self._update_rate_limit_dialog(rate, remaining_seconds, epoch)
+        snapshot = getattr(self, "_last_snapshot", None)
+        if snapshot is None:
+            return
+        if self._status_bar.state not in (
+            StatusState.INDETERMINATE, StatusState.DOWNLOADING,
+        ):
+            return
+        from utils.time_format import seconds_to_str
+        self._status_bar.show_batch_progress(
+            snapshot,
+            message=t(
+                "status_rate_limit_waiting",
+                time=seconds_to_str(remaining_seconds),
+            ),
+        )
+
+    def _update_rate_limit_dialog(
+        self,
+        rate: dict,
+        remaining_seconds: float,
+        epoch: int,
+    ) -> None:
+        if epoch <= 0 or getattr(self, "_hidden_rate_limit_epoch", 0) == epoch:
+            return
+        from utils.time_format import seconds_to_str
+
+        advertised = float(rate.get("advertised_seconds", 0.0) or 0.0)
+        margin = float(rate.get("margin_seconds", 0.0) or 0.0)
+        title = t("rate_limit_dialog_title")
+        text = t(
+            "rate_limit_dialog_text",
+            time=seconds_to_str(remaining_seconds),
+            advertised=seconds_to_str(advertised),
+            margin=seconds_to_str(margin),
+        )
+        details = str(rate.get("message", "") or "")
+        dialog = getattr(self, "_rate_limit_dialog", None)
+        if dialog is not None and getattr(self, "_rate_limit_dialog_epoch", 0) == epoch:
+            dialog.update_message(title, text, details)
+            return
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+        dialog = StyledMessageDialog(
+            title,
+            text,
+            self,
+            kind="warning",
+            accept_text=t("rate_limit_hide_btn"),
+            details=details,
+        )
+        self._rate_limit_dialog = dialog
+        self._rate_limit_dialog_epoch = epoch
+        dialog.finished.connect(
+            lambda _result, ep=epoch, dlg=dialog:
+                self._finish_rate_limit_dialog(ep, dlg)
+        )
+        dialog.open()
+
+    def _finish_rate_limit_dialog(self, epoch: int, dialog: QDialog) -> None:
+        if getattr(self, "_rate_limit_dialog", None) is dialog:
+            self._rate_limit_dialog = None
+        if shared_download_recovery_coordinator().rate_incident_active():
+            self._hidden_rate_limit_epoch = epoch
+        dialog.deleteLater()
+
+    def _on_track_error_ui(self, err: object, failing_url: str = "") -> None:
+        """Compatibility entry point routed through the serialized dialog queue."""
+        request = UserActionRequest(
+            key=failing_url or "legacy-error",
+            error=err,
+            failing_url=failing_url,
+        )
+        self._on_user_action_required_ui(request)
+
+    def _run_cookie_wizard_ui(self, prompt_for_url: bool = False) -> bool:
         target_url = "https://www.youtube.com"
         if prompt_for_url:
             url, ok = get_text(
@@ -1112,17 +1641,17 @@ class AppWindow(FluentWindow):
                 text=target_url
             )
             if not ok or not url:
-                return
+                return False
             target_url = url
 
         choice = ask_cookie_auth_choice(self)
         if choice == "app_browser":
-            self._run_app_browser_wizard(target_url)
-        elif choice == "manual":
-            self._run_manual_cookie_import()
-        # None (dismissed via X / Esc) → do nothing.
+            return self._run_app_browser_wizard(target_url)
+        if choice == "manual":
+            return self._run_manual_cookie_import()
+        return False
 
-    def _run_app_browser_wizard(self, target_url: str) -> None:
+    def _run_app_browser_wizard(self, target_url: str) -> bool:
         """Sign in via a dedicated, app-owned Chromium (never the user's real Chrome)."""
         from core.cookie_wizard import run_cookie_wizard
         from utils.cookie_validator import check_cookies_valid
@@ -1137,45 +1666,46 @@ class AppWindow(FluentWindow):
                 t("auth_wizard_title"),
                 exc.message_he if current_language() == "he" else exc.message_en,
             )
-            self._run_manual_cookie_import()
-            return
+            return self._run_manual_cookie_import()
 
         if not saved:
             show_warning(self, t("auth_wizard_aborted_title"), t("auth_wizard_aborted_msg"))
-            return
+            return False
 
         cookie_path = get_app_cookies_path()
         valid, warn_msg = check_cookies_valid(cookie_path)
         if not valid:
             show_warning(self, t("auth_wizard_aborted_title"), warn_msg)
-            return
+            return False
 
         if not self._apply_saved_cookies_file(str(cookie_path)):
-            return
+            return False
         show_info(self, t("auth_wizard_success_title"), t("auth_wizard_success_msg"))
+        return True
 
-    def _run_manual_cookie_import(self) -> None:
+    def _run_manual_cookie_import(self) -> bool:
         """Fallback path: user exports cookies.txt via a browser extension and picks the file."""
         from utils.cookie_validator import check_cookies_valid
 
         dlg = ManualCookieImportDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+            return False
 
         path, _ = QFileDialog.getOpenFileName(
             self, t("select_cookies_file"), "", "Cookies (*.txt);;All Files (*)"
         )
         if not path:
-            return
+            return False
 
         valid, warn_msg = check_cookies_valid(path)
         if not valid:
             show_warning(self, t("auth_wizard_aborted_title"), warn_msg)
-            return
+            return False
 
         if not self._apply_saved_cookies_file(path):
-            return
+            return False
         show_info(self, t("auth_wizard_success_title"), t("auth_wizard_success_msg"))
+        return True
 
     def _apply_saved_cookies_file(self, path: str) -> bool:
         """
@@ -1299,7 +1829,18 @@ class AppWindow(FluentWindow):
         if self._status_bar.state in (
             StatusState.INDETERMINATE, StatusState.DOWNLOADING
         ):
-            self._status_bar.show_batch_progress(snapshot)
+            remaining = self._download_ctrl.rate_limit_remaining()
+            if remaining > 0:
+                from utils.time_format import seconds_to_str
+                self._status_bar.show_batch_progress(
+                    snapshot,
+                    message=t(
+                        "status_rate_limit_waiting",
+                        time=seconds_to_str(remaining),
+                    ),
+                )
+            else:
+                self._status_bar.show_batch_progress(snapshot)
 
     def _on_all_downloads_finished(self, outcome: BatchOutcome) -> None:
         snap = self._last_snapshot
@@ -1384,6 +1925,12 @@ class AppWindow(FluentWindow):
 
     def _start_fetch(self, url: str) -> None:
         """Entry point for all fetching, intercepting channel URLs to ask what to scrape."""
+        rate_remaining = self._download_ctrl.rate_limit_remaining()
+        if getattr(self, "_rate_limit_network_paused", False) or rate_remaining > 0:
+            # Keep manual fetches closed through the same-track canary, not
+            # merely until the numeric countdown reaches zero.
+            self._on_rate_limit_waiting_ui(max(1.0, rate_remaining))
+            return
         # A new fetch supersedes any in-flight fast-start prefetch from the
         # previous catalog, and re-arms the one-shot early-prefetch trigger.
         self._match_prefetcher.cancel()
@@ -1474,7 +2021,7 @@ class AppWindow(FluentWindow):
             err = classify_error(Exception(result.error))
             err = self._localized_error_info(err)
             self._status_bar.show_error_summary(err.headline)
-            show_warning(self, err.headline, err.detail)
+            self._show_async_warning(err.headline, err.detail)
             return
 
         n = len(self._queue_panel.get_all_cards())
@@ -1521,9 +2068,13 @@ class AppWindow(FluentWindow):
         err = classify_error(Exception(msg))
         err = self._localized_error_info(err)
         self._status_bar.show_error_summary(err.headline)
-        show_warning(self, err.headline, err.detail)
+        self._show_async_warning(err.headline, err.detail)
 
     def _on_scrape(self, url: str) -> None:
+        rate_remaining = self._download_ctrl.rate_limit_remaining()
+        if getattr(self, "_rate_limit_network_paused", False) or rate_remaining > 0:
+            self._on_rate_limit_waiting_ui(max(1.0, rate_remaining))
+            return
         self._status_bar.show_indeterminate(t("scraping"))
         self._fetch_ctrl.scrape(url)
 
@@ -1539,7 +2090,9 @@ class AppWindow(FluentWindow):
     def _on_redownload(self, record: DownloadRecord) -> None:
         self._url_bar.set_url(record.url)
         self.switchTo(self._queue_wrapper)
-        self._fetch_ctrl.fetch(record.url)
+        # Re-enter through the normal admission boundary so a history action
+        # cannot start fresh YouTube work during a shared rate-limit cooldown.
+        self._start_fetch(record.url)
 
     def _on_open_folder(self, record: DownloadRecord) -> None:
         folder = Path(record.output_path).parent
@@ -1550,6 +2103,10 @@ class AppWindow(FluentWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _on_search(self, query: str) -> None:
+        rate_remaining = self._download_ctrl.rate_limit_remaining()
+        if getattr(self, "_rate_limit_network_paused", False) or rate_remaining > 0:
+            self._on_rate_limit_waiting_ui(max(1.0, rate_remaining))
+            return
         self._search_ctrl.search(query, self._search_panel._current_platform)
 
     def _on_search_result_ready(self, result: SearchResult) -> None:
@@ -1560,6 +2117,32 @@ class AppWindow(FluentWindow):
             tw.start()
 
     def _on_add_search_result_to_queue(self, result: SearchResult) -> None:
+        incident_id = getattr(self, "_source_repair_incident_id", "")
+        key = getattr(self, "_source_repair_key", "")
+        if incident_id and key:
+            if result.kind != ResultKind.TRACK:
+                return
+            job = self._download_ctrl.prepare_failure_source(
+                incident_id, key, result.url
+            )
+            if job is None:
+                self._show_async_warning(
+                    t("search_source_repair_invalid_title"),
+                    t("search_source_repair_invalid_text"),
+                )
+                return
+            self._source_repair_jobs.append(job)
+            self._source_repair_completed += 1
+            InfoBar.success(
+                title=t("search_source_repair_selected_title"),
+                content=t("search_source_repair_selected_text", title=result.title),
+                orient=Qt.Orientation.Horizontal,
+                position=InfoBarPosition.BOTTOM_RIGHT,
+                duration=3000,
+                parent=self,
+            )
+            QTimer.singleShot(0, self._show_next_failure_source_repair)
+            return
         self._search_ctrl.add_to_queue(result)
 
     def _on_result_to_queue(self, meta) -> None:
@@ -1586,7 +2169,7 @@ class AppWindow(FluentWindow):
         err = classify_error(Exception(msg))
         err = self._localized_error_info(err)
         self._status_bar.show_error_summary(err.headline)
-        show_warning(self, err.headline, err.detail)
+        self._show_async_warning(err.headline, err.detail)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Queue card management  (AppWindow owns card creation and index routing)
@@ -1613,10 +2196,12 @@ class AppWindow(FluentWindow):
                 if isinstance(data, dict) else get("url", "")
             ),
             album=get("album", ""),
+            collection_title=get("collection_title", ""),
             parent_artist=get("parent_artist", ""),
             release_type=get("release_type", ""),
             album_index=get("album_index", 0),
             disc_number=get("disc_number", 0),
+            disc_total=get("disc_total", 0),
             thumbnail_url=get("thumbnail_url", ""),
             category=get("category", ""),
             total_tracks=get("total_tracks", 0),
@@ -1774,6 +2359,7 @@ class AppWindow(FluentWindow):
 
     def _on_cancel(self) -> None:
         was_downloading = self._download_ctrl.is_downloading()
+        self._cancel_download_error_requests()
         self._match_prefetcher.cancel()
         self._fetch_ctrl.cancel()
         self._search_ctrl.cancel()
@@ -1948,6 +2534,36 @@ class AppWindow(FluentWindow):
             return
         self._prefetch_shutdown_retry_scheduled = False
 
+        # Download workers may be parked in an hour-long cooldown or waiting
+        # on a user decision. Resolve dialogs first, then cooperatively cancel
+        # the main worker and every per-track resume. Keep the QObject tree
+        # alive until all QThreads have actually exited; destroying a running
+        # QThread is a native Qt abort/crash.
+        cancel_recovery = getattr(self, "_cancel_download_error_requests", None)
+        if callable(cancel_recovery):
+            cancel_recovery()
+        request_download_shutdown = getattr(
+            self._download_ctrl, "request_shutdown", None,
+        )
+        downloads_stopped = (
+            request_download_shutdown()
+            if callable(request_download_shutdown)
+            else True
+        )
+        if not downloads_stopped:
+            event.ignore()
+            if not getattr(self, "_download_shutdown_retry_scheduled", False):
+                self._download_shutdown_retry_scheduled = True
+
+                def _retry_close_after_downloads() -> None:
+                    self._download_shutdown_retry_scheduled = False
+                    self.close()
+
+                QTimer.singleShot(50, _retry_close_after_downloads)
+            logger.info("[AppWindow] Deferring close while downloads stop safely")
+            return
+        self._download_shutdown_retry_scheduled = False
+
         # 2. Persist state
         self._save_state()
         self._save_queue_state()
@@ -1958,14 +2574,8 @@ class AppWindow(FluentWindow):
         if self._clipboard_worker:
             self._clipboard_worker.stop()
 
-        # 4. Cancel + join workers
-        # getattr-guarded like _net_monitor/_svc below: tolerate a close that
-        # fires before _build_controllers finished (e.g. a first-run crash).
-        dl_worker = self._download_ctrl._dl_worker  # noqa: SLF001
-        if dl_worker and dl_worker.isRunning():
-            logger.info("[AppWindow] Shutting down DownloadWorker…")
-            dl_worker.shutdown(timeout_ms=3000)
-
+        # 4. Cancel + join remaining non-download workers. Download workers
+        # were drained asynchronously above so no running QThread is destroyed.
         fetch_worker  = self._fetch_ctrl._fetch_worker    # noqa: SLF001
         search_worker = self._search_ctrl._search_worker  # noqa: SLF001
         scraper_worker= self._fetch_ctrl._scraper_worker  # noqa: SLF001

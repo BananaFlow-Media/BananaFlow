@@ -135,6 +135,7 @@ class ShiftClickCheckBox(QCheckBox):
 _PHASE_CAPTIONS = {
     "matching":    "phase_matching",
     "waiting":     "phase_waiting",
+    "rate_limited": "phase_rate_limited",
     "starting":    "phase_starting",
     "downloading": "phase_downloading",
     "processing":  "phase_processing",
@@ -176,10 +177,12 @@ class TrackCard(QFrame):
         queue_index:  int          = 0,
         track_url:    str          = "",
         album:        str          = "",
+        collection_title: str      = "",
         parent_artist: str         = "",
         release_type:  str         = "",
         album_index:   int         = 0,
         disc_number:   int         = 0,
+        disc_total:    int         = 0,
         thumbnail_url: str         = "",
         category:      str         = "",
         total_tracks:  int         = 0,
@@ -198,12 +201,14 @@ class TrackCard(QFrame):
         self.title       = title
         self.artist      = artist
         self.album       = album
+        self.collection_title = collection_title
         self.parent_artist = parent_artist
         self.release_type  = release_type
         self.category      = category
         self.total_tracks  = total_tracks
         self.album_index   = album_index
         self.disc_number   = disc_number
+        self.disc_total    = disc_total
         self.thumbnail_url = thumbnail_url
         self.duration       = duration
         self.duration_sec   = duration_sec

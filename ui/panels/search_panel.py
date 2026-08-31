@@ -82,6 +82,7 @@ class SearchPanel(QWidget):
     add_to_queue_requested = Signal(object)   # SearchResult
     drill_down_requested   = Signal(object)   # SearchResult
     search_requested       = Signal(str)      # query to search
+    source_repair_cancelled = Signal()
 
     def __init__(self, config: AppConfig, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -89,6 +90,7 @@ class SearchPanel(QWidget):
         self._cards:    list[SearchResultCard] = []
         self._searching = False
         self._current_platform = "youtube"
+        self._source_repair_active = False
 
         # Per-section containers and card lists (populated in _build)
         self._section_widgets:  dict[ResultKind, QWidget]           = {}
@@ -149,6 +151,7 @@ class SearchPanel(QWidget):
         card = SearchResultCard(result, parent=self._results_container)
         card.add_to_queue.connect(self.add_to_queue_requested)
         card.browse_requested.connect(self.drill_down_requested)
+        card.set_source_selection_mode(self._source_repair_active)
         section_layout.addWidget(card)
 
         self._section_cards[kind].append(card)
@@ -186,14 +189,53 @@ class SearchPanel(QWidget):
         self._config.last_search_query    = ""
         self._config.last_search_platform = self.get_platform()
 
-    def run_query(self, query: str) -> None:
+    def begin_source_repair(self, title: str, position: int, total: int) -> None:
+        """Show that a search result will repair, not duplicate, a queue row."""
+        self._source_repair_active = True
+        self._source_repair_title.setText(
+            t(
+                "search_source_repair_title",
+                title=title,
+                position=max(1, int(position)),
+                total=max(1, int(total)),
+            )
+        )
+        self._source_repair_hint.setText(t("search_source_repair_hint"))
+        self._source_repair_banner.setVisible(True)
+        self._platform_btn.setEnabled(False)
+        self._set_filter("tracks")
+        for card in self._cards:
+            card.set_source_selection_mode(True)
+
+    def end_source_repair(self) -> None:
+        self._source_repair_active = False
+        self._source_repair_banner.setVisible(False)
+        self._platform_btn.setEnabled(True)
+        self._set_filter("all")
+        for card in self._cards:
+            card.set_source_selection_mode(False)
+
+    def run_query(
+        self,
+        query: str,
+        *,
+        platform: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
         """Programmatically run a search, e.g. forwarded from the URL bar
         when the user types free text instead of pasting a URL."""
         query = query.strip()
         if not query:
             return
+        if platform in ("youtube", "ytmusic", "spotify", "both"):
+            self._set_platform(platform)
         self._search_box.setText(query)
-        self._on_search(query)
+        if force:
+            self.clear_results()
+            self.save_state()
+            self.search_requested.emit(query)
+        else:
+            self._on_search(query)
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -248,6 +290,28 @@ class SearchPanel(QWidget):
         top_row.addWidget(self._search_box, stretch=1)
 
         root.addLayout(top_row)
+
+        self._source_repair_banner = QFrame(self)
+        self._source_repair_banner.setObjectName("searchSourceRepairBanner")
+        repair_row = QHBoxLayout(self._source_repair_banner)
+        repair_row.setContentsMargins(12, 10, 12, 10)
+        repair_row.setSpacing(10)
+        repair_text = QVBoxLayout()
+        repair_text.setContentsMargins(0, 0, 0, 0)
+        repair_text.setSpacing(2)
+        self._source_repair_title = BodyLabel("")
+        self._source_repair_title.setObjectName("searchSourceRepairTitle")
+        self._source_repair_hint = CaptionLabel("")
+        self._source_repair_hint.setObjectName("searchSourceRepairHint")
+        repair_text.addWidget(self._source_repair_title)
+        repair_text.addWidget(self._source_repair_hint)
+        repair_row.addLayout(repair_text, 1)
+        repair_cancel = PushButton(t("search_source_repair_cancel_btn"))
+        repair_cancel.setObjectName("searchSourceRepairCancel")
+        repair_cancel.clicked.connect(self.source_repair_cancelled)
+        repair_row.addWidget(repair_cancel)
+        self._source_repair_banner.setVisible(False)
+        root.addWidget(self._source_repair_banner)
 
         # ── Filter bar ────────────────────────────────────────────────────────
         self.filter_nav = QWidget(self)
@@ -395,6 +459,18 @@ class SearchPanel(QWidget):
             PushButton#searchClearBtn:hover {{
                 border-color: {c.accent};
                 color: {c.accent};
+            }}
+            QFrame#searchSourceRepairBanner {{
+                background: {c.surface};
+                border: 1px solid {c.accent};
+                border-radius: 10px;
+            }}
+            QLabel#searchSourceRepairTitle {{
+                color: {c.text_primary};
+                font-weight: 700;
+            }}
+            QLabel#searchSourceRepairHint {{
+                color: {c.text_secondary};
             }}
             QFrame#searchDivider {{
                 background: {c.border};

@@ -82,6 +82,8 @@ def test_independent_spotify_tracks_stay_root_level_and_keep_artwork(tmp_path, m
     assert len(requests) == 2
     assert all(request.playlist_name in (None, "") for request in requests)
     assert all(request.forced_index is None for request in requests)
+    assert all(request.filename_index is None for request in requests)
+    assert all(request.filename_include_artist for request in requests)
     assert all(request.is_solo for request in requests)
     assert [request.source_url for request in requests] == [card.source_url for card in cards]
     assert [request.thumbnail_url for request in requests] == [card.thumbnail_url for card in cards]
@@ -210,16 +212,20 @@ def test_search_results_are_independent_and_channel_imports_are_grouped(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("source_kind", "release_type", "album", "expected_fragment", "expected_index"),
+    (
+        "source_kind", "release_type", "album", "expected_fragment",
+        "expected_track_index", "expected_filename_index",
+    ),
     [
-        (UrlKind.ALBUM.name, "album", "Album Name", "Album Name", 3),
-        (UrlKind.PLAYLIST.name, "playlist", "Playlist Name", "Playlist Name", None),
-        (UrlKind.ARTIST.name, "single", "Single Name", "Artist Name", 7),
+        (UrlKind.ALBUM.name, "album", "Album Name", "Album Name", 3, 3),
+        (UrlKind.PLAYLIST.name, "playlist", "Playlist Name", "Playlist Name", None, 3),
+        (UrlKind.ARTIST.name, "playlist", "Artist Playlist", "Artist Playlist", None, 3),
+        (UrlKind.ARTIST.name, "single", "Single Name", "Artist Name", None, None),
     ],
 )
 def test_grouped_sources_keep_collection_paths_when_one_card_is_selected(
     tmp_path, monkeypatch, source_kind, release_type, album,
-    expected_fragment, expected_index,
+    expected_fragment, expected_track_index, expected_filename_index,
 ):
     from ui.components.track_card import TrackCard
 
@@ -227,15 +233,160 @@ def test_grouped_sources_keep_collection_paths_when_one_card_is_selected(
     card = TrackCard(
         "Track", "Artist Name", queue_index=7, platform="spotify",
         track_url="https://music.youtube.com/watch?v=track",
-        parent_artist="" if source_kind == UrlKind.PLAYLIST.name else "Artist Name",
-        album=album, release_type=release_type, album_index=3,
+        # Direct Spotify playlist rows can carry the track artist; routing must
+        # still follow source_kind + collection_title, not parent_artist.
+        parent_artist="Artist Name",
+        album=album, collection_title=album,
+        release_type=release_type, album_index=3,
+        total_tracks=10 if release_type == "playlist" else 0,
         source_kind=source_kind, source_url=f"https://open.spotify.com/{source_kind.lower()}/id",
     )
     controller.start_batch([card], _options(tmp_path / "out"), UrlKind.SINGLE_VIDEO, "Wrong Global")
     request = built[0][1]
     assert expected_fragment in (request.playlist_name or "")
-    assert request.forced_index == expected_index
+    assert request.forced_index == expected_track_index
+    assert request.filename_index == expected_filename_index
     assert not request.is_solo
+
+
+@pytest.mark.parametrize("platform", ["spotify", "ytmusic"])
+def test_playlist_filename_uses_original_position_not_queue_identity(
+    tmp_path, monkeypatch, platform,
+):
+    from ui.components.track_card import TrackCard
+
+    controller, built = _controller(tmp_path, monkeypatch)
+    card = TrackCard(
+        "Track", "Artist", queue_index=47, platform=platform,
+        track_url="https://music.youtube.com/watch?v=track",
+        album="Playlist", release_type="playlist", album_index=3,
+        source_kind=UrlKind.PLAYLIST.name,
+    )
+
+    controller.start_batch([card], _options(tmp_path / "out"), UrlKind.PLAYLIST, "Playlist")
+
+    request = built[0][1]
+    assert request.filename_index == 3
+    assert request.forced_index is None
+
+
+@pytest.mark.parametrize("source_kind", [UrlKind.PLAYLIST.name, UrlKind.ARTIST.name])
+def test_playlist_filename_numbering_can_be_disabled(
+    tmp_path, monkeypatch, source_kind,
+):
+    from ui.components.track_card import TrackCard
+
+    controller, built = _controller(tmp_path, monkeypatch)
+    controller._cfg.playlist_index_prefix = False
+    card = TrackCard(
+        "Track", "Artist", queue_index=47, platform="ytmusic",
+        track_url="https://music.youtube.com/watch?v=track",
+        album="Playlist",
+        parent_artist="Artist" if source_kind == UrlKind.ARTIST.name else "",
+        release_type="playlist", album_index=3, source_kind=source_kind,
+    )
+
+    controller.start_batch([card], _options(tmp_path / "out"), UrlKind.PLAYLIST, "Playlist")
+
+    request = built[0][1]
+    assert request.filename_index is None
+    assert request.forced_index is None
+
+
+def test_direct_playlist_folder_uses_collection_not_track_album_or_artist(
+    tmp_path, monkeypatch,
+):
+    from ui.components.track_card import TrackCard
+
+    controller, built = _controller(tmp_path, monkeypatch)
+    card = TrackCard(
+        "Track", "Track Artist", queue_index=1, platform="spotify",
+        track_url="https://music.youtube.com/watch?v=track",
+        album="Unrelated Track Album", collection_title="Shared Playlist",
+        parent_artist="Track Artist", release_type="playlist",
+        album_index=9, total_tracks=20, source_kind=UrlKind.PLAYLIST.name,
+    )
+
+    controller.start_batch(
+        [card], _options(tmp_path / "out"), UrlKind.PLAYLIST, "Wrong Global",
+    )
+
+    request = built[0][1]
+    assert request.playlist_name == "Shared Playlist"
+    assert request.filename_index == 9
+
+
+def test_compilation_uses_artist_title_without_a_number(tmp_path, monkeypatch):
+    from ui.components.track_card import TrackCard
+
+    controller, built = _controller(tmp_path, monkeypatch)
+    card = TrackCard(
+        "Repeated Title", "Guest Artist", queue_index=1, platform="spotify",
+        track_url="https://music.youtube.com/watch?v=track",
+        album="Collected", collection_title="Collected",
+        parent_artist="Catalog Artist", release_type="compilation",
+        album_index=5, total_tracks=12, source_kind=UrlKind.ARTIST.name,
+    )
+
+    controller.start_batch(
+        [card], _options(tmp_path / "out"), UrlKind.ARTIST, "Catalog Artist",
+    )
+
+    request = built[0][1]
+    assert request.filename_index is None
+    assert request.forced_index == 5
+    assert request.filename_include_artist is True
+    assert "Collected" in (request.playlist_name or "")
+
+
+def test_multi_disc_album_uses_separate_disc_folders(tmp_path, monkeypatch):
+    from ui.components.track_card import TrackCard
+
+    controller, built = _controller(tmp_path, monkeypatch)
+    cards = [
+        TrackCard(
+            "Track", "Artist", queue_index=disc, platform="spotify",
+            track_url=f"https://music.youtube.com/watch?v=track{disc}",
+            album="Long Album", collection_title="Long Album",
+            parent_artist="Artist", release_type="album", album_index=1,
+            disc_number=disc, disc_total=2, total_tracks=20,
+            source_kind=UrlKind.ARTIST.name,
+        )
+        for disc in (1, 2)
+    ]
+
+    controller.start_batch(
+        cards, _options(tmp_path / "out"), UrlKind.ARTIST, "Artist",
+    )
+
+    requests = [request for _key, request in built]
+    assert requests[0].playlist_name.endswith("Disc 1")
+    assert requests[1].playlist_name.endswith("Disc 2")
+    assert [request.forced_disc for request in requests] == [1, 2]
+
+
+def test_reported_disc_total_works_when_only_one_disc_is_selected(
+    tmp_path, monkeypatch,
+):
+    from ui.components.track_card import TrackCard
+
+    controller, built = _controller(tmp_path, monkeypatch)
+    card = TrackCard(
+        "Track", "Artist", queue_index=1, platform="spotify",
+        track_url="https://music.youtube.com/watch?v=track",
+        album="Long Album", collection_title="Long Album",
+        parent_artist="Artist", release_type="album", album_index=1,
+        disc_number=1, disc_total=2, total_tracks=20,
+        source_kind=UrlKind.ARTIST.name,
+    )
+
+    controller.start_batch(
+        [card], _options(tmp_path / "out"), UrlKind.ARTIST, "Artist",
+    )
+
+    request = built[0][1]
+    assert request.playlist_name.endswith("Disc 1")
+    assert request.forced_disc == 1
 
 
 def test_spotify_artwork_reaches_final_embedding_and_failure_stays_nonfatal(

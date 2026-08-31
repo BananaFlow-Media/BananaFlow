@@ -502,6 +502,8 @@ class StyledMessageDialog(StyledDialog):
     technical context remains one click away for support/reporting.
     """
 
+    AUXILIARY_RESULT = 2
+
     def __init__(
         self,
         title: str,
@@ -511,13 +513,16 @@ class StyledMessageDialog(StyledDialog):
         kind: str = "info",
         accept_text: Optional[str] = None,
         cancel_text: Optional[str] = None,
+        auxiliary_text: Optional[str] = None,
         show_cancel: bool = False,
         details: str = "",
     ) -> None:
         super().__init__(parent, minimum_size=(360, 150), resize_to=(440, 190))
         self.setWindowTitle(title)
         root = make_root_layout(self, margins=(20, 18, 20, 16), spacing=12)
-        add_header(root, title, text)
+        header = add_header(root, title, text)
+        self._title_label = header.findChild(QLabel, "dialogTitle")
+        self._subtitle_label = header.findChild(QLabel, "dialogSubtitle")
 
         self._details_box: Optional[QPlainTextEdit] = None
         self._details_btn: Optional[QPushButton] = None
@@ -552,14 +557,39 @@ class StyledMessageDialog(StyledDialog):
             cancel_btn = make_button(cancel_text or t("cancel_btn"), "cancel")
             cancel_btn.clicked.connect(self.reject)
 
+        auxiliary_btn: Optional[QPushButton] = None
+        if auxiliary_text:
+            auxiliary_btn = make_button(auxiliary_text, "secondary")
+            auxiliary_btn.clicked.connect(
+                lambda: self.done(self.AUXILIARY_RESULT)
+            )
+
         role = "danger" if kind == "danger" else "primary"
         ok_btn = make_button(accept_text or t("meta_ok"), role)
         ok_btn.clicked.connect(self.accept)
 
-        if cancel_btn is not None:
+        if cancel_btn is not None and auxiliary_btn is not None:
+            root.addWidget(make_footer(cancel_btn, auxiliary_btn, ok_btn))
+        elif cancel_btn is not None:
             root.addWidget(make_footer(cancel_btn, ok_btn))
+        elif auxiliary_btn is not None:
+            root.addWidget(make_footer(auxiliary_btn, ok_btn))
         else:
             root.addWidget(make_footer(ok_btn))
+        self._accept_btn = ok_btn
+        self._cancel_btn = cancel_btn
+        self._auxiliary_btn = auxiliary_btn
+
+    def update_message(self, title: str, text: str, details: str = "") -> None:
+        """Update a non-modal live dialog without creating another popup."""
+        self.setWindowTitle(title)
+        if self._title_label is not None:
+            self._title_label.setText(title)
+        if self._subtitle_label is not None:
+            self._subtitle_label.setText(text)
+        if self._details_box is not None:
+            self._details_box.setPlainText((details or "").strip())
+        self.adjustSize()
 
     def _toggle_details(self) -> None:
         if self._details_box is None or self._details_btn is None:

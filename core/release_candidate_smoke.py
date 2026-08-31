@@ -219,7 +219,7 @@ def _orchestrator_checks(steps: list[dict], output_dir: Path) -> None:
         steps, "no_empty_url_engine_submission",
         set(mixed_engine.urls) == {
             "https://trace.invalid/release/9",
-            "ytsearch1:Artist Song audio",
+            "ytsearch1:Artist Song",
         } and all(mixed_engine.urls),
         f"engine_urls={len(mixed_engine.urls)}",
     )
@@ -444,7 +444,13 @@ def _spotify_production_checks(steps: list[dict], output_dir: Path) -> None:
         steps, "independent_track_output_context",
         len(direct_requests) == 2
         and all(request.playlist_name in (None, "") for request in direct_requests)
-        and all(request.forced_index is None and request.is_solo for request in direct_requests),
+        and all(
+            request.forced_index is None
+            and request.filename_index is None
+            and request.filename_include_artist
+            and request.is_solo
+            for request in direct_requests
+        ),
     )
     _step(
         steps, "spotify_artwork_download_request",
@@ -466,7 +472,9 @@ def _spotify_production_checks(steps: list[dict], output_dir: Path) -> None:
     _step(
         steps, "grouped_source_output_context",
         "Album Name" in (album_request.playlist_name or "")
-        and album_request.forced_index == 3 and not album_request.is_solo,
+        and album_request.forced_index == 3
+        and album_request.filename_index == 3
+        and not album_request.is_solo,
     )
 
     for queue_card in [*direct_cards, album_card]:

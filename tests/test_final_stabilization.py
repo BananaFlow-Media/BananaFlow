@@ -128,8 +128,10 @@ def test_hebrew_spotify_display_survives_queue_restart_and_download_request(
     card = TrackCard(
         track.title, track.artist, platform="spotify", queue_index=1,
         track_url=track.url, album=track.album,
+        collection_title=track.collection_title,
         parent_artist=track.parent_artist, release_type=track.release_type,
-        album_index=track.album_index, thumbnail_url=track.thumbnail_url,
+        album_index=track.album_index, disc_total=track.disc_total,
+        thumbnail_url=track.thumbnail_url,
         total_tracks=track.total_tracks, duration_sec=track.duration_sec,
         spotify_id=track.spotify_id, spotify_key_kind=track.spotify_key_kind,
         match_status=track.match_status, source_kind=track.source_kind,
@@ -144,11 +146,15 @@ def test_hebrew_spotify_display_survives_queue_restart_and_download_request(
     save = SaveShim()
     AppWindow._save_queue_state(save)
     assert save._cfg.queue_state[0]["artist"] == "אודיה"
+    assert save._cfg.queue_state[0]["collection_title"] == result.playlist_title
+    assert save._cfg.queue_state[0]["disc_total"] == track.disc_total
 
     restored = []
     restore = SimpleNamespace(_add_track_to_queue=restored.append)
     AppWindow._restore_queue_state(restore, save._cfg.queue_state)
     assert restored[0].artist == "אודיה"
+    assert restored[0].collection_title == result.playlist_title
+    assert restored[0].disc_total == track.disc_total
 
     cfg = AppConfig()
     cfg.duplicate_action = "overwrite"

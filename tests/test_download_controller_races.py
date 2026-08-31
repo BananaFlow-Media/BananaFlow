@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -138,7 +137,7 @@ def test_stale_worker_finish_cannot_end_newer_batch(tmp_path, monkeypatch, app):
     assert ctrl._dl_worker is None
 
 
-def test_track_error_callback_is_safe_and_media_403_is_not_batch_fatal(
+def test_terminal_track_error_parks_card_in_one_incident_without_batch_cancel(
     tmp_path, monkeypatch, app,
 ):
     from error_handler import classify_error
@@ -146,21 +145,23 @@ def test_track_error_callback_is_safe_and_media_403_is_not_batch_fatal(
     ctrl = _controller(tmp_path, monkeypatch, app)
     card = MagicMock()
     ctrl._key_to_card["dubai"] = card
-    request = SimpleNamespace(url="https://www.youtube.com/watch?v=qtxE3g4E0J0")
-    monkeypatch.setattr(ctrl, "_active_request_for_key", lambda key: request if key == "dubai" else None)
     cancelled = []
     monkeypatch.setattr(ctrl, "cancel_all", lambda: cancelled.append(True))
-    dialogs = []
-    ctrl.show_error_dialog.connect(lambda err, url: dialogs.append((err, url)))
+    decisions = []
+    ctrl.user_action_required.connect(decisions.append)
+    incidents = []
+    ctrl.failure_incident_updated.connect(incidents.append)
 
     error = classify_error(Exception(
         "unable to download video data: HTTP Error 403: Forbidden"
     ))
     ctrl._on_track_error("dubai", error)
 
-    card.set_status.assert_called_once_with("error")
-    assert dialogs[0][1] == request.url
+    card.set_status.assert_called_once_with("waiting")
+    assert decisions == []
     assert cancelled == []
+    assert len(incidents) == 1
+    assert incidents[0].count == 1
 
 
 def test_track_error_callback_tolerates_missing_state_and_stale_sender(
@@ -169,10 +170,10 @@ def test_track_error_callback_tolerates_missing_state_and_stale_sender(
     from error_handler import classify_error
 
     ctrl = _controller(tmp_path, monkeypatch, app)
-    dialogs = []
-    ctrl.show_error_dialog.connect(lambda err, url: dialogs.append((err, url)))
+    decisions = []
+    ctrl.user_action_required.connect(decisions.append)
     ctrl._on_track_error("missing", classify_error(Exception("per-video failure")))
-    assert dialogs[0][1] == ""
+    assert decisions == []
 
     new_worker = _FakeWorker()
     # Drive the real QObject sender boundary with a small signal owner.
@@ -182,10 +183,10 @@ def test_track_error_callback_tolerates_missing_state_and_stale_sender(
     emitter.failed.connect(ctrl._on_track_error)
     ctrl._dl_worker = new_worker
     emitter.failed.emit("missing", classify_error(Exception("stale failure")))
-    assert len(dialogs) == 1
+    assert decisions == []
 
 
-def test_genuine_global_cookie_configuration_failure_stops_cleanly_once(
+def test_terminal_cookie_errors_do_not_duplicate_prompt_or_cancel_batch(
     tmp_path, monkeypatch, app,
 ):
     from error_handler import classify_error
@@ -193,8 +194,10 @@ def test_genuine_global_cookie_configuration_failure_stops_cleanly_once(
     ctrl = _controller(tmp_path, monkeypatch, app)
     cancelled = []
     monkeypatch.setattr(ctrl, "cancel_all", lambda: cancelled.append(True))
-    dialogs = []
-    ctrl.show_error_dialog.connect(lambda err, url: dialogs.append((err, url)))
+    decisions = []
+    ctrl.user_action_required.connect(decisions.append)
+    incidents = []
+    ctrl.failure_incident_updated.connect(incidents.append)
     error = classify_error(Exception(
         "could not copy Chrome cookie database: database is locked"
     ))
@@ -202,8 +205,67 @@ def test_genuine_global_cookie_configuration_failure_stops_cleanly_once(
     ctrl._on_track_error("first", error)
     ctrl._on_track_error("second", error)
 
-    assert cancelled == [True]
-    assert len(dialogs) == 1
+    assert cancelled == []
+    assert decisions == []
+    assert len(incidents) == 2
+    assert incidents[0] is incidents[1]
+    assert incidents[-1].count == 2
+
+
+def test_auth_incident_retry_resubmits_every_failed_track_and_reopens_gate(
+    tmp_path, monkeypatch, app,
+):
+    from core.download_recovery import (
+        DownloadFailureIncident,
+        FailureIncidentItem,
+        RecoveryDecision,
+        shared_download_recovery_coordinator,
+        systemic_recovery_policy,
+    )
+    from core.downloader import DownloadRequest
+    from error_handler import classify_error
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    error = classify_error(Exception("Sign in to view this video"))
+    policy = systemic_recovery_policy(error)
+    assert policy is not None
+    coordinator = shared_download_recovery_coordinator()
+    coordinator.reset_systemic(policy.scope)
+    for _ in range(3):
+        coordinator.note_systemic_failure(policy)
+
+    incident = DownloadFailureIncident(
+        scope=policy.scope,
+        error=error,
+        systemic_policy=policy,
+        stopped_all=True,
+        streak=3,
+    )
+    for number in range(3):
+        key = f"auth-{number}"
+        incident.add(
+            FailureIncidentItem(key, f"Song {number}", f"https://youtu.be/{number}"),
+            stopped_all=True,
+            streak=3,
+        )
+        ctrl._failed_requests[key] = DownloadRequest(
+            url=f"https://youtu.be/{number}",
+            output_dir=str(tmp_path),
+        )
+        ctrl._key_to_card[key] = MagicMock()
+    ctrl._failure_incidents[policy.scope] = incident
+    started = []
+    monkeypatch.setattr(ctrl, "_start_failure_retry_jobs", started.append)
+
+    assert ctrl.resolve_failure_incident(
+        incident.incident_id, RecoveryDecision.RETRY
+    ) is True
+    assert coordinator.systemic_state(policy.scope) == (0, False)
+    assert len(started) == 1
+    assert [key for key, _req in started[0]] == [
+        "auth-0", "auth-1", "auth-2"
+    ]
+    assert ctrl._failed_requests == {}
 
 
 def test_resume_worker_finish_is_allowed_when_no_main_batch(tmp_path, monkeypatch, app):
@@ -221,6 +283,99 @@ def test_resume_worker_finish_is_allowed_when_no_main_batch(tmp_path, monkeypatc
     resume_worker.all_finished.emit(BatchOutcome.COMPLETED)
 
     assert outcomes == [BatchOutcome.COMPLETED]
+
+
+def test_manual_source_retries_one_failed_row_with_original_metadata(
+    tmp_path, monkeypatch, app,
+):
+    from core.download_recovery import DownloadFailureIncident, FailureIncidentItem
+    from core.downloader import DownloadRequest
+    from error_handler import classify_error
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    error = classify_error(Exception("Downloading 0 items"))
+    incident = DownloadFailureIncident(
+        scope="error:err_no_search_results",
+        error=error,
+    )
+    incident.add(
+        FailureIncidentItem("first", "Original Song", "ytsearch1:Original"),
+        stopped_all=False,
+        streak=0,
+    )
+    incident.add(
+        FailureIncidentItem("second", "Other Song", "ytsearch1:Other"),
+        stopped_all=False,
+        streak=0,
+    )
+    ctrl._failure_incidents[incident.scope] = incident
+    ctrl._failed_requests["first"] = DownloadRequest(
+        url="ytsearch1:Original",
+        output_dir=str(tmp_path),
+        forced_title="Original Song",
+        forced_artist="Original Artist",
+        forced_album="Original Album",
+        forced_index=7,
+        spotify_match_identity={"title": "Original Song", "artist": "Original Artist"},
+    )
+    card = MagicMock()
+    ctrl._key_to_card["first"] = card
+    started = []
+    monkeypatch.setattr(ctrl, "_start_failure_retry_jobs", started.append)
+
+    job = ctrl.prepare_failure_source(
+        incident.incident_id,
+        "first",
+        "https://www.youtube.com/watch?v=abcdefghijk",
+    )
+
+    assert job is not None
+    assert started == []
+    ctrl.start_failure_source_jobs([job])
+    assert len(started) == 1
+    retry_key, retry = started[0][0]
+    assert retry_key == "first"
+    assert retry.url == "https://www.youtube.com/watch?v=abcdefghijk"
+    assert retry.url_resolver is None
+    assert retry.spotify_match_identity is None
+    assert retry.forced_title == "Original Song"
+    assert retry.forced_artist == "Original Artist"
+    assert retry.forced_album == "Original Album"
+    assert retry.forced_index == 7
+    assert [item.key for item in incident.items] == ["second"]
+    assert card.track_url == retry.url
+    assert card.match_status == "matched"
+
+
+def test_manual_source_rejects_collection_url_without_consuming_failure(
+    tmp_path, monkeypatch, app,
+):
+    from core.download_recovery import DownloadFailureIncident, FailureIncidentItem
+    from core.downloader import DownloadRequest
+    from error_handler import classify_error
+
+    ctrl = _controller(tmp_path, monkeypatch, app)
+    incident = DownloadFailureIncident(
+        scope="error:err_no_search_results",
+        error=classify_error(Exception("Downloading 0 items")),
+    )
+    incident.add(
+        FailureIncidentItem("first", "Song", "ytsearch1:Song"),
+        stopped_all=False,
+        streak=0,
+    )
+    ctrl._failure_incidents[incident.scope] = incident
+    ctrl._failed_requests["first"] = DownloadRequest(
+        url="ytsearch1:Song", output_dir=str(tmp_path),
+    )
+
+    assert ctrl.prepare_failure_source(
+        incident.incident_id,
+        "first",
+        "https://www.youtube.com/playlist?list=PL123456789",
+    ) is None
+    assert "first" in ctrl._failed_requests
+    assert [item.key for item in incident.items] == ["first"]
 
 
 def test_one_of_several_resume_workers_finishing_does_not_end_downloading_mode(

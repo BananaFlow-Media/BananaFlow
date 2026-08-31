@@ -34,6 +34,16 @@ from core.downloader import (
     MediaType,
 )
 from core.history_db import HistoryDB
+from core.download_recovery import (
+    DownloadFailureIncident,
+    FailureIncidentItem,
+    RecoveryDecision,
+    UserActionRequest,
+    shared_download_recovery_coordinator,
+    systemic_recovery_policy,
+)
+from core.filename_numbering import decide_numbering
+from core.output_layout import decide_output_layout
 from core.playlist_parser import SourcePlatform, UrlKind
 from core.quality_presets import (
     AudioQuality,
@@ -53,8 +63,6 @@ from ui.i18n import localized_folder_name, t
 
 logger = logging.getLogger(__name__)
 
-
-_MULTI_KINDS = {UrlKind.PLAYLIST, UrlKind.ALBUM, UrlKind.ARTIST}
 
 # Card statuses a job never comes back from — captured here (rather than
 # just "done") because Global Pause must not snapshot-and-resume a job that
@@ -79,7 +87,8 @@ class DownloadController(QObject):
     batch_snapshot     : BatchSnapshot — AppWindow → StatusBar.show_batch_progress()
     downloading_changed: bool — → dl_bar.set_downloading()
     show_success_bar   : str output_path — AppWindow shows InfoBar
-    show_error_dialog  : object ErrorInfo — AppWindow shows MessageBox
+    user_action_required: UserActionRequest — one serialized pre-terminal choice
+    rate_limit_waiting : float seconds — shared YouTube cooldown countdown
     batch_finished     : BatchOutcome — AppWindow maps outcome → footer + queue state
     batch_started      : () — AppWindow saves queue state + shows "preparing…"
     track_thumbnail    : (int, str) — AppWindow refreshes a card thumbnail
@@ -107,7 +116,9 @@ class DownloadController(QObject):
     downloading_changed = Signal(bool)
     job_count_changed   = Signal(int, int)        # DEPRECATED — see class docstring
     show_success_bar    = Signal(str)       # output_path
-    show_error_dialog   = Signal(object, str)    # ErrorInfo, Failing URL
+    user_action_required = Signal(object)         # UserActionRequest
+    failure_incident_updated = Signal(object)     # DownloadFailureIncident
+    rate_limit_waiting  = Signal(float)          # shared cooldown seconds
     batch_finished      = Signal(object)    # core.batch_outcome.BatchOutcome
     batch_started       = Signal()
     track_thumbnail     = Signal(int, str)
@@ -143,8 +154,7 @@ class DownloadController(QObject):
         from core.paused_batch_store import PausedBatchStore
         self._paused_store = PausedBatchStore()
                 
-        self._fatal_error_triggered = False  # Track if a fatal dialog was already shown
-        self._fatal_lock = threading.Lock()  # Synchronize fatal error reporting
+        self._termination_lock = threading.Lock()
         # Why the current batch is ending, if the user/an error forced it.
         # None means "let it run to natural completion". First writer wins
         # (a later cancel callback must not overwrite the real fatal cause),
@@ -163,6 +173,9 @@ class DownloadController(QObject):
         # keyed by request so a late byte cannot be attributed to that batch.
         self._resume_click_ts: dict[str, float] = {}
         self._resume_engine_started: set[str] = set()
+        self._rate_limit_until: float = 0.0
+        self._failure_incidents: dict[str, DownloadFailureIncident] = {}
+        self._failed_requests: dict[str, DownloadRequest] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -205,10 +218,8 @@ class DownloadController(QObject):
             # is only reachable as an edge case. Fail quietly.
             return
 
-        # Reset the fatal error lock for the new batch
-        with self._fatal_lock:
-            self._fatal_error_triggered = False
         self._termination_intent = None
+        self._rate_limit_until = 0.0
         
         # Let yt-dlp try browser-cookie extraction even when the browser is
         # open. Some systems can read the live profile; when they cannot,
@@ -255,12 +266,9 @@ class DownloadController(QObject):
             )
             return
 
-        is_multi = last_url_kind in _MULTI_KINDS
         self._key_to_card.clear()
         self._card_progress.clear()
 
-        unique_artists  = {c.artist for c in selected if c.artist}
-        is_multi_batch  = len(unique_artists) > 1
         is_solo         = len(selected) == 1
 
         jobs: list[tuple[str, DownloadRequest]] = []
@@ -279,7 +287,8 @@ class DownloadController(QObject):
 
         def _build_request(
             card, output_dir: str, track_playlist_name: Optional[str],
-            is_parent_discography: bool, track_index: Optional[int], is_clean: bool,
+            track_index: Optional[int], filename_index: Optional[int],
+            include_artist_filename: bool, is_clean: bool,
             disc_number: Optional[int] = None, track_total: Optional[int] = None,
         ) -> DownloadRequest:
             # Map the card.platform string to a SourcePlatform enum so the
@@ -311,13 +320,13 @@ class DownloadController(QObject):
                 forced_album=card.album,
                 forced_duration=getattr(card, "duration_sec", None),
                 forced_index=track_index,
+                filename_index=filename_index,
+                filename_include_artist=include_artist_filename,
                 forced_disc=disc_number,
                 forced_total=track_total,
                 cookies_file=self._cfg.cookies_file or None,
                 cookies_browser=self._cfg.cookies_browser or None,
-                playlist_name=self._get_dynamic_folder(
-                    card, track_playlist_name, is_parent_discography
-                ),
+                playlist_name=track_playlist_name or "",
                 thumbnail_url=card.thumbnail_url,
                 platform=req_platform,
                 sponsorblock=self._cfg.sponsorblock_enabled,
@@ -374,98 +383,51 @@ class DownloadController(QObject):
         for card in selected:
             key = str(id(card))
             track_playlist_name:   Optional[str] = None
-            is_parent_discography: bool          = False
             source_kind = str(getattr(card, "source_kind", "") or "").upper()
-            has_source_context = bool(source_kind)
-            independent_source = source_kind in {
-                UrlKind.SINGLE_VIDEO.name, UrlKind.UNKNOWN.name,
-            }
-            grouped_source = source_kind in {
-                UrlKind.PLAYLIST.name, UrlKind.ALBUM.name, UrlKind.ARTIST.name,
-            }
-
-            if self._cfg.playlist_subfolders:
-                parent_artist = (card.parent_artist or "").strip()
-                kind          = (card.release_type  or "").strip()
-                album         = (card.album         or "").strip()
-                platform      = (card.platform      or "").lower()
-                category      = (card.category      or "").strip()
-
-                if independent_source:
-                    # Album/artist fields describe this track but do not turn
-                    # a direct URL (or TXT list of direct URLs) into a collection.
-                    track_playlist_name = ""
-                elif parent_artist:
-                    is_live     = "live" in card.title.lower() or "הופעה" in card.title
-                    is_spotify  = "spotify" in platform
-                    
-                    # ── CATEGORY MAPPING ──────────────────────────────────────
-                    if kind == "album":
-                         cat_name = "אלבומים"
-                    elif kind == "compilation":
-                        cat_name = category or "אוספים"
-                    elif (is_live or kind == "performance") and not is_spotify:
-                        cat_name = "הופעות חיות"
-                    elif category in ("סינגלים ו-EP", "סינגלים וגרסאות EP", "סינגלים ומיני אלבומים"):
-                        cat_name = "סינגלים ומיני אלבומים"
-                    elif category: # Scraper provided category (e.g. "שורטס")
-                        cat_name = category
-                    elif kind == "video":
-                        cat_name = "סרטונים"
-                    elif kind == "playlist":
-                        cat_name = "פלייליסטים"
-                    else:
-                        cat_name = "סינגלים ומיני אלבומים"
-
-                     # ── FOLDER DEPTH LOGIC ────────────────────────────────────
-                    # User wants strict separation:
-                    # 1. 'אלבומים' ALWAYS get a subfolder if an album name is known.
-                    # 2. 'סינגלים ומיני אלבומים' only get a subfolder if they have multiple tracks (EP).
-                    # 3. YTM/Other releases use the count heuristic.
-                    
-                    is_grouped = (
-                        (kind == "album") or
-                        (kind == "compilation") or
-                        (kind == "ep") or
-                        (cat_name == "אלבומים") or
-                        (cat_name in ("סינגלים ומיני אלבומים", "סינגלים ו-EP", "סינגלים וגרסאות EP") and (card.total_tracks > 1 or kind == "ep")) or
-                        (card.total_tracks > 1 and album) or
-                        (kind == "playlist" and card.total_tracks > 1)
+            collection_title = (
+                str(getattr(card, "collection_title", "") or "").strip()
+                or (
+                    (last_playlist_title or (card.album or "").strip())
+                    if source_kind == UrlKind.PLAYLIST.name
+                    else (
+                        (card.album or "").strip() or last_playlist_title
+                        if source_kind == UrlKind.ALBUM.name else ""
                     )
-                    
-                    # Ensure 1-track playlists are NOT grouped into folders
-                    if kind == "playlist" and card.total_tracks == 1:
-                        is_grouped = False
-                    
-                    cat_folder = localized_folder_name(cat_name)
-                    if cat_name == "סינגלים ומיני אלבומים" and not self._cfg.singles_subfolder:
-                        if is_grouped and album:
-                            track_playlist_name = f"{parent_artist}/{album}"
-                        else:
-                            track_playlist_name = parent_artist
-                    else:
-                        if is_grouped and album:
-                            track_playlist_name = f"{parent_artist}/{cat_folder}/{album}"
-                        else:
-                            track_playlist_name = f"{parent_artist}/{cat_folder}"
-
-                    is_parent_discography = True
-
-                elif grouped_source or (not has_source_context and is_multi):
-                    # Generic multi-item (Playlist/Album) logic
-                    track_playlist_name = (
-                        (card.album or "").strip()
-                        or last_playlist_title
-                        or "Playlist"
-                    )
-                elif card.artist:
-                    pass  # single track — no subfolder
-            else:
-                track_playlist_name = ""
-
-            # User wants NO folders for solo downloads
-            if is_solo and not grouped_source:
-                track_playlist_name = ""
+                )
+            )
+            release_key = (
+                (card.parent_artist or card.artist or "").strip(),
+                (card.album or "").strip(),
+            )
+            try:
+                reported_disc_total = int(getattr(card, "disc_total", 0) or 0)
+            except (TypeError, ValueError):
+                reported_disc_total = 0
+            known_multi_disc = (
+                reported_disc_total > 1
+                or release_key in multi_disc_releases
+            )
+            layout = decide_output_layout(
+                source_kind=source_kind,
+                release_type=card.release_type,
+                collection_title=collection_title,
+                album=card.album,
+                parent_artist=card.parent_artist,
+                artist=card.artist,
+                category=card.category,
+                total_tracks=card.total_tracks,
+                platform=card.platform,
+                track_title=card.title,
+                playlist_subfolders=self._cfg.playlist_subfolders,
+                singles_subfolder=self._cfg.singles_subfolder,
+                multi_disc=known_multi_disc,
+                disc_number=getattr(card, "disc_number", 0),
+            )
+            track_playlist_name = layout.render_folder(
+                localize_category=localized_folder_name,
+                disc_label=lambda number: t("disc_folder", number=number),
+            )
+            include_artist_filename = layout.include_artist_in_filename
 
             # Use the same path the writability check ran against. opts["output_dir"]
             # comes from OptionsBar and reflects either the user's typed path
@@ -474,28 +436,24 @@ class DownloadController(QObject):
             # path the user typed but hasn't committed yet.
             output_dir = str(Path(base_output_dir).expanduser())
 
-            # Clean filename (index + title only, never include artist name).
-            # The duplicate checker must use the same convention or it will
-            # never find an existing file on disk.
-            is_clean = True
+            # Direct files and compilations include the artist to avoid
+            # title-only collisions. Ordered releases/playlists remain concise.
+            is_clean = not include_artist_filename
 
-            # Calculate the index to use for filename prefixing and metadata tags
-            track_index = None
-            is_release_position = False
-            if grouped_source or (not has_source_context and not is_solo):
-                if card.release_type in ("album", "ep") and card.album_index > 0:
-                    track_index = card.album_index
-                    is_release_position = True
-                elif card.release_type == "playlist":
-                    # User explicitly requested no numbering for playlists
-                    track_index = None
-                elif self._cfg.playlist_index_prefix:
-                    track_index = card.queue_index
+            # Use only the provider's original collection position. queue_index
+            # is a stable UI identity and must never leak into filenames.
+            numbering = decide_numbering(
+                source_kind=source_kind,
+                release_type=card.release_type,
+                collection_index=card.album_index,
+                total_tracks=card.total_tracks,
+                number_playlists=self._cfg.playlist_index_prefix,
+            )
+            track_index = numbering.metadata_track_index
+            filename_index = numbering.filename_index
+            is_release_position = numbering.is_release_position
 
-            # Disc and total only describe a real release position. A queue
-            # ordinal (the playlist_index_prefix case above) is a local
-            # convenience number, not album metadata, so it is written to the
-            # filename but must not claim to be a track-of-total on a disc.
+            # Disc and total only describe a real album/EP/compilation position.
             disc_number = None
             track_total = None
             if is_release_position:
@@ -503,26 +461,24 @@ class DownloadController(QObject):
                     (card.parent_artist or card.artist or "").strip(),
                     (card.album or "").strip(),
                 )
-                if release_key in multi_disc_releases:
+                if known_multi_disc:
                     disc_number = getattr(card, "disc_number", 0) or None
                 if card.total_tracks > 0:
                     track_total = card.total_tracks
 
-            # Duplicate detection — pass include_artist=False to match the
-            # is_clean filename layout produced below.
+            # Duplicate detection must use the exact filename body chosen by
+            # the shared layout policy.
             if self._cfg.duplicate_action != "overwrite":
                 from core.duplicate_checker import find_duplicate
                 dup = find_duplicate(
                     output_dir=output_dir,
                     title=card.title,
                     artist=card.artist,
-                    index=track_index,
-                    include_index=track_index is not None,
-                    include_artist=not is_clean,
+                    index=filename_index,
+                    include_index=filename_index is not None,
+                    include_artist=include_artist_filename,
                     duration_s=None,
-                    playlist_name=self._get_dynamic_folder(
-                        card, track_playlist_name, is_parent_discography
-                    ),
+                    playlist_name=track_playlist_name or "",
                 )
                 if dup is not None:
                     if self._cfg.duplicate_action == "skip":
@@ -537,8 +493,9 @@ class DownloadController(QObject):
                             "card": card, "key": key, "dup": str(dup),
                             "output_dir": output_dir,
                             "track_playlist_name": track_playlist_name,
-                            "is_parent_discography": is_parent_discography,
                             "track_index": track_index,
+                            "filename_index": filename_index,
+                            "include_artist_filename": include_artist_filename,
                             "is_clean": is_clean,
                             "disc_number": disc_number,
                             "track_total": track_total,
@@ -547,7 +504,7 @@ class DownloadController(QObject):
 
             req = _build_request(
                 card, output_dir, track_playlist_name,
-                is_parent_discography, track_index, is_clean,
+                track_index, filename_index, include_artist_filename, is_clean,
                 disc_number, track_total,
             )
             self._key_to_card[key] = card
@@ -572,7 +529,8 @@ class DownloadController(QObject):
                 else:
                     req = _build_request(
                         card, p["output_dir"], p["track_playlist_name"],
-                        p["is_parent_discography"], p["track_index"], p["is_clean"],
+                        p["track_index"], p["filename_index"],
+                        p["include_artist_filename"], p["is_clean"],
                         p["disc_number"], p["track_total"],
                     )
                     self._key_to_card[key] = card
@@ -647,13 +605,28 @@ class DownloadController(QObject):
         worker.batch_snapshot.connect(self._on_worker_batch_snapshot)
         worker.job_count_changed.connect(self._on_worker_job_count_changed)
         worker.job_error.connect(self._on_track_error)
+        if hasattr(worker, "user_action_required"):
+            worker.user_action_required.connect(self._on_user_action_required)
+        if hasattr(worker, "rate_limit_wait"):
+            worker.rate_limit_wait.connect(self._on_rate_limit_wait)
         worker.all_finished.connect(self._on_batch_done)
         worker.track_thumbnail.connect(self._on_track_thumbnail)
         return worker
 
     def is_downloading(self) -> bool:
-        """True while a batch DownloadWorker is actively running."""
-        return self._dl_worker is not None and self._dl_worker.isRunning()
+        """True while the main batch or any per-track resume is running."""
+        return any(
+            worker is not None and worker.isRunning()
+            for worker in [self._dl_worker, *self._resume_workers]
+        )
+
+    def request_shutdown(self) -> bool:
+        """Cooperatively cancel every download worker; report when all stopped."""
+        self.cancel_all()
+        return not any(
+            worker is not None and worker.isRunning()
+            for worker in [self._dl_worker, *self._resume_workers]
+        )
 
     def _set_termination_intent(self, intent: BatchOutcome) -> None:
         """Record why the batch is ending.
@@ -662,7 +635,7 @@ class DownloadController(QObject):
         override a just-requested pause (rapid pause -> cancel), while a pause
         cannot override an existing cancel/fatal intent.
         """
-        with self._fatal_lock:
+        with self._termination_lock:
             current = self._termination_intent
             if current is None:
                 self._termination_intent = intent
@@ -1129,6 +1102,10 @@ class DownloadController(QObject):
         resume_worker.track_phase.connect(self._on_track_phase)
         resume_worker.track_finished.connect(self._on_track_finished)
         resume_worker.job_error.connect(self._on_track_error)
+        if hasattr(resume_worker, "user_action_required"):
+            resume_worker.user_action_required.connect(self._on_user_action_required)
+        if hasattr(resume_worker, "rate_limit_wait"):
+            resume_worker.rate_limit_wait.connect(self._on_rate_limit_wait)
         resume_worker.all_finished.connect(self._on_batch_done)
         resume_worker.track_thumbnail.connect(self._on_track_thumbnail)
         resume_worker.all_finished.connect(
@@ -1187,8 +1164,6 @@ class DownloadController(QObject):
 
         # A resume is a fresh run for termination-intent purposes — clear any
         # lingering pause intent so a clean resume finishes as COMPLETED.
-        with self._fatal_lock:
-            self._fatal_error_triggered = False
         self._termination_intent = None
         self._engine._cancel_event.clear()  # noqa: SLF001
 
@@ -1400,6 +1375,60 @@ class DownloadController(QObject):
             card.set_status("done")
             card.set_progress(1.0)
 
+    def _on_user_action_required(self, request: UserActionRequest) -> None:
+        """Forward one pre-terminal request, never a stale worker's request."""
+        if not self._is_active_worker_signal():
+            # The producer is waiting. A stale queued signal must still be
+            # resolved so its old thread cannot remain stranded during teardown.
+            request.resolve(RecoveryDecision.CANCEL)
+            return
+        self.user_action_required.emit(request)
+
+    def resolve_user_action(
+        self,
+        request: UserActionRequest,
+        decision: RecoveryDecision | str,
+    ) -> bool:
+        """Apply refreshed authentication before releasing a retry."""
+        resolved = RecoveryDecision(decision)
+        if resolved == RecoveryDecision.RETRY:
+            cookies_file = self._cfg.cookies_file or ""
+            cookies_browser = self._cfg.cookies_browser or ""
+            for worker in [self._dl_worker, *self._resume_workers]:
+                if worker is None:
+                    continue
+                for _key, req in getattr(worker, "_jobs", []) or []:
+                    req.cookies_file = cookies_file
+                    req.cookies_browser = cookies_browser
+        return request.resolve(resolved)
+
+    def _on_rate_limit_wait(self, key: str, remaining_seconds: float) -> None:
+        if not self._is_active_worker_signal():
+            return
+        remaining = max(0.0, float(remaining_seconds))
+        self._rate_limit_until = (
+            time.monotonic() + remaining if remaining > 0 else 0.0
+        )
+        card = self._key_to_card.get(key)
+        if card and remaining > 0 and hasattr(card, "set_phase"):
+            card.set_phase("rate_limited", remaining)
+        elif card and remaining <= 0 and hasattr(card, "set_phase"):
+            card.set_phase("waiting", None)
+        self.rate_limit_waiting.emit(remaining)
+
+    def rate_limit_remaining(self) -> float:
+        coordinator = shared_download_recovery_coordinator()
+        remaining = max(
+            0.0,
+            self._rate_limit_until - time.monotonic(),
+            coordinator.rate_remaining(),
+        )
+        # The advertised countdown reaching zero admits only the same-track
+        # canary. Keep unrelated fetch/search actions closed until it settles.
+        if coordinator.rate_incident_active():
+            return max(1.0, remaining)
+        return remaining
+
     def _on_track_error(self, key: str, err: object) -> None:
         if not self._is_active_worker_signal():
             return
@@ -1408,70 +1437,305 @@ class DownloadController(QObject):
             # Resolver misses are repaired before engine submission. An error
             # reaching this callback is an ordinary transfer/service failure,
             # not a permanently invalid Spotify identity.
-            card.set_status("error")
+            card.set_status("waiting")
 
-        err_msg = str(err)
-        if hasattr(err, "error_message"):
-            err_msg = err.error_message
-            
-        # Detect fatal errors that should stop the entire batch.
-        #
-        # Only markers that mean "the whole cookie/auth mechanism is broken"
-        # belong here (can't read the cookie file, IP fully blocked, JS
-        # challenge solver unavailable) — every remaining track would fail
-        # the same way, so cancelling early saves time.
-        #
-        # "confirm you're not a bot" / "Please sign in" / "cookies are no
-        # longer valid" / "Requested format is not available" are
-        # per-VIDEO outcomes (that one video is gated, or lacks the
-        # requested format) — plenty of other tracks in the same batch can
-        # still succeed, so these must NOT cancel the whole batch. They still
-        # mark that one card as errored and show once via the throttled
-        # per-track error dialog.
-        stops_batch = getattr(err, "stops_batch", None)
-        if callable(stops_batch):
-            is_fatal = bool(stops_batch())
-        else:
-            # Compatibility for legacy/custom error objects. These phrases
-            # identify one broken cookie mechanism; a bare 403 or signature
-            # failure is not evidence that unrelated videos will fail.
-            is_fatal = any(marker in err_msg.casefold() for marker in (
-                "cookie database", "failed to decrypt with dpapi",
-                "app-bound encryption",
-            ))
-            
-        # Get the failing URL to pass to the UI
-        failing_url = ""
-        try:
-            track_req = self._active_request_for_key(key)
-        except Exception:
-            logger.debug(
-                "[DownloadController] Failed request lookup for %s",
-                key, exc_info=True,
+        req = self._request_for_worker_key(key)
+        if req is not None:
+            self._failed_requests[key] = self._fresh_retry_request(req)
+
+        policy = systemic_recovery_policy(err)
+        scope = policy.scope if policy else self._local_incident_scope(err)
+        coordinator = shared_download_recovery_coordinator()
+        streak, stopped_all = (
+            coordinator.systemic_state(policy.scope) if policy else (0, False)
+        )
+        incident = self._failure_incidents.get(scope)
+        if incident is None:
+            incident = DownloadFailureIncident(
+                scope=scope,
+                error=err,
+                systemic_policy=policy,
             )
-            track_req = None
-        if track_req:
-            failing_url = track_req.url
+            self._failure_incidents[scope] = incident
+        title = str(
+            getattr(card, "title", "")
+            or getattr(req, "forced_title", "")
+            or key
+        )
+        artist = str(
+            getattr(card, "artist", "")
+            or getattr(req, "forced_artist", "")
+            or ""
+        )
+        album = str(
+            getattr(card, "album", "")
+            or getattr(req, "forced_album", "")
+            or ""
+        )
+        duration_sec = getattr(card, "duration_sec", None)
+        if duration_sec is None:
+            duration_sec = getattr(req, "forced_duration", None)
+        url = str(getattr(req, "url", "") or "")
+        incident.add(
+            FailureIncidentItem(
+                key=key,
+                title=title,
+                url=url,
+                raw=str(getattr(err, "raw", "") or ""),
+                artist=artist,
+                album=album,
+                duration_sec=duration_sec,
+            ),
+            stopped_all=stopped_all,
+            streak=streak,
+        )
+        self.failure_incident_updated.emit(incident)
 
-        # Storm prevention: only emit the first fatal dialog
-        emit_dialog = False
-        with self._fatal_lock:
-            if not is_fatal or not self._fatal_error_triggered:
-                if is_fatal:
-                    self._fatal_error_triggered = True
-                emit_dialog = True
-                
-        if emit_dialog:
-            self.show_error_dialog.emit(err, failing_url)
+        logger.info(
+            "[DownloadController] Track added to incident %s: %s "
+            "category=%s count=%d stopped_all=%s",
+            incident.incident_id,
+            key,
+            getattr(err, "message_key", "unknown"),
+            incident.count,
+            incident.stopped_all,
+        )
 
-        if is_fatal and emit_dialog:
-            logger.warning("[DownloadController] Fatal error detected. Stopping batch.")
-            # Record the fatal cause BEFORE cancelling so the outcome is
-            # reported as a technical stop, not a user cancellation — and so
-            # the first fatal cause is never overwritten by the cancellation
-            # callback that cancel_all() triggers.
-            self._set_termination_intent(BatchOutcome.STOPPED_BY_FATAL_ERROR)
-            self.cancel_all()
+    @staticmethod
+    def _local_incident_scope(err: object) -> str:
+        key = str(getattr(err, "message_key", "") or type(err).__name__)
+        if key == "err_generic":
+            raw = " ".join(
+                str(getattr(err, "raw", "") or "").casefold().split()
+            )
+            return f"error:{key}:{raw[:160]}"
+        return f"error:{key}"
+
+    def _request_for_worker_key(self, key: str) -> Optional[DownloadRequest]:
+        sender = self.sender()
+        workers = [sender, self._dl_worker, *self._resume_workers]
+        seen: set[int] = set()
+        for worker in workers:
+            if worker is None or id(worker) in seen:
+                continue
+            seen.add(id(worker))
+            for job_key, req in list(getattr(worker, "_jobs", []) or []):
+                if job_key == key:
+                    return req
+        return None
+
+    def _fresh_retry_request(self, req: DownloadRequest) -> DownloadRequest:
+        """Copy a failed request at a clean boundary for an explicit retry."""
+        fresh = req.snapshot_copy()
+        fresh.workspace_dir = None
+        fresh.resume_phase = None
+        fresh.resume_final_path = None
+        fresh.cancel_event = None
+        fresh.publish_gate = None
+        fresh.publish_release = None
+        fresh.on_progress = None
+        fresh.on_finished = None
+        fresh.on_error = None
+        fresh._final_output_path = ""  # noqa: SLF001
+        fresh._thumb_sent = False  # noqa: SLF001
+        fresh.cookies_file = self._cfg.cookies_file or None
+        fresh.cookies_browser = self._cfg.cookies_browser or None
+        if fresh.spotify_match_identity:
+            fresh.url_resolver = build_spotify_resolver(
+                dict(fresh.spotify_match_identity),
+                fresh.cookies_file,
+            )
+        return fresh
+
+    def resolve_failure_incident(
+        self,
+        incident_id: str,
+        decision: RecoveryDecision | str,
+    ) -> bool:
+        """Retry or skip every track represented by one aggregate incident."""
+        incident = next(
+            (
+                current
+                for current in self._failure_incidents.values()
+                if current.incident_id == incident_id
+            ),
+            None,
+        )
+        if incident is None:
+            return False
+
+        resolved = RecoveryDecision(decision)
+        self._failure_incidents.pop(incident.scope, None)
+        coordinator = shared_download_recovery_coordinator()
+        if incident.systemic_policy is not None:
+            coordinator.reset_systemic(incident.systemic_policy.scope)
+
+        keys = [item.key for item in incident.items]
+        if resolved == RecoveryDecision.RETRY:
+            jobs: list[tuple[str, DownloadRequest]] = []
+            for key in keys:
+                req = self._failed_requests.pop(key, None)
+                card = self._key_to_card.get(key)
+                if req is None:
+                    if card:
+                        card.set_status("error")
+                    continue
+                jobs.append((key, self._fresh_retry_request(req)))
+                if card:
+                    card.set_status("queued")
+                    card.set_progress(0.0)
+            if jobs:
+                self._start_failure_retry_jobs(jobs)
+        else:
+            for key in keys:
+                self._failed_requests.pop(key, None)
+                card = self._key_to_card.get(key)
+                if card:
+                    card.set_status("error")
+        return True
+
+    def replace_failure_source(
+        self,
+        incident_id: str,
+        key: str,
+        url: str,
+    ) -> bool:
+        """Select and immediately retry one explicit YouTube source."""
+        job = self.prepare_failure_source(incident_id, key, url)
+        if job is None:
+            return False
+        self.start_failure_source_jobs([job])
+        return True
+
+    def prepare_failure_source(
+        self,
+        incident_id: str,
+        key: str,
+        url: str,
+    ) -> Optional[tuple[str, DownloadRequest]]:
+        """Prepare one explicit source without starting an extra worker yet.
+
+        The selected media URL replaces only the transport source.  The
+        original Spotify title, artist, album, numbering and output-routing
+        metadata remain on the request and card.  Clearing the lazy resolver
+        is essential: the user's explicit choice must not immediately be
+        replaced by the automatic matcher on the retry. The UI collects these
+        jobs and starts one bounded worker after the selection pass, avoiding
+        one independent worker per click.
+        """
+        from core.playlist_parser import classify_url
+        from utils.url_cleaner import clean_youtube_url
+
+        clean_url = clean_youtube_url(str(url or "").strip())
+        platform, kind = classify_url(clean_url)
+        if platform not in {
+            SourcePlatform.YOUTUBE,
+            SourcePlatform.YOUTUBE_MUSIC,
+        } or kind != UrlKind.SINGLE_VIDEO:
+            return None
+
+        incident = next(
+            (
+                current
+                for current in self._failure_incidents.values()
+                if current.incident_id == incident_id
+            ),
+            None,
+        )
+        if incident is None or not any(item.key == key for item in incident.items):
+            return None
+
+        req = self._failed_requests.pop(key, None)
+        if req is None:
+            return None
+
+        fresh = self._fresh_retry_request(req)
+        fresh.url = clean_url
+        fresh.url_resolver = None
+        fresh.spotify_match_identity = None
+
+        card = self._key_to_card.get(key)
+        if card is not None:
+            card.track_url = clean_url
+            card.match_status = "matched"
+            card.resolution_error = ""
+            card.set_status("queued")
+            card.set_progress(0.0)
+
+        incident.items = [item for item in incident.items if item.key != key]
+        incident.revision += 1
+        if not incident.items:
+            self._failure_incidents.pop(incident.scope, None)
+
+        return key, fresh
+
+    def start_failure_source_jobs(
+        self,
+        jobs: list[tuple[str, DownloadRequest]],
+    ) -> None:
+        """Start one bounded retry worker for manually selected sources."""
+        if jobs:
+            self._start_failure_retry_jobs(jobs)
+
+    def discard_failure_source_jobs(
+        self,
+        jobs: list[tuple[str, DownloadRequest]],
+    ) -> None:
+        """Settle prepared-but-not-started rows during an explicit cancel."""
+        for key, _req in jobs:
+            card = self._key_to_card.get(key)
+            if card is not None:
+                card.set_status("cancelled")
+
+    def _start_failure_retry_jobs(
+        self,
+        jobs: list[tuple[str, DownloadRequest]],
+    ) -> None:
+        """Retry an incident without interrupting the still-live main batch."""
+        from ui.workers.download_worker import DownloadWorker
+
+        self._engine._cancel_event.clear()  # noqa: SLF001
+        if self._dl_worker is None:
+            # The original batch already ended (the common overnight case).
+            # Make the collected retry a first-class batch so the footer and
+            # cancel controls represent all 50 retries, not a hidden side job.
+            self.cancel_visible.emit(True)
+            self.downloading_changed.emit(True)
+            self._dl_worker = self._build_batch_worker(jobs, [])
+            self._dl_worker.start()
+            self.batch_started.emit()
+            return
+
+        worker = DownloadWorker(
+            jobs=jobs,
+            engine=self._engine,
+            config=self._cfg,
+            db=self._db,
+            max_workers=min(max(1, self._cfg.max_parallel_downloads), len(jobs)),
+            parent=self,
+        )
+        self._resume_workers.append(worker)
+        worker.track_progress.connect(self._on_track_progress)
+        if hasattr(worker, "track_first_byte"):
+            worker.track_first_byte.connect(self._on_track_first_byte)
+        worker.track_speed.connect(self._on_track_speed)
+        worker.track_status.connect(self._on_track_status)
+        worker.track_phase.connect(self._on_track_phase)
+        worker.track_finished.connect(self._on_track_finished)
+        worker.job_error.connect(self._on_track_error)
+        if hasattr(worker, "rate_limit_wait"):
+            worker.rate_limit_wait.connect(self._on_rate_limit_wait)
+        worker.all_finished.connect(self._on_batch_done)
+        worker.track_thumbnail.connect(self._on_track_thumbnail)
+        worker.all_finished.connect(
+            lambda _outcome=None, w=worker: self._finish_incident_retry_worker(w)
+        )
+        self.downloading_changed.emit(True)
+        worker.start()
+
+    def _finish_incident_retry_worker(self, worker) -> None:
+        if worker in self._resume_workers:
+            self._resume_workers.remove(worker)
 
     def _on_track_thumbnail(self, key: str, thumb_url: str) -> None:
         if not self._is_active_worker_signal():
@@ -1528,7 +1792,12 @@ class DownloadController(QObject):
         # exactly what keeps the two operations fundamentally different.
         # Read independent of the last-active-worker check below: this is
         # this worker's own outcome, not a shared UI-facing signal.
-        worker_outcome = self._termination_intent or orchestrator_outcome or BatchOutcome.COMPLETED
+        reported_outcome = (
+            orchestrator_outcome
+            if isinstance(orchestrator_outcome, BatchOutcome)
+            else BatchOutcome.STOPPED_BY_FATAL_ERROR
+        )
+        worker_outcome = self._termination_intent or reported_outcome
         if worker_outcome in (BatchOutcome.CANCELLED_BY_USER, BatchOutcome.STOPPED_BY_FATAL_ERROR):
             self._cleanup_cancelled_batch(worker_jobs)
 
@@ -1539,10 +1808,13 @@ class DownloadController(QObject):
         self.cancel_visible.emit(False)
         self.downloading_changed.emit(False)
         self.metrics_update.emit("", "")
+        if not shared_download_recovery_coordinator().rate_incident_active():
+            self._rate_limit_until = 0.0
+            self.rate_limit_waiting.emit(0.0)
 
         outcome = self._termination_intent
         if outcome is None:
-            outcome = orchestrator_outcome or BatchOutcome.COMPLETED
+            outcome = reported_outcome
         self._termination_intent = None
 
         self.batch_finished.emit(outcome)
@@ -1591,43 +1863,3 @@ class DownloadController(QObject):
             if card_key == key:
                 return req
         return None
-
-    def _get_dynamic_folder(
-        self,
-        card,
-        fallback: Optional[str] = None,
-        is_discography: bool = False,
-    ) -> str:
-        """
-        Construct a folder path. If 'fallback' is provided (from the main loop), it takes priority
-        as it was constructed with full context.
-        """
-        if fallback is not None:
-            # Fallback already contains the logic-built path (e.g. "Playlist Name", "Artist/Category/Album", or "" for Solo)
-            return fallback
-
-        artist   = (card.parent_artist or card.artist or "").strip()
-        album    = (card.album or "").strip()
-        rel_type = (card.release_type or "album").lower()
-
-        path_parts: list[str] = []
-        if is_discography and artist:
-            path_parts.append(artist)
-            if rel_type == "album":
-                path_parts.append(localized_folder_name("אלבומים"))
-            elif self._cfg.singles_subfolder:
-                path_parts.append(localized_folder_name("סינגלים ו-EP"))
-    
-        if album:
-            path_parts.append(album.replace("Album - ", "").strip())
-        elif artist:
-            path_parts.append(artist)
-
-        # De-duplication (case-insensitive)
-        seen: list[str] = []
-        for part in path_parts:
-            if not part: continue
-            if not seen or part.lower() != seen[-1].lower():
-                seen.append(part)
-
-        return "/".join(seen)

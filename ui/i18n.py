@@ -82,6 +82,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_with_cancelled": "{completed} of {total} completed — {cancelled} cancelled.",
         "status_stopped_summary": "Downloads stopped — {done} of {total} completed.",
         "status_stopped_error": "Downloads stopped because of an error.",
+        "status_rate_limit_waiting": "YouTube limited requests — retrying this track in {time}.",
+        "rate_limit_dialog_title": "YouTube request limit",
+        "rate_limit_dialog_text": (
+            "All new YouTube downloads are paused. Automatic retry starts in {time}.\n\n"
+            "YouTube requested {advertised}; BananaFlow added a {margin} safety margin. "
+            "The same track is tested first before the rest continue."
+        ),
+        "rate_limit_hide_btn": "Hide",
         # Kept short: it has to fit the fixed-width footer ETA slot alongside
         # the longest real duration string, and it is now shown at the start of
         # every batch while the throughput estimate warms up.
@@ -90,6 +98,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # showing a dead "downloading".
         "phase_matching":    "Finding a match…",
         "phase_waiting":     "Waiting its turn…",
+        "phase_rate_limited": "Waiting for YouTube…",
         "phase_starting":    "Starting…",
         "phase_downloading": "Downloading",
         "phase_processing":  "Finishing up…",
@@ -402,6 +411,40 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # ── Auth / cookie wizard ────────────────────────────────────────────────
         "auth_wizard_open_btn": "🔑 Fix sign-in",
         "auth_wizard_close_btn": "Close",
+        "download_error_skip_btn": "Skip this track",
+        "download_incident_title_one": "1 track stopped — {headline}",
+        "download_incident_title_many": "{count} tracks stopped — {headline}",
+        "download_incident_local_continuing_one": (
+            "1 track stopped with this problem. Other downloads are continuing."
+        ),
+        "download_incident_local_continuing_many": (
+            "{count} tracks stopped with the same problem. Other downloads are continuing."
+        ),
+        "download_incident_auth_continuing_one": (
+            "1 track stopped because YouTube authentication or cookies failed. "
+            "Other downloads are continuing; after 3 consecutive failures, all new downloads stop."
+        ),
+        "download_incident_auth_continuing_many": (
+            "{count} tracks stopped because YouTube authentication or cookies failed. "
+            "Other downloads are continuing; after 3 consecutive failures, all new downloads stop."
+        ),
+        "download_incident_all_stopped_one": (
+            "1 track failed with a problem that affects the whole queue. "
+            "All new downloads are now paused until this is fixed or the stopped tracks are skipped."
+        ),
+        "download_incident_all_stopped_many": (
+            "{count} consecutive tracks failed with a problem that affects the whole queue. "
+            "All new downloads are now paused until this is fixed or the stopped tracks are skipped."
+        ),
+        "download_incident_fix_auth_btn": "Fix sign-in / cookies",
+        "download_incident_retry_btn": "Retry these tracks",
+        "download_incident_skip_btn": "Skip these tracks",
+        "download_incident_find_alternatives_btn": "Choose other sources",
+        "download_incident_no_result_help": (
+            "You can retry later, skip these tracks, or choose a YouTube source "
+            "manually. A manual choice keeps the original title, artist, album, "
+            "numbering and folders."
+        ),
         "auth_wizard_manual_btn": "🔧 Manual fix in browser",
         "preflight_warning_title": "Startup Check Warning",
         # preflight_* templates are defined in error_handler.PREFLIGHT_TEXTS_EN
@@ -624,8 +667,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "playlist_subfolders_desc": "Create a named subfolder for each playlist download",
         "singles_subfolder": "Singles & EPs Sub-folder",
         "singles_subfolder_desc": "Save singles and EPs inside a 'Singles & EPs' category folder (otherwise directly under the Artist folder)",
-        "track_index_prefix": "Track Index Prefix",
-        "track_index_prefix_desc": "Prefix filenames with 01-, 02- … to preserve playlist order",
+        "track_index_prefix": "Playlist Position Prefix",
+        "track_index_prefix_desc": "Prefix playlist filenames with their original position (01 -, 02 - …)",
         "duplicate_detection": "Duplicate Detection",
         "duplicate_detection_desc": "Action when the output file already exists",
         "duplicate_skip": "Skip silently",
@@ -743,6 +786,23 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # ── Search result card ──────────────────────────────────────────────────
         "search_card_add_btn": "＋  Add",
+        "search_card_use_source_btn": "Use source",
+        "search_source_repair_title": (
+            "Choose a source for {title} ({position} of {total})"
+        ),
+        "search_source_repair_hint": (
+            "Review the title, artist and duration. Choosing a result keeps the "
+            "original metadata; selected tracks retry together after this pass."
+        ),
+        "search_source_repair_cancel_btn": "Stop choosing",
+        "search_source_repair_selected_title": "Source selected",
+        "search_source_repair_selected_text": "Selected: {title}",
+        "search_source_repair_done_title": "Sources selected",
+        "search_source_repair_done_text": "The selected tracks are being retried.",
+        "search_source_repair_invalid_title": "This source cannot be used",
+        "search_source_repair_invalid_text": (
+            "Choose an individual YouTube or YouTube Music track."
+        ),
         "search_card_browse_btn": "Browse  →",
 
         # ── Tag Editor: dialogs / headers ───────────────────────────────────────
@@ -1489,6 +1549,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "folder_albums": "Albums",
         "folder_live_performances": "Live Performances",
         "folder_compilations": "Compilations",
+        "disc_folder": "Disc {number}",
         "folder_appears_on": "Appears On",
 
         # ── About ───────────────────────────────────────────────────────────────
@@ -1545,8 +1606,17 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_completed_with_cancelled": "{completed} מתוך {total} הושלמו — {cancelled} בוטלו.",
         "status_stopped_summary": "ההורדות נעצרו — {done} מתוך {total} הושלמו.",
         "status_stopped_error": "ההורדות נעצרו עקב שגיאה.",
+        "status_rate_limit_waiting": "YouTube הגביל את קצב הבקשות — מנסה שוב את השיר הזה בעוד {time}.",
+        "rate_limit_dialog_title": "הגבלת בקשות של YouTube",
+        "rate_limit_dialog_text": (
+            "כל ההורדות החדשות מ־YouTube הושהו. ניסיון אוטומטי יתחיל בעוד {time}.\n\n"
+            "YouTube ביקש להמתין {advertised}; BananaFlow הוסיף מרווח ביטחון של {margin}. "
+            "תחילה ייבדק שוב אותו שיר, ורק לאחר הצלחה שאר ההורדות ימשיכו."
+        ),
+        "rate_limit_hide_btn": "הסתר",
         "phase_matching":    "מחפש התאמה…",
         "phase_waiting":     "ממתין לתור…",
+        "phase_rate_limited": "ממתין להסרת ההגבלה…",
         "phase_starting":    "מתחיל…",
         "phase_downloading": "מוריד",
         "phase_processing":  "מסיים…",
@@ -1848,6 +1918,39 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # ── Auth / cookie wizard ────────────────────────────────────────────────
         "auth_wizard_open_btn": "🔑 תיקון ההתחברות",
         "auth_wizard_close_btn": "סגור",
+        "download_error_skip_btn": "דלג על השיר הזה",
+        "download_incident_title_one": "שיר אחד נעצר — {headline}",
+        "download_incident_title_many": "{count} שירים נעצרו — {headline}",
+        "download_incident_local_continuing_one": (
+            "שיר אחד נעצר בגלל הבעיה הזאת. שאר ההורדות ממשיכות בינתיים."
+        ),
+        "download_incident_local_continuing_many": (
+            "{count} שירים נעצרו בגלל אותה בעיה. שאר ההורדות ממשיכות בינתיים."
+        ),
+        "download_incident_auth_continuing_one": (
+            "שיר אחד נעצר בגלל התחברות ל־YouTube או קוקיז. שאר ההורדות ממשיכות; "
+            "אחרי 3 כשלים רצופים כל ההורדות החדשות ייעצרו."
+        ),
+        "download_incident_auth_continuing_many": (
+            "{count} שירים נעצרו בגלל התחברות ל־YouTube או קוקיז. שאר ההורדות ממשיכות; "
+            "אחרי 3 כשלים רצופים כל ההורדות החדשות ייעצרו."
+        ),
+        "download_incident_all_stopped_one": (
+            "שיר אחד נכשל בגלל בעיה שמשפיעה על כל התור. "
+            "כל ההורדות החדשות נעצרו עד לתיקון הבעיה או לדילוג על השירים שנעצרו."
+        ),
+        "download_incident_all_stopped_many": (
+            "{count} שירים נכשלו ברצף בגלל בעיה שמשפיעה על כל התור. "
+            "כל ההורדות החדשות נעצרו עד לתיקון הבעיה או לדילוג על השירים שנעצרו."
+        ),
+        "download_incident_fix_auth_btn": "תקן התחברות / קוקיז",
+        "download_incident_retry_btn": "נסה שוב את השירים",
+        "download_incident_skip_btn": "דלג על השירים",
+        "download_incident_find_alternatives_btn": "בחר מקורות אחרים",
+        "download_incident_no_result_help": (
+            "אפשר לנסות שוב מאוחר יותר, לדלג על השירים או לבחור ידנית מקור מ־YouTube. "
+            "בחירה ידנית שומרת את השם, האמן, האלבום, המספור והתיקיות המקוריים."
+        ),
         "auth_wizard_manual_btn": "🔧 תיקון ידני בדפדפן",
         "preflight_warning_title": "אזהרת בדיקת מערכת",
 
@@ -2101,8 +2204,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "playlist_subfolders_desc": "צור תת-תיקייה בעלת שם לכל הורדת פלייליסט",
         "singles_subfolder": "תת-תיקיית סינגלים ומיני אלבומים",
         "singles_subfolder_desc": "שמור סינגלים ומיני אלבומים בתוך תיקיית קטגוריה ייעודית (אחרת יישמרו ישירות תחת תיקיית האמן)",
-        "track_index_prefix": "תחילית מספור רצועה",
-        "track_index_prefix_desc": "הוסף לקבצים את הקידומת 01-, 02- … כדי לשמור את סדר הפלייליסט",
+        "track_index_prefix": "תחילית מיקום בפלייליסט",
+        "track_index_prefix_desc": "הוסף לשמות קובצי פלייליסט את המיקום המקורי בפלייליסט (01 -, 02 - …)",
         "duplicate_detection": "זיהוי כפילויות",
         "duplicate_detection_desc": "פעולה כאשר קובץ הפלט כבר קיים",
         "duplicate_skip": "דלג בשקט",
@@ -2220,6 +2323,23 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # ── Search result card ──────────────────────────────────────────────────
         "search_card_add_btn": "＋  הוסף",
+        "search_card_use_source_btn": "השתמש במקור",
+        "search_source_repair_title": (
+            "בחירת מקור עבור {title} ({position} מתוך {total})"
+        ),
+        "search_source_repair_hint": (
+            "יש לבדוק את שם השיר, האמן והאורך. הבחירה שומרת את המטא־דאטה המקורית; "
+            "כל השירים שנבחרו יישלחו יחד לניסיון נוסף בסיום המעבר."
+        ),
+        "search_source_repair_cancel_btn": "הפסק בחירה",
+        "search_source_repair_selected_title": "המקור נבחר",
+        "search_source_repair_selected_text": "נבחר: {title}",
+        "search_source_repair_done_title": "המקורות נבחרו",
+        "search_source_repair_done_text": "השירים שנבחרו נשלחו לניסיון נוסף.",
+        "search_source_repair_invalid_title": "אי אפשר להשתמש במקור הזה",
+        "search_source_repair_invalid_text": (
+            "יש לבחור שיר בודד מ־YouTube או מ־YouTube Music."
+        ),
         "search_card_browse_btn": "עיון  ←",
 
         # ── Tag Editor: dialogs / headers ───────────────────────────────────────
@@ -2931,6 +3051,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "folder_albums": "אלבומים",
         "folder_live_performances": "הופעות חיות",
         "folder_compilations": "אוספים",
+        "disc_folder": "דיסק {number}",
         "folder_appears_on": "מופיע באוספים",
 
         # ── About ───────────────────────────────────────────────────────────────
@@ -3065,6 +3186,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "הרצועה נשארה ללא פתרון ולא נוספה לתור ההורדה."
         ),
         "err_spotify_target_collision_title": "התאמת Spotify דורשת בדיקה",
+        "err_no_search_results_title": "לא נמצאה התאמה ב־YouTube",
+        "err_no_search_results_detail": (
+            "החיפוש ב־YouTube הסתיים כרגיל אך החזיר אפס תוצאות, ולכן לא נוצר "
+            "ולא אבד שום קובץ. אפשר לנסות שוב מאוחר יותר; אם הבעיה חוזרת, "
+            "כדאי לבדוק את איות שם השיר והאמן במקור."
+        ),
         "err_spotify_target_collision_detail": (
             "שתי רצועות Spotify שונות הותאמו לאותה הקלטת YouTube. "
             "BananaFlow חיפשה שוב אך לא מצאה התאמה נפרדת ואמינה, ולכן "
@@ -3115,9 +3242,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "err_rate_limited_title": "‏YouTube הגביל את קצב הבקשות",
         "err_rate_limited_detail": (
-            "YouTube חסם את הבקשה או הגביל את הקצב שלה.\n\n"
-            "השאר את המצב השמרני פעיל, המתן כמה דקות, והימנע מניסיונות "
-            "חוזרים — ניסיון מיידי מחדש נוטה להחמיר את הגבלת הקצב."
+            "YouTube הגביל את קצב הבקשות. BananaFlow עצר בקשות YouTube חדשות "
+            "למשך הזמן ש-YouTube ציין, ולאחריו ינסה קודם שוב את אותו השיר. "
+            "בקשות שכבר היו בתהליך יורשו להסתיים בבטחה; פריטים שבתור לא "
+            "יתחילו בזמן ההמתנה. אין לבצע ניסיונות חוזרים ידניים — BananaFlow "
+            "מטפל כעת בניסיון החוזר באופן אוטומטי."
         ),
         "err_403_title": "הגישה נדחתה (403)",
         "err_403_detail": (
