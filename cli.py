@@ -83,6 +83,7 @@ class TerminalCallbacks:
         self._completed = 0
         self._failed = 0
         self._lock = threading.Lock()
+        self._rate_waiting: set[str] = set()
 
     def on_track_progress(self, key: str, fraction: float) -> None:
         if self._quiet:
@@ -130,6 +131,30 @@ class TerminalCallbacks:
             self._failed += 1
         headline = redact_text(getattr(error, "headline", str(error)))
         print(f"\r  ❌  {key}: {headline}", file=sys.stderr)
+
+    def on_user_action_required(self, request) -> None:
+        """The headless CLI cannot open a recovery dialog; skip explicitly."""
+        from core.download_recovery import RecoveryDecision
+
+        if not self._quiet:
+            headline = redact_text(
+                getattr(request.error, "headline", str(request.error))
+            )
+            print(f"\n  ⚠️  {request.key}: {headline} — skipping", file=sys.stderr)
+        request.resolve(RecoveryDecision.SKIP)
+
+    def on_rate_limit_wait(self, key: str, remaining_seconds: float) -> None:
+        remaining = max(0, int(remaining_seconds + 0.999))
+        if remaining > 0 and key not in self._rate_waiting:
+            self._rate_waiting.add(key)
+            if not self._quiet:
+                print(
+                    f"\n  ⏳  YouTube rate limit: pausing all new requests "
+                    f"for {remaining}s; retrying {key} first",
+                    file=sys.stderr,
+                )
+        elif remaining <= 0:
+            self._rate_waiting.discard(key)
 
     def on_track_phase(self, key: str, phase: str, remaining_seconds) -> None:
         # no-op, not an oversight - the terminal prints one line per track
@@ -271,6 +296,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="List tracks without downloading",
     )
     p.add_argument(
+        "--number-playlists",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Prefix playlist filenames with their original playlist position "
+            "(default: enabled; use --no-number-playlists to disable)"
+        ),
+    )
+    p.add_argument(
         "--quiet", "-q",
         action="store_true",
         help="Suppress progress output (errors still shown)",
@@ -400,7 +434,9 @@ def main() -> int:
         return 2
 
     # ── 1. Parse URL → track list ─────────────────────────────────────────
-    from core.playlist_parser import PlaylistParser, TrackMeta, classify_url, SourcePlatform
+    from core.playlist_parser import (
+        PlaylistParser, SourcePlatform, TrackMeta, UrlKind, classify_url,
+    )
 
     platform, kind = classify_url(args.url)
     if platform == SourcePlatform.UNKNOWN:
@@ -452,6 +488,8 @@ def main() -> int:
 
     # ── 3. Build download jobs ────────────────────────────────────────────
     from core.downloader import DownloadEngine, DownloadRequest, MediaType
+    from core.filename_numbering import decide_numbering
+    from core.output_layout import decide_output_layout, english_category_name
     from core.spotify_request_builder import attach_spotify_matching, is_downloadable
 
     media_type = MediaType(args.media_type)
@@ -463,8 +501,6 @@ def main() -> int:
 
     engine = DownloadEngine()
     jobs: list[tuple[str, DownloadRequest]] = []
-
-    playlist_name = result.playlist_title if len(result.tracks) > 1 else None
 
     # A track the scrape could not build usable metadata for has no target and
     # never will — a Spotify item that failed validation carries an empty URL.
@@ -485,8 +521,58 @@ def main() -> int:
         print("❌  No track has usable metadata to download.", file=sys.stderr)
         return 1
 
+    discs_per_release: dict[tuple[str, str], set[int]] = {}
+    for track in playable:
+        if track.disc_number > 0:
+            release_key = (
+                (track.parent_artist or track.artist or "").strip(),
+                (track.album or "").strip(),
+            )
+            discs_per_release.setdefault(release_key, set()).add(track.disc_number)
+    multi_disc_releases = {
+        key for key, discs in discs_per_release.items() if len(discs) > 1
+    }
+
     for track in playable:
         key = f"track-{track.index}"
+        source_kind = track.source_kind or result.kind
+        numbering = decide_numbering(
+            source_kind=source_kind,
+            release_type=track.release_type,
+            collection_index=track.album_index,
+            total_tracks=track.total_tracks,
+            number_playlists=args.number_playlists,
+        )
+        release_key = (
+            (track.parent_artist or track.artist or "").strip(),
+            (track.album or "").strip(),
+        )
+        known_multi_disc = (
+            track.disc_total > 1 or release_key in multi_disc_releases
+        )
+        collection_title = track.collection_title or (
+            result.playlist_title
+            if result.kind in {UrlKind.PLAYLIST, UrlKind.ALBUM}
+            else ""
+        )
+        layout = decide_output_layout(
+            source_kind=source_kind,
+            release_type=track.release_type,
+            collection_title=collection_title,
+            album=track.album,
+            parent_artist=track.parent_artist,
+            artist=track.artist,
+            category=track.category,
+            total_tracks=track.total_tracks,
+            platform=track.platform,
+            track_title=track.title,
+            multi_disc=known_multi_disc,
+            disc_number=track.disc_number,
+        )
+        playlist_name = layout.render_folder(
+            localize_category=english_category_name,
+        )
+        kind_name = getattr(source_kind, "name", source_kind)
         req_kwargs = dict(
             url=track.url,
             output_dir=output_dir,
@@ -503,9 +589,22 @@ def main() -> int:
             forced_album=(
                 track.album if track.platform == SourcePlatform.SPOTIFY else None
             ),
-            forced_index=track.index if playlist_name else None,
+            forced_index=numbering.metadata_track_index,
+            filename_index=numbering.filename_index,
+            filename_include_artist=layout.include_artist_in_filename,
+            forced_disc=(
+                track.disc_number
+                if numbering.is_release_position and known_multi_disc else None
+            ),
+            forced_total=(
+                track.total_tracks if numbering.is_release_position else None
+            ),
             forced_duration=track.duration_sec,
             playlist_name=playlist_name,
+            clean_filename=not layout.include_artist_in_filename,
+            is_solo=str(kind_name or "").upper() in {"SINGLE_VIDEO", "UNKNOWN"},
+            source_kind=str(kind_name or "").upper() or None,
+            source_url=track.source_url or result.url,
             cookies_file=args.cookies,
             # Only reaches the history record (per-platform stats): the one
             # other platform-dependent branch, thumbnail cropping, additionally

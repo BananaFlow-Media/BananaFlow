@@ -161,9 +161,10 @@ class TestOrchestratorYoutubeSerialization:
         # as each other (and as a YouTube job), unlike the YouTube jobs.
         assert engine.max_active_other == 2
 
-    def test_single_youtube_job_is_not_serialized(self):
-        """A lone YouTube job has no sibling to protect — it must not pay
-        the cooldown delay (this keeps single-track downloads snappy)."""
+    def test_single_youtube_job_uses_process_gate_without_cooldown_wait(self):
+        """A lone job still enters the process-wide gate so another
+        orchestrator/resume cannot overlap it, but with no waiter it must not
+        pay the 5-10 second cooldown."""
         from core.download_orchestrator import DownloadOrchestrator
 
         engine = ConcurrencyTrackingEngine(work_time=0.01)
@@ -171,8 +172,8 @@ class TestOrchestratorYoutubeSerialization:
 
         jobs = [_job("yt1", "https://www.youtube.com/watch?v=AAAAAAAAAAA")]
 
-        # Deliberately do NOT patch CONSERVATIVE_DELAY_RANGE: if the single
-        # job were (incorrectly) serialized, this test would take 5-10s.
+        # Deliberately do NOT patch CONSERVATIVE_DELAY_RANGE: the real range is
+        # scheduled on release, but must be discarded when nobody is waiting.
         start = time.time()
         result = orch.run_batch(jobs)
         elapsed = time.time() - start
@@ -237,10 +238,9 @@ class TestConservativeLoggingAccuracy:
         assert "delay=" not in lines[0]
         assert "parallel=" not in lines[0]
 
-    def test_single_youtube_job_batch_logs_no_serialization(self, caplog):
-        """A lone YouTube job is never gated (see run_batch's
-        youtube_job_count > 1 check) — the orchestrator must not log a
-        "serializing"/cooldown line implying a delay that never happens."""
+    def test_single_youtube_job_logs_process_wide_gate(self, caplog):
+        """A lone job logs its process-wide gate membership even though its
+        release does not impose a cooldown when no other job is waiting."""
         from core.download_orchestrator import DownloadOrchestrator
 
         caplog.set_level(logging.INFO, logger="core.download_orchestrator")
@@ -249,7 +249,15 @@ class TestConservativeLoggingAccuracy:
 
         orch.run_batch([_job("yt1", "https://www.youtube.com/watch?v=AAAAAAAAAAA")])
 
-        assert not any("youtube_conservative" in r.getMessage() for r in caplog.records)
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "youtube_conservative" in r.getMessage()
+        ]
+        assert len(lines) == 1
+        assert "parallel=1" in lines[0]
+        assert "cooldown=5-10s" in lines[0]
+        assert "serializing YouTube job: yt1" in lines[0]
 
     def test_multi_youtube_job_batch_logs_serialization_once_per_job(self, caplog):
         """Once the gate actually engages (>1 YouTube job in the batch),

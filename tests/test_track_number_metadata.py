@@ -57,6 +57,7 @@ def _album_request(**overrides):
         forced_artist="Some Artist",
         forced_album="Some Album",
         forced_index=3,
+        filename_index=3,
         forced_total=12,
     )
     kwargs.update(overrides)
@@ -292,17 +293,173 @@ def test_pipeline_reports_a_failed_stamp_without_raising(tmp_path, monkeypatch):
 def test_position_round_trips_through_the_request_codec():
     from core.download_request_codec import request_from_dict, request_to_dict
 
-    req = _album_request(forced_disc=2, forced_total=24)
+    req = _album_request(
+        forced_disc=2, forced_total=24, filename_include_artist=True,
+    )
     restored = request_from_dict(request_to_dict(req))
 
     assert restored.forced_index == 3
+    assert restored.filename_index == 3
+    assert restored.filename_include_artist is True
     assert restored.forced_disc == 2
     assert restored.forced_total == 24
+
+
+def test_legacy_persisted_position_keeps_its_existing_filename_prefix():
+    """Old paused jobs used forced_index for both tags and filenames."""
+    from core.download_request_codec import request_from_dict, request_to_dict
+
+    data = request_to_dict(_album_request())
+    data.pop("filename_index")
+
+    restored = request_from_dict(data)
+
+    assert restored.forced_index == 3
+    assert restored.filename_index == 3
+
+
+def test_explicit_unnumbered_filename_survives_persistence():
+    """A compilation's None is intentional, not a legacy missing field."""
+    from core.download_request_codec import request_from_dict, request_to_dict
+
+    restored = request_from_dict(request_to_dict(_album_request(filename_index=None)))
+
+    assert restored.forced_index == 3
+    assert restored.filename_index is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5. Filename numbering and embedded metadata agree
 # ──────────────────────────────────────────────────────────────────────────────
+
+def test_filename_template_uses_filename_index_not_track_tag(tmp_path):
+    from core.downloader import DownloadEngine
+
+    compilation = _album_request(
+        output_dir=str(tmp_path), filename_index=None, forced_index=5,
+        clean_filename=True,
+    )
+    playlist = _album_request(
+        output_dir=str(tmp_path), filename_index=7, forced_index=None,
+        clean_filename=True,
+    )
+
+    compilation_template = DownloadEngine()._build_ydl_opts(compilation)["outtmpl"]
+    playlist_template = DownloadEngine()._build_ydl_opts(playlist)["outtmpl"]
+
+    assert "05 - " not in Path(compilation_template).name
+    assert Path(compilation_template).name == "Track Title.%(ext)s"
+    assert Path(playlist_template).name == "07 - Track Title.%(ext)s"
+
+
+def test_direct_and_compilation_filename_bodies_include_artist(tmp_path):
+    from core.downloader import DownloadEngine
+
+    direct = _album_request(
+        output_dir=str(tmp_path), forced_index=None, filename_index=None,
+        filename_include_artist=True, is_solo=True,
+    )
+    compilation = _album_request(
+        output_dir=str(tmp_path), forced_index=5, filename_index=None,
+        filename_include_artist=True, is_solo=False, clean_filename=False,
+    )
+
+    direct_template = DownloadEngine()._build_ydl_opts(direct)["outtmpl"]
+    compilation_template = DownloadEngine()._build_ydl_opts(compilation)["outtmpl"]
+
+    expected = "Some Artist - Track Title.%(ext)s"
+    assert Path(direct_template).name == expected
+    assert Path(compilation_template).name == expected
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["Song (Live)", "Song (Acoustic)", "Song (Radio Remix)",
+     "Song - Club Edit", "Song - Original"],
+)
+def test_meaningful_version_labels_survive_filename_cleaning(tmp_path, version):
+    from core.downloader import DownloadEngine
+
+    request = _album_request(
+        output_dir=str(tmp_path), forced_title=version, clean_filename=True,
+    )
+
+    template = DownloadEngine()._build_ydl_opts(request)["outtmpl"]
+
+    assert Path(template).name == f"03 - {version}.%(ext)s"
+
+
+def test_promotional_video_label_is_still_removed(tmp_path):
+    from core.downloader import DownloadEngine
+    from core.duplicate_checker import expected_stem
+
+    request = _album_request(
+        output_dir=str(tmp_path), forced_title="Song (Official Video)",
+        clean_filename=True,
+    )
+
+    template = DownloadEngine()._build_ydl_opts(request)["outtmpl"]
+
+    assert Path(template).name == "03 - Song.%(ext)s"
+    assert expected_stem(
+        "Song (Official Video)", "Some Artist", 3, True, False,
+    ) == "03 - Song"
+
+
+def test_duplicate_lookup_uses_the_downloaders_sanitized_collection_path(tmp_path):
+    from core.duplicate_checker import find_duplicate
+
+    collection = tmp_path / "Artist" / "Album - Deluxe"
+    collection.mkdir(parents=True)
+    expected = collection / "01 - Song.mp3"
+    expected.touch()
+
+    found = find_duplicate(
+        output_dir=str(tmp_path),
+        title="Song",
+        artist="Artist",
+        index=1,
+        include_artist=False,
+        playlist_name="Artist/Album: Deluxe",
+    )
+
+    assert found == expected
+
+
+def test_hls_uses_the_same_clean_artist_title_stem_as_duplicate_lookup(
+    tmp_path, monkeypatch,
+):
+    from core.downloader import DownloadEngine, DownloadStatus, MediaType
+    from core.duplicate_checker import expected_stem
+
+    def fake_download_hls(url, output_path, cookies_file=None, cancel_event=None):
+        make_empty_audio(Path(output_path))
+
+    monkeypatch.setattr("core.hls_downloader.download_hls", fake_download_hls)
+
+    finished: list = []
+    req = _album_request(
+        output_dir=str(tmp_path),
+        media_type=MediaType.AUDIO,
+        audio_format="mp3",
+        stream_type="hls",
+        forced_title="Song: Name (Official Video)",
+        forced_artist="Some/Artist",
+        forced_index=None,
+        filename_index=None,
+        filename_include_artist=True,
+        is_solo=True,
+        on_progress=lambda p: finished.append(p) if p.status is DownloadStatus.FINISHED else None,
+    )
+
+    DownloadEngine()._download_hls_stream(req)
+
+    written = Path(finished[0].output_path)
+    expected = expected_stem(
+        req.forced_title, req.forced_artist, include_artist=True,
+    )
+    assert written.stem == expected == "Some-Artist - Song - Name"
+
 
 def test_hls_download_numbers_both_the_filename_and_the_tags(tmp_path, monkeypatch):
     """The raw-stream path never ran a metadata pass, so it numbered only the name.

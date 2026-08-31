@@ -34,7 +34,7 @@ import threading
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol, Tuple
+from typing import Callable, Optional, Protocol, Tuple
 
 from core.history_db import DownloadRecord, HistoryDB
 from core.batch_outcome import BatchOutcome
@@ -48,6 +48,14 @@ from core.downloader import (
 from core.playlist_parser import SourcePlatform
 from core.track_phases import TrackPhase, TrackPhaseModel
 from core.retry_policy import DEFAULT_POLICY, retry_download
+from core.download_recovery import (
+    DownloadRecoveryCoordinator,
+    RecoveryDecision,
+    UserActionRequest,
+    is_explicit_rate_limit,
+    shared_download_recovery_coordinator,
+    systemic_recovery_policy,
+)
 from core.youtube_reliability import (
     CONSERVATIVE_DELAY_RANGE,
     CONSERVATIVE_MAX_PARALLEL_YOUTUBE,
@@ -86,6 +94,15 @@ _HEARTBEAT_INTERVAL = 0.5
 _RESOLVER_MAX_WORKERS = 2
 _RESOLVER_BUFFER_PER_DOWNLOAD_WORKER = 2
 _SPOTIFY_TARGET_REFRESH_LIMIT = 2
+
+
+class _DecisionHandledError(RuntimeError):
+    """Carries a failure that already received its one user decision."""
+
+    def __init__(self, original: BaseException, error_info: ErrorInfo) -> None:
+        self.original = original
+        self.error_info = error_info
+        super().__init__(str(original))
 
 
 def _identity_text(value: object) -> str:
@@ -177,6 +194,8 @@ class OrchestratorCallbacks(Protocol):
     def on_track_finished(self, key: str, output_path: str) -> None: ...
     def on_track_preexisting(self, key: str, output_path: str) -> None: ...
     def on_track_error(self, key: str, error: ErrorInfo) -> None: ...
+    def on_user_action_required(self, request: UserActionRequest) -> None: ...
+    def on_rate_limit_wait(self, key: str, remaining_seconds: float) -> None: ...
     def on_overall_progress(self, fraction: float) -> None: ...
     def on_metrics(self, speed: str, eta: str) -> None: ...
     def on_batch_snapshot(self, snapshot: "BatchSnapshot") -> None: ...
@@ -223,11 +242,15 @@ class DownloadOrchestrator:
         callbacks:   OrchestratorCallbacks,
         db:          Optional[HistoryDB] = None,
         max_workers: int = 3,
+        recovery_coordinator: Optional[DownloadRecoveryCoordinator] = None,
     ) -> None:
         self._engine      = engine
         self._cb          = callbacks
         self._db          = db
         self._max_workers = max(1, min(max_workers, 6))
+        self._recovery = (
+            recovery_coordinator or shared_download_recovery_coordinator()
+        )
 
         # Cancel infrastructure
         self._cancel_events: dict[str, threading.Event] = {}
@@ -296,12 +319,10 @@ class DownloadOrchestrator:
         self._cancelled = 0
         self._total     = 0
 
-        # YouTube-only conservative reliability mode: serializes YouTube
-        # jobs (regardless of max_workers) and adds a cooldown between
-        # them. Non-YouTube jobs never touch this gate. Only engaged when
-        # a batch actually contains more than one conservative-mode
-        # YouTube job — see run_batch().
-        self._youtube_gate = threading.Semaphore(CONSERVATIVE_MAX_PARALLEL_YOUTUBE)
+        # Whether this batch has multiple conservative YouTube jobs. The
+        # process-wide gate itself applies to every conservative job (including
+        # a lone resume) so independent orchestrators cannot overlap. This flag
+        # only controls same-batch ETA overhead and critical-path diagnostics.
         self._youtube_serialize = False
 
         # The normal user-configured download delay belongs immediately before
@@ -754,12 +775,15 @@ class DownloadOrchestrator:
                     OSError("Could not create a private download workspace")
                 )
                 failed = set(workspace_failed_keys)
+                request_by_key = dict(jobs_needing_workspace)
                 for key in workspace_failed_keys:
+                    self._note_failure_policy(err)
                     self._aggregator.fail(key)
                     with self._progress_lock:
                         self._failed += 1
                     self._safe_cb("on_track_status", key, "error")
                     self._safe_cb("on_track_error", key, err)
+                    self._emit_job_count()
                 # Drop the failed jobs so they never reach the pool; keep
                 # everything that has a real workspace (fresh subdirs that
                 # succeeded, plus preset-workspace resumes).
@@ -850,7 +874,7 @@ class DownloadOrchestrator:
         heartbeat = threading.Thread(
             target=_heartbeat, name="dl-heartbeat", daemon=True
         )
-        heartbeat.start()
+        heartbeat_started = False
 
         # Register EVERY job's cancel event, per-job lock and live request
         # up front — before the (staggered, therefore slow) submit loop
@@ -887,16 +911,22 @@ class DownloadOrchestrator:
         )
         lazy_job_count = sum(1 for _, req in jobs if req.url_resolver is not None)
         resolver_pool: Optional[ThreadPoolExecutor] = None
-        if lazy_job_count:
-            resolver_pool = ThreadPoolExecutor(
-                max_workers=min(_RESOLVER_MAX_WORKERS, n_workers),
-                thread_name_prefix="resolve-pool",
-            )
+        try:
+            if lazy_job_count:
+                resolver_pool = ThreadPoolExecutor(
+                    max_workers=min(_RESOLVER_MAX_WORKERS, n_workers),
+                    thread_name_prefix="resolve-pool",
+                )
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
         with self._pool_lock:
             self._pool = pool
             self._resolver_pool = resolver_pool
 
         try:
+            heartbeat.start()
+            heartbeat_started = True
             if lazy_job_count:
                 # Spotify jobs use two bounded pools: resolvers prepare a
                 # short look-ahead while download workers consume only ready
@@ -913,18 +943,6 @@ class DownloadOrchestrator:
                 # This legacy loop only runs batches without lazy resolvers.
                 # Pipeline jobs apply the same delay at their actual engine
                 # start in _wait_for_pipeline_stagger instead.
-                if delay_range and self._should_stagger(i):
-                    sleep_time = random.uniform(*delay_range)
-                    logger.debug(f"[Orchestrator] Staggering start: sleeping {sleep_time:.2f}s")
-                    sleep_start = time.time()
-                    while time.time() - sleep_start < sleep_time:
-                        if self._engine._cancel_event.is_set():
-                            break
-                        time.sleep(0.2)
-
-                if self._engine._cancel_event.is_set():
-                    break
-
                 # Cancel event / lock / live-request registration already
                 # happened up front (see above) — only the submission
                 # itself is staggered.
@@ -955,33 +973,16 @@ class DownloadOrchestrator:
                         if self._engine._cancel_event.is_set():  # noqa: SLF001
                             self._mark_cancelled(key)
                             continue
-                        if not self._claim_job_outcome(key, "terminal"):
-                            continue  # paused out from under this thread
-                        err = classify_error(exc)
-                        # Terminate the job everywhere, not just in the scalar
-                        # counter. Without the aggregator call the job stayed
-                        # QUEUED or ACTIVE forever: absent from
-                        # BatchSnapshot.failed, still counted as outstanding
-                        # work by the ETA, and still weighed as unfinished by
-                        # the progress bar — so a batch that hit this path
-                        # could never reach its final state. The lock and the
-                        # count callback match the other two failure sites
-                        # (on_error, workspace setup) so all three stay
-                        # coherent.
-                        with self._progress_lock:
-                            self._failed += 1
-                        self._aggregator.fail(key)
-                        self._safe_cb("on_track_status", key, "error")
-                        self._safe_cb("on_track_error", key, err)
-                        self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
-                        self._emit_job_count()
-                        logger.error(
-                            "[Orchestrator] Unhandled exception for %s: %s",
-                            key, exc, exc_info=True,
+                        self._settle_unhandled_exception(
+                            key,
+                            self._active_requests[key],
+                            self._cancel_events[key],
+                            exc,
                         )
         finally:
             heartbeat_stop.set()
-            heartbeat.join(timeout=_HEARTBEAT_INTERVAL * 2)
+            if heartbeat_started:
+                heartbeat.join(timeout=_HEARTBEAT_INTERVAL * 2)
             pool.shutdown(wait=False)
             if resolver_pool is not None:
                 resolver_pool.shutdown(wait=False)
@@ -1139,9 +1140,8 @@ class DownloadOrchestrator:
     def _should_stagger(i: int) -> bool:
         """Whether job ``i`` gets the inter-start stagger sleep.
 
-        This helper is now only used by the legacy direct-only submission loop.
-        A batch containing Spotify resolvers uses _run_resolver_pipeline, where
-        starts are staggered after resolution and directly before the engine.
+        Kept as a small compatibility helper for callers/tests. Actual cadence
+        is now reserved immediately before every resolver or engine attempt.
         """
         return i > 0
 
@@ -1241,17 +1241,16 @@ class DownloadOrchestrator:
             if self._engine._cancel_event.is_set():  # noqa: SLF001
                 self._mark_cancelled(key)
                 return
-            if not self._claim_job_outcome(key, "terminal"):
+            req = self._active_requests.get(key)
+            cancel_ev = self._cancel_events.get(key)
+            if req is None or cancel_ev is None:
+                logger.error(
+                    "[Orchestrator] Unhandled exception without live job: %s",
+                    key,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
                 return
-            err = classify_error(exc)
-            with self._progress_lock:
-                self._failed += 1
-            self._aggregator.fail(key)
-            self._safe_cb("on_track_status", key, "error")
-            self._safe_cb("on_track_error", key, err)
-            self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
-            self._emit_job_count()
-            logger.error("[Orchestrator] Unhandled exception for %s: %s", key, exc, exc_info=True)
+            self._settle_unhandled_exception(key, req, cancel_ev, exc)
 
         def fill_window() -> None:
             nonlocal next_job
@@ -1265,9 +1264,7 @@ class DownloadOrchestrator:
                 self._aggregator.mark_submitted(key)
                 if req.url_resolver is None:
                     cancel_ev = self._cancel_events[key]
-                    conservative_youtube = (
-                        self._youtube_serialize and self._is_conservative_youtube_job(req)
-                    )
+                    conservative_youtube = self._is_conservative_youtube_job(req)
                     future = self._submit_pool_task(
                         download_pool, key, self._download_pipeline_ready_one,
                         key, req, cancel_ev, conservative_youtube,
@@ -1277,9 +1274,7 @@ class DownloadOrchestrator:
                     continue
 
                 cancel_ev = self._cancel_events[key]
-                conservative_youtube = (
-                    self._youtube_serialize and self._is_conservative_youtube_job(req)
-                )
+                conservative_youtube = self._is_conservative_youtube_job(req)
                 future = self._submit_pool_task(
                     resolver_pool, key, self._resolve_lazy_url, key, req, cancel_ev,
                 )
@@ -1337,10 +1332,7 @@ class DownloadOrchestrator:
         cancel_ev: threading.Event,
         conservative_youtube: bool,
     ) -> None:
-        """Apply the real-start stagger, then consume one ready URL."""
-        if not self._wait_for_pipeline_stagger(key, cancel_ev, conservative_youtube):
-            self._mark_cancelled(key)
-            return
+        """Consume one ready URL; each actual attempt reserves its own cadence."""
         self._download_resolved_one(key, req, cancel_ev, conservative_youtube)
 
     # ── Batch workspace ────────────────────────────────────────────────────────
@@ -1412,6 +1404,11 @@ class DownloadOrchestrator:
         if current is None:
             return
         phase, started = current
+        if phase == TrackPhase.RATE_LIMITED:
+            # The coordinator owns an exact advertised countdown. Feeding an
+            # hour-long exceptional pause into the learned phase model would
+            # corrupt every later track's ETA and overwrite that countdown.
+            return
         elapsed = max(0.0, time.monotonic() - started)
         fraction = self._phase_model.position(phase, elapsed, byte_fraction)
         remaining = self._phase_model.remaining(phase, elapsed, byte_fraction)
@@ -1526,6 +1523,7 @@ class DownloadOrchestrator:
         key: str,
         req: DownloadRequest,
         cancel_ev: threading.Event,
+        rate_wait_callback: Optional[Callable[[float], None]] = None,
     ) -> bool:
         """Rematch a suspicious cross-track YouTube target collision.
 
@@ -1555,9 +1553,17 @@ class DownloadOrchestrator:
             replacement = resolve_track_to_youtube(
                 identity,
                 cookies_file=req.cookies_file,
-                cancel_check=cancel_ev.is_set,
+                cancel_check=lambda: (
+                    cancel_ev.is_set()
+                    or self._engine._cancel_event.is_set()  # noqa: SLF001
+                ),
                 force_refresh=True,
                 exclude_urls=set(excluded),
+                rate_wait_callback=(
+                    rate_wait_callback
+                    or (lambda remaining: self._on_rate_limit_wait(key, remaining))
+                ),
+                recovery_coordinator=self._recovery,
             )
             if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
                 self._mark_cancelled(key)
@@ -1650,12 +1656,44 @@ class DownloadOrchestrator:
             return True
         resolve_start = time.monotonic()
         resolver_error: Optional[Exception] = None
+        rate_recovery_active = [False]
+
+        def _report_rate_wait(remaining: float) -> None:
+            rate_recovery_active[0] = remaining > 0
+            self._safe_cb("on_rate_limit_wait", key, remaining)
+
         try:
-            resolved = resolver(cancel_ev)
-        except Exception as exc:  # noqa: BLE001 - surfaced after atomic cleanup below
-            logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
-            resolved = ""
-            resolver_error = exc
+            setattr(
+                resolver,
+                "rate_wait_callback",
+                _report_rate_wait,
+            )
+            setattr(resolver, "recovery_coordinator", self._recovery)
+        except Exception:
+            pass
+        while True:
+            if not self._wait_for_pipeline_stagger(key, cancel_ev, False):
+                self._mark_cancelled(key)
+                return True
+            try:
+                resolved = resolver(cancel_ev)
+                break
+            except Exception as exc:  # noqa: BLE001 - terminalized by the controller
+                logger.debug("[Orchestrator] URL resolver failed for %s: %s", key, exc)
+                err = classify_error(
+                    exc,
+                    cookies_file=req.cookies_file or "",
+                    cookies_browser=req.cookies_browser or "",
+                )
+                self._note_failure_policy(err)
+                resolved = ""
+                resolver_error = _DecisionHandledError(exc, err)
+                break
+        if rate_recovery_active[0] and not self._recovery.rate_incident_active():
+            # Countdown expiry alone did not reopen traffic. Clear the UI only
+            # after this same resolver has succeeded or the user has settled
+            # its post-canary failure.
+            _report_rate_wait(0.0)
         resolver_wait = time.monotonic() - resolve_start
         self._record_phase("resolver_wait", resolver_wait)
         self._aggregator.mark_resolution_source(
@@ -1705,9 +1743,7 @@ class DownloadOrchestrator:
         # Decide gate membership BEFORE resolving — a Spotify two-stage job's
         # url_resolver is still set here, and _is_conservative_youtube_job uses
         # that to recognise it as a YouTube job despite the placeholder URL.
-        conservative_youtube = (
-            self._youtube_serialize and self._is_conservative_youtube_job(req)
-        )
+        conservative_youtube = self._is_conservative_youtube_job(req)
 
         # Resolve the lazy URL now, BEFORE acquiring the gate, so matching runs
         # in parallel across workers and only the downloads serialize.
@@ -1733,15 +1769,50 @@ class DownloadOrchestrator:
             self._mark_cancelled(key)
             return
 
-        if self._ensure_distinct_spotify_target(key, req, cancel_ev):
-            return
+        collision_rate_active = [False]
+
+        def _report_collision_rate_wait(remaining: float) -> None:
+            collision_rate_active[0] = remaining > 0
+            self._on_rate_limit_wait(key, remaining)
+
+        while True:
+            try:
+                collision_cancelled = self._ensure_distinct_spotify_target(
+                    key,
+                    req,
+                    cancel_ev,
+                    rate_wait_callback=_report_collision_rate_wait,
+                )
+            except Exception as exc:  # noqa: BLE001 - terminalized by the controller
+                err = classify_error(
+                    exc,
+                    cookies_file=req.cookies_file or "",
+                    cookies_browser=req.cookies_browser or "",
+                )
+                self._note_failure_policy(err)
+                if (
+                    collision_rate_active[0]
+                    and not self._recovery.rate_incident_active()
+                ):
+                    _report_collision_rate_wait(0.0)
+                self._settle_unhandled_exception(
+                    key,
+                    req,
+                    cancel_ev,
+                    _DecisionHandledError(exc, err),
+                )
+                return
+            if collision_cancelled:
+                return
+            break
+
+        if collision_rate_active[0] and not self._recovery.rate_incident_active():
+            _report_collision_rate_wait(0.0)
 
         if conservative_youtube:
-            # This log line only fires when the gate is actually engaged
-            # (self._youtube_serialize — batch has >1 conservative YouTube
-            # job). A lone YouTube job never reaches here, so it never
-            # produces a misleading "serializing"/"delay" log for a delay
-            # that isn't applied.
+            # The gate is process-wide, so separately resumed tracks and a
+            # main batch cannot bypass Conservative mode with independent
+            # orchestrator instances.
             logger.info(
                 "[yt-dlp][youtube_conservative] parallel=%d cooldown=%.0f-%.0fs "
                 "— serializing YouTube job: %s",
@@ -1753,7 +1824,15 @@ class DownloadOrchestrator:
             # look hung.
             self._enter_phase(key, TrackPhase.WAITING)
             gate_start = time.monotonic()
-            self._youtube_gate.acquire()
+            acquired = self._recovery.acquire_conservative_slot(
+                lambda: (
+                    cancel_ev.is_set()
+                    or self._engine._cancel_event.is_set()  # noqa: SLF001
+                )
+            )
+            if not acquired:
+                self._mark_cancelled(key)
+                return
             acquired_at = time.monotonic()
             gate_wait = acquired_at - gate_start
             self._record_phase("gate_wait", gate_wait)
@@ -1768,44 +1847,168 @@ class DownloadOrchestrator:
             if last_release is not None:
                 self._record_phase("gate_idle", max(0.0, acquired_at - last_release))
             if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
-                self._youtube_gate.release()
+                self._recovery.release_conservative_slot(0.0)
                 self._mark_cancelled(key)
                 return
 
         download_start = time.monotonic()
         try:
-            self._download_one_locked(key, req, cancel_ev)
+            self._download_one_locked(
+                key, req, cancel_ev, conservative_youtube=conservative_youtube,
+            )
         finally:
             download_time = time.monotonic() - download_start
             self._record_phase("download_time", download_time)
             logger.debug("[timing][track] %s download_time=%.2fs", key, download_time)
             if conservative_youtube:
-                self._youtube_cooldown(cancel_ev, key)
+                cooldown = self._youtube_cooldown(cancel_ev, key) or 0.0
                 with self._gate_lock:
                     self._gate_last_release = time.monotonic()
-                self._youtube_gate.release()
+                self._recovery.release_conservative_slot(cooldown)
 
-    def _youtube_cooldown(self, cancel_ev: threading.Event, key: str) -> None:
-        """Sleep the conservative-mode cooldown before the next YouTube job
-        may start, staying responsive to cancellation."""
+    def _youtube_cooldown(self, cancel_ev: threading.Event, key: str) -> float:
+        """Schedule the process-wide cooldown before the next YouTube start."""
+        if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+            return 0.0
         delay = random.uniform(*CONSERVATIVE_DELAY_RANGE)
         logger.debug(
             "[yt-dlp][youtube_conservative] cooldown %.1fs before next YouTube job (after %s)",
             delay, key,
         )
-        slept = 0.0
-        while slept < delay:
-            if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
-                break
-            chunk = min(0.2, delay - slept)
-            time.sleep(chunk)
-            slept += chunk
-        self._record_phase("cooldown", slept)
+        self._record_phase("cooldown", delay)
+        return delay
 
-    def _download_one_locked(self, key: str, req: DownloadRequest, cancel_ev: threading.Event) -> None:
+    def _request_user_action(
+        self,
+        key: str,
+        req: DownloadRequest,
+        err: ErrorInfo,
+        cancel_ev: threading.Event,
+        *,
+        hold_key: str = "",
+    ) -> RecoveryDecision:
+        """Pause admission and obtain one pre-terminal decision.
+
+        Headless/legacy callback adapters do not know this optional callback;
+        they retain their historical behaviour by skipping the failed track
+        immediately instead of blocking forever.
+        """
+        callback = getattr(self._cb, "on_user_action_required", None)
+        declared_callback = getattr(
+            type(self._cb), "on_user_action_required", None,
+        )
+        if not callable(callback) or not callable(declared_callback):
+            callback = lambda request: request.resolve(RecoveryDecision.SKIP)
+
+        auth_keys = {
+            "err_browser_cookie_access",
+            "err_cookies_expired",
+            "err_signin_required",
+        }
+        recovery_scope = (
+            "youtube_auth"
+            if err.message_key in auth_keys
+            else f"error:{err.message_key or type(err).__name__}"
+        )
+
+        return self._recovery.request_user_action(
+            key=key,
+            error=err,
+            failing_url=req.url,
+            notify=callback,
+            cancel_check=lambda: (
+                cancel_ev.is_set()
+                or self._engine._cancel_event.is_set()  # noqa: SLF001
+            ),
+            recovery_scope=recovery_scope,
+            hold_key=hold_key,
+        )
+
+    def _note_failure_policy(self, err: ErrorInfo) -> tuple[int, bool]:
+        """Apply only the configured process-wide threshold for this error."""
+        policy = systemic_recovery_policy(err)
+        if policy is None:
+            return 0, False
+        streak, newly_stopped = self._recovery.note_systemic_failure(policy)
+        logger.warning(
+            "[Recovery] systemic scope=%s failure=%d/%d stopped_all=%s category=%s",
+            policy.scope,
+            streak,
+            policy.threshold,
+            self._recovery.systemic_pause_active(policy.scope),
+            err.message_key or "unknown",
+        )
+        return streak, newly_stopped
+
+    def _on_rate_limit_wait(self, key: str, remaining_seconds: float) -> None:
+        """Publish one exact, non-modal cooldown countdown."""
+        if remaining_seconds > 0:
+            with self._phase_state_lock:
+                current = self._job_phase.get(key, (None, 0.0))[0]
+            if current != TrackPhase.RATE_LIMITED:
+                self._enter_phase(key, TrackPhase.RATE_LIMITED)
+            self._safe_cb(
+                "on_track_phase",
+                key,
+                TrackPhase.RATE_LIMITED.value,
+                remaining_seconds,
+            )
+        self._safe_cb("on_rate_limit_wait", key, remaining_seconds)
+
+    def _settle_unhandled_exception(
+        self,
+        key: str,
+        req: DownloadRequest,
+        cancel_ev: threading.Event,
+        exc: BaseException,
+    ) -> None:
+        """Settle a stage failure once so the UI can aggregate it safely."""
+        if cancel_ev.is_set() or self._engine._cancel_event.is_set():  # noqa: SLF001
+            self._recovery.release_failure(key)
+            self._mark_cancelled(key)
+            return
+
+        already_decided = isinstance(exc, _DecisionHandledError)
+        err = (
+            exc.error_info
+            if already_decided
+            else classify_error(
+                Exception(str(exc)),
+                cookies_file=req.cookies_file or "",
+                cookies_browser=req.cookies_browser or "",
+            )
+        )
+        if not already_decided:
+            self._note_failure_policy(err)
+
+        self._recovery.release_failure(key)
+        if not self._claim_job_outcome(key, "terminal"):
+            return
+        with self._progress_lock:
+            self._failed += 1
+        self._aggregator.fail(key)
+        self._finish_phases(key)
+        self._safe_cb("on_track_status", key, "error")
+        self._safe_cb("on_track_error", key, err)
+        self._safe_cb("on_batch_snapshot", self._aggregator.snapshot())
+        self._emit_job_count()
+        logger.error(
+            "[Orchestrator] Unhandled stage failure: %s category=%s",
+            key,
+            err.message_key or "unknown",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+    def _download_one_locked(
+        self,
+        key: str,
+        req: DownloadRequest,
+        cancel_ev: threading.Event,
+        *,
+        conservative_youtube: bool,
+    ) -> None:
         """The actual per-job download logic, run either directly (non-YouTube
-        or fast mode) or while holding ``self._youtube_gate`` (conservative
-        YouTube jobs — see _download_one).
+        or fast mode) or while holding the process-wide conservative slot.
 
         Any Spotify two-stage ``url_resolver`` has already run in _download_one
         (before the gate), so ``req.url`` is final here.
@@ -1892,6 +2095,7 @@ class DownloadOrchestrator:
                 return
             with self._progress_lock:
                 self._completed += 1
+            self._recovery.note_successful_track()
             self._aggregator.complete(
                 key,
                 final_bytes=(
@@ -1921,7 +2125,10 @@ class DownloadOrchestrator:
             # leaking a workspace the batch-level cleanup would never reach.
             self._cleanup_job_workspace(req)
 
-        def on_error(p: DownloadProgress) -> None:
+        def on_error(
+            p: DownloadProgress,
+            classified_error: Optional[ErrorInfo] = None,
+        ) -> None:
             # Failure is terminal too — a job a pause already claimed keeps
             # its resumable snapshot and its "paused" card instead of being
             # flipped to "error" (the resume retries it).
@@ -1930,7 +2137,7 @@ class DownloadOrchestrator:
             with self._progress_lock:
                 self._failed += 1
             self._aggregator.fail(key)
-            err = classify_error(
+            err = classified_error or classify_error(
                 Exception(p.error_message or "Unknown download error"),
                 cookies_file=req.cookies_file or "",
                 cookies_browser=req.cookies_browser or "",
@@ -1947,7 +2154,11 @@ class DownloadOrchestrator:
                     key,
                 )
             else:
-                logger.warning("[Orchestrator] Track error: %s — %s", key, p.error_message)
+                logger.warning(
+                    "[Orchestrator] Track failed: %s category=%s",
+                    key,
+                    err.message_key or "unknown",
+                )
 
         req.on_progress = on_progress
         req.on_finished = on_finished
@@ -1977,10 +2188,63 @@ class DownloadOrchestrator:
         def _capture_error(p: DownloadProgress) -> None:
             _err.append(p.error_message or "Unknown download error")
 
-        def _attempt() -> None:
+        cancelled = lambda: (
+            cancel_ev.is_set()
+            or self._engine._cancel_event.is_set()  # noqa: SLF001
+        )
+        permit_box = [None]
+        rate_recovery_active = [False]
+
+        def _report_rate_wait(remaining: float) -> None:
+            rate_recovery_active[0] = remaining > 0
+            self._on_rate_limit_wait(key, remaining)
+
+        def _clear_settled_rate_wait() -> None:
+            if (
+                rate_recovery_active[0]
+                and not self._recovery.rate_incident_active()
+            ):
+                _report_rate_wait(0.0)
+
+        def _acquire_attempt_permit() -> None:
+            while True:
+                permit = self._recovery.wait_to_start(
+                    key,
+                    cancelled,
+                    on_rate_wait=_report_rate_wait,
+                )
+                if permit is None:
+                    raise RuntimeError("Cancelled")
+                # The same-track canary starts as soon as the advertised wait
+                # expires. Every ordinary attempt (initial, retry, or a peer
+                # released by the canary/auth repair) reserves a fresh actual-
+                # start cadence slot.
+                if (
+                    not permit.canary
+                    and not self._wait_for_pipeline_stagger(
+                        key, cancel_ev, conservative_youtube,
+                    )
+                ):
+                    self._recovery.abandon_attempt(permit, key)
+                    raise RuntimeError("Cancelled")
+                if self._recovery.is_start_permit_valid(permit, key):
+                    permit_box[0] = permit
+                    self._enter_phase(key, TrackPhase.STARTING)
+                    return
+                self._recovery.abandon_attempt(permit, key)
+
+        def _complete_attempt_permit() -> None:
+            permit = permit_box[0]
+            if permit is not None:
+                self._recovery.complete_attempt(permit)
+                permit_box[0] = None
+
+        def _attempt_body() -> None:
             _err.clear()
             req.on_error = _capture_error
             self._engine.download(req)
+            if _err and is_explicit_rate_limit(_err[0]):
+                raise RuntimeError(_err[0])
             if (
                 _err
                 and req.spotify_match_identity
@@ -1988,6 +2252,9 @@ class DownloadOrchestrator:
             ):
                 from core.match_errors import is_media_unavailable_error
                 if is_media_unavailable_error(_err[0]):
+                    # A non-rate response from the post-cooldown canary opens
+                    # the gate before the separate rematch request begins.
+                    _complete_attempt_permit()
                     stale_match_refreshed[0] = True
                     old_url = req.url
                     from core.scraper import (
@@ -1998,9 +2265,11 @@ class DownloadOrchestrator:
                     replacement = resolve_track_to_youtube(
                         req.spotify_match_identity,
                         cookies_file=req.cookies_file,
-                        cancel_check=cancel_ev.is_set,
+                        cancel_check=cancelled,
                         force_refresh=True,
                         exclude_urls={old_url},
+                        rate_wait_callback=_report_rate_wait,
+                        recovery_coordinator=self._recovery,
                     )
                     if replacement:
                         self._aggregator.mark_resolution_source(key, "live")
@@ -2009,14 +2278,62 @@ class DownloadOrchestrator:
                             "target for %s; retrying the proved recording", key,
                         )
                         req.url = replacement
-                        if self._ensure_distinct_spotify_target(key, req, cancel_ev):
+                        if self._ensure_distinct_spotify_target(
+                            key,
+                            req,
+                            cancel_ev,
+                            rate_wait_callback=_report_rate_wait,
+                        ):
                             return
+                        _acquire_attempt_permit()
                         _err.clear()
                         self._engine.download(req)
+                        if _err and is_explicit_rate_limit(_err[0]):
+                            raise RuntimeError(_err[0])
             if _err:
                 raise RuntimeError(_err[0])
 
-        final_error = retry_download(_attempt, cancel_event=cancel_ev, job_key=key)
+        def _attempt() -> None:
+            _acquire_attempt_permit()
+            try:
+                _attempt_body()
+            except BaseException as exc:
+                permit = permit_box[0]
+                if permit is not None:
+                    if is_explicit_rate_limit(str(exc)):
+                        delay, first_notice = self._recovery.note_rate_limit(
+                            permit, key, str(exc),
+                        )
+                        permit_box[0] = None
+                        if first_notice:
+                            logger.warning(
+                                "[YouTube rate limit] Pausing all requests for %.0fs; "
+                                "same-track canary=%s",
+                                delay, key,
+                            )
+                    elif cancelled():
+                        self._recovery.abandon_attempt(permit, key)
+                        permit_box[0] = None
+                    else:
+                        # A local failure must not park unrelated work.  A
+                        # systemic error is counted after retry exhaustion and
+                        # closes admission only at its configured threshold.
+                        _complete_attempt_permit()
+                raise
+            else:
+                permit = permit_box[0]
+                if permit is not None and cancelled():
+                    self._recovery.abandon_attempt(permit, key)
+                    permit_box[0] = None
+                else:
+                    _complete_attempt_permit()
+                self._recovery.release_failure(key)
+                _clear_settled_rate_wait()
+
+        while True:
+            final_error = retry_download(
+                _attempt, cancel_event=cancel_ev, job_key=key,
+            )
 
         # A job cancelled once it was already running needs exactly the
         # terminal bookkeeping the up-front check in _download_one does.
@@ -2032,20 +2349,41 @@ class DownloadOrchestrator:
         # on_finished, no aggregator transition. The card stayed on
         # "downloading" forever and the job stayed non-terminal, so the
         # batch could never account for it.
-        if (
-            final_error == "Cancelled"
-            or cancel_ev.is_set()
-            or self._engine._cancel_event.is_set()  # noqa: SLF001
-        ):
-            self._mark_cancelled(key)
-            return
+            if (
+                final_error == "Cancelled"
+                or cancel_ev.is_set()
+                or self._engine._cancel_event.is_set()  # noqa: SLF001
+            ):
+                self._recovery.abandon_owner(key)
+                self._recovery.release_failure(key)
+                self._mark_cancelled(key)
+                return
 
-        if final_error:
-            on_error(DownloadProgress(
-                status=DownloadStatus.ERROR,
-                url=req.url,
-                error_message=final_error,
-            ))
+            if final_error is None:
+                _clear_settled_rate_wait()
+                return
+
+            if is_explicit_rate_limit(final_error):
+                # _attempt already closed the shared gate. Keep this track
+                # alive; it receives the sole canary permit after the wait.
+                continue
+
+            err = classify_error(
+                Exception(final_error),
+                cookies_file=req.cookies_file or "",
+                cookies_browser=req.cookies_browser or "",
+            )
+            self._note_failure_policy(err)
+            _clear_settled_rate_wait()
+            on_error(
+                DownloadProgress(
+                    status=DownloadStatus.ERROR,
+                    url=req.url,
+                    error_message=final_error,
+                ),
+                classified_error=err,
+            )
+            return
 
     # ── History persistence ───────────────────────────────────────────────────
 

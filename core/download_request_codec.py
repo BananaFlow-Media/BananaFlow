@@ -34,7 +34,8 @@ _PLAIN_FIELDS = (
     "playlist_start", "playlist_end",
     "cookies_file", "cookies_browser", "proxy_url",
     "forced_title", "forced_artist", "forced_album",
-    "forced_index", "forced_disc", "forced_total", "forced_duration",
+    "forced_index", "filename_index", "filename_include_artist",
+    "forced_disc", "forced_total", "forced_duration",
     "playlist_name", "thumbnail_url",
     "sponsorblock", "sponsorblock_categories",
     "embed_lyrics", "replay_gain", "musicbrainz",
@@ -106,6 +107,10 @@ def request_from_dict(data: dict[str, Any]) -> DownloadRequest:
     for name in _PLAIN_FIELDS:
         if name in data:
             kwargs[name] = data[name]
+    # Requests persisted before filename/tag numbering were separated used
+    # forced_index for both. Preserve their already-chosen destination name.
+    if "filename_index" not in data and "forced_index" in data:
+        kwargs["filename_index"] = data.get("forced_index")
     # url and output_dir are required positionals — default them so a
     # truncated/partial record can never raise on construction (the caller
     # validates usability, e.g. that the workspace still exists).

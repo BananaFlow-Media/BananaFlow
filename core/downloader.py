@@ -6,7 +6,7 @@ Changelog v3
 * SponsorBlock integration: when request.sponsorblock is True, yt-dlp
   removes non-music segments (music_offtopic, sponsor, intro, outro).
 * Playlist subfolder + index prefix: request.playlist_name creates
-  output_dir/<name>/ and forced_index is always zero-padded.
+  output_dir/<name>/ and filename_index is always zero-padded.
 * Pause & Resume: cancel + continuedl flag.  DownloadRequest.resumable
   controls whether yt-dlp picks up the .part file on retry.
 * Post-processing pipeline after FINISHED: lyrics embed, ReplayGain,
@@ -38,6 +38,10 @@ from utils.cookie_validator import check_cookies_valid
 from utils.paths import _set_hidden_attribute, get_app_cookies_path, get_bundled_ffmpeg_dir
 from utils.yt_dlp_opts import build_base_ydl_opts as _build_base_opts, temp_cookies_copy
 from core.media_formats import DEFAULT_AUDIO_FORMAT, DEFAULT_VIDEO_FORMAT
+from core.download_recovery import (
+    YouTubeRateLimited,
+    rate_limit_error_from_messages,
+)
 from core.playlist_parser import SourcePlatform
 from core.quality_presets import (
     AudioQuality,
@@ -50,7 +54,11 @@ from core.warning_classifier import (
     COOKIES_EXPIRED_OR_INVALID,
     classify_warning,
 )
-from core.youtube_reliability import CONSERVATIVE_FRAGMENT_CONCURRENCY, is_youtube_url
+from core.youtube_reliability import (
+    CONSERVATIVE_FRAGMENT_CONCURRENCY,
+    YOUTUBE_REQUEST_SLEEP_SECONDS,
+    is_youtube_target,
+)
 from ui.i18n import t
 
 
@@ -261,7 +269,9 @@ class DownloadRequest:
     forced_title:    Optional[str] = None
     forced_artist:   Optional[str] = None
     forced_album:    Optional[str] = None
-    forced_index:    Optional[int] = None
+    forced_index:    Optional[int] = None    # authoritative embedded track number
+    filename_index:  Optional[int] = None    # optional physical ``NN - `` prefix
+    filename_include_artist: bool = False    # collision-safe ``Artist - Title`` body
     forced_disc:     Optional[int] = None    # 1-based disc number (multi-disc releases)
     forced_total:    Optional[int] = None    # tracks in the release (single-disc only)
     forced_duration: Optional[int] = None    # seconds, for duplicate check
@@ -285,7 +295,7 @@ class DownloadRequest:
     square_thumbnails:      bool = False   # crop embedded art to 1:1 square
     expand_thumbnails:      bool = False   # pad 1:1 art to 16:9 for video
     clean_filename:         bool = False   # use minimal filename (Title only)
-    is_solo:                bool = False   # single track download flag (no folder, no index, no artist name)
+    is_solo:                bool = False   # direct item: no automatic folder or numeric prefix
 
     # YouTube-only conservative reliability mode: "conservative" (default)
     # or "fast" (opt-in). Only affects requests whose url is a YouTube URL
@@ -454,6 +464,22 @@ def _get_friendly_error(raw_err: str) -> str:
     return clean
 
 
+def _combine_failure_evidence(evidence: str, final_error: str) -> str:
+    """Join retained yt-dlp evidence without repeating the final exception."""
+    unique: list[str] = []
+    normalized: set[str] = set()
+    for item in [*(evidence or "").split(" | "), final_error or ""]:
+        text = item.strip()
+        if not text:
+            continue
+        key = re.sub(r"^ERROR:\s*", "", text, flags=re.I).strip().casefold()
+        if key in normalized:
+            continue
+        normalized.add(key)
+        unique.append(text)
+    return " | ".join(unique)
+
+
 def _sanitize_filename(name: str) -> str:
     """Sanitise a string for use as a filename stem on Windows + POSIX.
 
@@ -476,6 +502,28 @@ def _sanitize_filename(name: str) -> str:
     name = re.sub(r'\s+', " ", name)  # Collapse multiple spaces
     name = re.sub(r'[\x00-\x1f]', "", name)
     return name.strip(". ")[:200]
+
+
+def _clean_output_title(name: str) -> str:
+    """Return the canonical on-disk title used by every download path.
+
+    Promotional video labels are presentation metadata rather than track
+    identity. Meaningful version labels (Live, Remix, Acoustic, Edit,
+    Original, Remaster, ...) remain untouched so distinct recordings cannot
+    collapse onto the same destination path.
+    """
+    raw_title = name or "Unknown Title"
+    clean_title = re.sub(
+        r'\s*[\[(](?:official\s+)?(?:music\s+)?'
+        r'(?:video|audio|clip|lyrics?|lyric\s+video|visuali[sz]er|hd|4k)'
+        r'[^)\]]*[)\]]',
+        '', raw_title, flags=re.IGNORECASE,
+    )
+    clean_title = re.sub(
+        r'\s*-\s*(Official|Prod(?:uced)?(?:\s+by)?).*$', '', clean_title,
+        flags=re.IGNORECASE,
+    ).strip()
+    return _sanitize_filename(clean_title or raw_title)
 
 
 def _sanitize_folder_name(name: str) -> str:
@@ -788,7 +836,18 @@ class DownloadEngine:
                 request.resume_phase = "publish"
             else:
                 # If the file wasn't created, yt-dlp failed silently (e.g., ytsearch found nothing)
-                raise Exception("Download completed but output file is missing. (Search may have yielded no results)")
+                candidate_logger = opts.get("logger") if isinstance(opts, dict) else None
+                limited = rate_limit_error_from_messages(
+                    getattr(candidate_logger, "failure_evidence", ""),
+                )
+                if limited is not None:
+                    raise limited
+                if str(url).casefold().startswith("ytsearch"):
+                    from core.match_errors import YouTubeSearchNoResults
+                    raise YouTubeSearchNoResults(
+                        "YouTube search returned 0 items; no output file was expected"
+                    )
+                raise Exception("Download completed but output file is missing")
 
             return self._finalize_download(
                 request, url, final_path, pp_failures, cancel_ev, global_cancel,
@@ -812,12 +871,19 @@ class DownloadEngine:
                 title=request.forced_title or "",
                 error_message=str(exc),
             ), error=True)
+        except YouTubeRateLimited as exc:
+            self._fire(request, DownloadProgress(
+                status=DownloadStatus.ERROR,
+                url=url,
+                title=request.forced_title or "",
+                error_message=str(exc),
+            ), error=True)
         except yt_dlp.utils.DownloadError as exc:
             evidence = ""
             if isinstance(locals().get("opts"), dict):
                 candidate_logger = opts.get("logger")
                 evidence = getattr(candidate_logger, "failure_evidence", "")
-            combined = f"{evidence} | {exc}" if evidence else str(exc)
+            combined = _combine_failure_evidence(evidence, str(exc))
             err_msg = _get_friendly_error(combined)
             self._fire(request, DownloadProgress(
                 status=DownloadStatus.ERROR,
@@ -949,21 +1015,22 @@ class DownloadEngine:
 
         out_dir   = Path(request.workspace_dir or request.output_dir).expanduser().resolve()
         if request.playlist_name:
-            out_dir = out_dir / request.playlist_name
+            out_dir = out_dir / _sanitize_folder_name(request.playlist_name)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Build filename
         title  = request.forced_title or "stream"
-        stem   = title
-        # Sanitize
-        stem = re.sub(r'[\\/*?:"<>|]', "_", stem)
-        if request.forced_index:
+        stem   = _clean_output_title(title)
+        if request.filename_include_artist and request.forced_artist:
+            artist = _sanitize_filename(request.forced_artist)
+            stem = f"{artist} - {stem}"
+        if request.filename_index:
             # "NN - " is the one numbering convention in this app: the yt-dlp
             # output templates build it and core.duplicate_checker.expected_stem
             # looks for it. This path used to omit the separator, so its files
             # sorted alongside everything else but were invisible to the
             # duplicate check.
-            stem = f"{request.forced_index:02d} - {stem}"
+            stem = f"{request.filename_index:02d} - {stem}"
 
         output_path = str(out_dir / f"{stem}.{ext}")
 
@@ -1100,7 +1167,18 @@ class DownloadEngine:
 
                 final_path = request._final_output_path  # noqa: SLF001
                 if final_path and not os.path.exists(final_path):
-                    raise Exception("Download completed but output file is missing. (Search may have yielded no results)")
+                    candidate_logger = opts.get("logger") if isinstance(opts, dict) else None
+                    limited = rate_limit_error_from_messages(
+                        getattr(candidate_logger, "failure_evidence", ""),
+                    )
+                    if limited is not None:
+                        raise limited
+                    if str(page_url).casefold().startswith("ytsearch"):
+                        from core.match_errors import YouTubeSearchNoResults
+                        raise YouTubeSearchNoResults(
+                            "YouTube search returned 0 items; no output file was expected"
+                        )
+                    raise Exception("Download completed but output file is missing")
 
                 # See download()'s matching check: a cancel can arrive after
                 # yt-dlp returns but before publish.
@@ -1125,6 +1203,13 @@ class DownloadEngine:
                     title=request.forced_title or "",
                 ))
             except PublishError as exc:
+                self._fire(request, DownloadProgress(
+                    status=DownloadStatus.ERROR,
+                    url=page_url,
+                    title=request.forced_title or "",
+                    error_message=str(exc),
+                ), error=True)
+            except YouTubeRateLimited as exc:
                 self._fire(request, DownloadProgress(
                     status=DownloadStatus.ERROR,
                     url=page_url,
@@ -1167,9 +1252,12 @@ class DownloadEngine:
             out_dir = out_dir / _sanitize_folder_name(request.playlist_name)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        stem = _sanitize_filename(title)
-        if request.forced_index:
-            stem = f"{request.forced_index:02d} - {stem}"
+        stem = _clean_output_title(title)
+        if request.filename_include_artist and request.forced_artist:
+            artist = _sanitize_filename(request.forced_artist)
+            stem = f"{artist} - {stem}"
+        if request.filename_index:
+            stem = f"{request.filename_index:02d} - {stem}"
 
         output_path = str(out_dir / f"{stem}.{ext}")
         cancel_ev = request.cancel_event or self._cancel_event
@@ -1264,37 +1352,31 @@ class DownloadEngine:
         if use_ydlp_title:
             raw_title = "%(title)s"
 
-        # Comprehensive clean: strip common parenthetical labels and promotional suffixes
-        # WE EXCLUDE 'Remix', 'Edit', 'Acoustic', 'Live' to prevent collisions in EPs
-        clean_title = re.sub(r'\s*[([].*?(Official|Video|Clip|Audio|Prod|By|Remaster|Lyrics|HD|4K|Direct|Studio).*?[)\]]', '', raw_title, flags=re.IGNORECASE)
-        # Strip anything in parens at the end
-        clean_title = re.sub(r'\s*\([^)]*\)\s*$', '', clean_title).strip()
-        # Strip trailing hyphens or dashes followed by common tags
-        clean_title = re.sub(r'\s*-\s*(Club Edit|Official|Prod|Original).*$', '', clean_title, flags=re.IGNORECASE).strip()
-        
-        if not clean_title:
-            clean_title = raw_title
-
-        title = _sanitize_filename(clean_title)
+        title = _clean_output_title(raw_title)
 
         if use_ydlp_title:
             # No forced title — let yt-dlp determine the title
             if req.is_solo:
                 outtmpl = str(out_dir / "%(title)s.%(ext)s")
             elif req.clean_filename:
-                idx_prefix = f"{req.forced_index:02d} - " if (req.forced_index is not None and req.forced_index > 0) else ""
+                idx_prefix = f"{req.filename_index:02d} - " if (req.filename_index is not None and req.filename_index > 0) else ""
                 outtmpl = str(out_dir / f"{idx_prefix}%(title)s.%(ext)s")
             else:
                 outtmpl = str(out_dir / "%(playlist_index)s%(title)s.%(ext)s")
         elif req.is_solo:
-            # Solo download: No artist, no index, just the clean title.
-            outtmpl = str(out_dir / f"{title}.%(ext)s")
+            # Direct songs use Artist - Title when metadata provides an artist,
+            # avoiding collisions between unrelated songs with the same title.
+            if req.filename_include_artist and req.forced_artist:
+                artist = _sanitize_filename(req.forced_artist)
+                outtmpl = str(out_dir / f"{artist} - {title}.%(ext)s")
+            else:
+                outtmpl = str(out_dir / f"{title}.%(ext)s")
         elif req.clean_filename:
             # IMPORTANT: For clean_filename, we ONLY use the title, NO artist.
-            idx_prefix = f"{req.forced_index:02d} - " if (req.forced_index is not None and req.forced_index > 0) else ""
+            idx_prefix = f"{req.filename_index:02d} - " if (req.filename_index is not None and req.filename_index > 0) else ""
             outtmpl = str(out_dir / f"{idx_prefix}{title}.%(ext)s")
         elif req.forced_title or req.forced_artist:
-            idx_prefix = f"{req.forced_index:02d} - " if (req.forced_index is not None and req.forced_index > 0) else ""
+            idx_prefix = f"{req.filename_index:02d} - " if (req.filename_index is not None and req.filename_index > 0) else ""
             artist     = _sanitize_filename(req.forced_artist or "Unknown Artist")
             # In the 'Artist - Title' format, we still use the cleaned title
             outtmpl    = str(out_dir / f"{idx_prefix}{artist} - {title}.%(ext)s")
@@ -1347,16 +1429,18 @@ class DownloadEngine:
         # YouTube-only conservative reliability mode: single-fragment
         # concurrency for this URL. This is the only thing this method
         # controls — cross-job parallelism and the inter-job cooldown are
-        # decided and logged by DownloadOrchestrator (only when a batch
-        # actually has more than one YouTube job to serialize), so this
-        # log line must not claim parallel=/delay= behavior that may not
-        # happen at all for this request.
-        if req.youtube_reliability_mode == "conservative" and is_youtube_url(req.url):
-            opts["concurrent_fragment_downloads"] = CONSERVATIVE_FRAGMENT_CONCURRENCY
-            logger.info(
-                "[yt-dlp][youtube_conservative] fragment_concurrency=%d",
-                CONSERVATIVE_FRAGMENT_CONCURRENCY,
-            )
+        # decided and logged by DownloadOrchestrator's process-wide gate, so
+        # this log line only describes options owned by this method.
+        if is_youtube_target(req.url):
+            opts["sleep_interval_requests"] = YOUTUBE_REQUEST_SLEEP_SECONDS
+            if req.youtube_reliability_mode == "conservative":
+                opts["concurrent_fragment_downloads"] = CONSERVATIVE_FRAGMENT_CONCURRENCY
+                logger.info(
+                    "[yt-dlp][youtube_conservative] fragment_concurrency=%d "
+                    "request_sleep=%.2fs",
+                    CONSERVATIVE_FRAGMENT_CONCURRENCY,
+                    YOUTUBE_REQUEST_SLEEP_SECONDS,
+                )
 
         return opts
 

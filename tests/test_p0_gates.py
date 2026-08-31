@@ -354,6 +354,7 @@ class TestOrchestratorRetryIntegration:
             DownloadEngine, DownloadProgress, DownloadRequest, DownloadStatus
         )
         from core.download_orchestrator import DownloadOrchestrator, OrchestratorCallbacks
+        from core.download_recovery import DownloadRecoveryCoordinator
         from core.retry_policy import RetryPolicy
 
         finished_keys: list[str] = []
@@ -402,6 +403,10 @@ class TestOrchestratorRetryIntegration:
                 engine=engine,
                 callbacks=StubCallbacks(),
                 max_workers=1,
+                recovery_coordinator=DownloadRecoveryCoordinator(
+                    default_rate_limit_wait=0.01,
+                    poll_interval=0.005,
+                ),
             )
             req = DownloadRequest(url="https://youtu.be/abc", output_dir="/tmp")
             orch.run_batch([("track1", req)])

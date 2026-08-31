@@ -31,7 +31,11 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from core.downloader import _sanitize_filename as _sanitize
+from core.downloader import (
+    _clean_output_title,
+    _sanitize_filename as _sanitize,
+    _sanitize_folder_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,7 @@ def expected_stem(
     used by the download controller). When True, it is
     ``"Artist - Title"``.
     """
-    t = _sanitize(title or "Unknown Title")
+    t = _clean_output_title(title or "Unknown Title")
     prefix = (
         f"{index:02d} - "
         if (index is not None and include_index and index > 0)
@@ -101,7 +105,10 @@ def find_duplicate(
     Path of the duplicate file if found, else None.
     """
     base = Path(output_dir).expanduser().resolve()
-    search_dir = base / playlist_name if playlist_name else base
+    search_dir = (
+        base / _sanitize_folder_name(playlist_name)
+        if playlist_name else base
+    )
 
     if not search_dir.exists():
         return None

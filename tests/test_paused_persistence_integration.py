@@ -725,7 +725,7 @@ def test_restore_rebuilds_spotify_resolver_for_pending_job(tmp_path, monkeypatch
 
     monkeypatch.setattr(
         scraper_mod, "resolve_track_to_youtube",
-        lambda td, cookies_file=None, cancel_check=None: "https://youtube.com/watch?v=matched",
+        lambda td, cookies_file=None, cancel_check=None, **_kwargs: "https://youtube.com/watch?v=matched",
     )
     resolved = req.url_resolver(None)
     assert "matched" in resolved

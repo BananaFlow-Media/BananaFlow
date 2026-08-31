@@ -55,6 +55,7 @@ class TrackPhase(Enum):
     QUEUED      = "queued"
     MATCHING    = "matching"      # Spotify two-stage resolve -> a YouTube URL
     WAITING     = "waiting"       # blocked on the conservative YouTube gate
+    RATE_LIMITED = "rate_limited" # explicit shared cooldown; exact time is external
     STARTING    = "starting"      # extract_info, up to the first byte
     DOWNLOADING = "downloading"   # bytes actually moving
     PROCESSING  = "processing"    # ffmpeg, tagging, artwork, publish
