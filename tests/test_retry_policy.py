@@ -115,7 +115,12 @@ class TestRetryDownload:
         def fn():
             calls[0] += 1
             if calls[0] < 3:
-                raise Exception("HTTP Error 429: Too Many Requests")
+                # Ordinary transient failures still use this local bounded
+                # backoff. Explicit YouTube rate limits are deliberately
+                # handed to the process-wide coordinator instead (covered in
+                # test_download_recovery.py), so using 429 here would test the
+                # obsolete pre-coordinator behaviour.
+                raise Exception("503 Service Unavailable")
         policy = RetryPolicy(max_retries=3, base_delay_s=0.01)
         result = retry_download(fn, policy, job_key="test")
         assert result is None  # succeeded on 3rd attempt

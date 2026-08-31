@@ -31,6 +31,7 @@ from core.warning_classifier import (
     RATE_LIMITED_OR_FORBIDDEN,
     classify_warning,
 )
+from core.download_recovery import is_explicit_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,10 @@ def is_retriable(error_message: str) -> bool:
     that is worth retrying.
     """
     # Check permanent patterns first — they take priority
+    # Definite throttling outranks generic wrapper prose such as "Video
+    # unavailable". YouTube's real response contains both phrases.
+    if is_explicit_rate_limit(error_message):
+        return True
     if _has_permanent_logger_evidence(error_message):
         return False
     for pat in _PERMANENT_PATTERNS:
@@ -202,6 +207,16 @@ def retry_download(
             return None  # success
         except Exception as exc:
             last_error = str(exc)
+
+            # A shared coordinator owns explicit YouTube cooldowns. Returning
+            # immediately avoids three ineffective 1/2/4-second retries and
+            # lets it pause every request for the advertised duration.
+            if is_explicit_rate_limit(last_error):
+                logger.info(
+                    "[Retry] %s - explicit rate limit handed to shared cooldown",
+                    job_key,
+                )
+                return last_error
 
             # Refresh a transfer-stage 403 once; a second refusal is final for
             # this track. Generic retries retain their configured budget.

@@ -79,13 +79,16 @@ class ErrorInfo:
         return self.severity == ErrorSeverity.CRITICAL
 
     def stops_batch(self) -> bool:
-        """Whether the same local configuration will fail every peer job.
+        """Whether this category stops admission on its very first failure.
 
-        Transfer failures, video restrictions, rate limits and bare HTTP 403s
-        are track-scoped. Broken browser-cookie access and critical local
-        prerequisites (FFmpeg/output permissions) are batch-wide.
+        Authentication and connectivity are systemic but deliberately require
+        three consecutive failures; only prerequisites that cannot improve by
+        moving to another track stop immediately.
         """
-        return self.message_key == "err_browser_cookie_access" or self.is_fatal()
+        from core.download_recovery import systemic_recovery_policy
+
+        policy = systemic_recovery_policy(self)
+        return bool(policy and policy.threshold <= 1)
 
     def status_line(self) -> str:
         """A one-line summary for a status area. Emoji-free by design: the GUI
@@ -211,6 +214,12 @@ ERROR_TEXTS_EN: dict[str, str] = {
         "BananaFlow searched again but could not find a distinct trustworthy "
         "match, so this track was not downloaded as a duplicate.",
 
+    "err_no_search_results_title": "No matching YouTube result",
+    "err_no_search_results_detail":
+        "The YouTube search completed normally but returned no items, so no "
+        "file was created or lost. You can retry later; if it repeats, review "
+        "the source title and artist spelling.",
+
     "err_geo_restricted_title": "Geo-restricted content",
     "err_geo_restricted_detail":
         "This content is not available in your country.\n\n"
@@ -218,9 +227,11 @@ ERROR_TEXTS_EN: dict[str, str] = {
 
     "err_rate_limited_title": "Rate limited by YouTube",
     "err_rate_limited_detail":
-        "YouTube blocked this request or rate-limited it.\n\n"
-        "Keep Conservative Mode enabled, wait a few minutes, and avoid "
-        "repeated retries — retrying immediately tends to make rate-limiting worse.",
+        "YouTube limited the request rate. BananaFlow has paused new YouTube "
+        "work for the duration advertised by YouTube and will retry the same "
+        "track first. Requests that were already in flight are allowed to "
+        "settle safely; queued work will not start during the cooldown. Avoid "
+        "repeated retries — BananaFlow now handles the retry automatically.",
 
     "err_403_title": "Access denied (403)",
     "err_403_detail":
@@ -310,6 +321,12 @@ ERROR_TEXTS_EN: dict[str, str] = {
 # the link.
 _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
     (
+        re.compile(r"youtube search returned 0 items", re.I),
+        "err_no_search_results",
+        ErrorSeverity.WARNING,
+        None,
+    ),
+    (
         re.compile(r"spotify (?:artist credits|track title|structured data)", re.I),
         "err_spotify_metadata_invalid",
         ErrorSeverity.WARNING,
@@ -355,9 +372,22 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         ErrorSeverity.ERROR,
         JS_RUNTIME_MISSING,
     ),
+    # Definite rate limits must precede account/login matching. YouTube's
+    # actual throttling prose says "Your account has been rate-limited";
+    # matching the bare word "account" first mislabeled it as a cookie issue.
+    (
+        re.compile(r"\b429\b|too many requests|rate[\s_-]*limit|throttl", re.I),
+        "err_rate_limited",
+        ErrorSeverity.ERROR,
+        RATE_LIMITED_OR_FORBIDDEN,
+    ),
     # Age-gated / sign-in required
     (
-        re.compile(r"sign in|age.?gated|account|login", re.I),
+        re.compile(
+            r"sign in|age.?gated|login|"
+            r"(?:youtube |google )?account (?:required|needed)",
+            re.I,
+        ),
         "err_signin_required",
         ErrorSeverity.ERROR,
         ACCOUNT_REQUIRED,
@@ -369,13 +399,6 @@ _YTDLP_PATTERNS: list[tuple[re.Pattern, str, ErrorSeverity, Optional[str]]] = [
         "err_geo_restricted",
         ErrorSeverity.ERROR,
         None,
-    ),
-    # Rate-limited / throttled
-    (
-        re.compile(r"429|too many requests|rate.?limit|throttl", re.I),
-        "err_rate_limited",
-        ErrorSeverity.ERROR,
-        RATE_LIMITED_OR_FORBIDDEN,
     ),
     # HTTP 403
     (
@@ -503,10 +526,18 @@ def classify_error(
     """
     raw_msg = str(exc)
 
-    from core.match_errors import SpotifyTargetCollision
+    from core.match_errors import SpotifyTargetCollision, YouTubeSearchNoResults
     if isinstance(exc, SpotifyTargetCollision):
         return _make_error(
             "err_spotify_target_collision", ErrorSeverity.WARNING, raw_msg,
+        )
+    if (
+        isinstance(exc, YouTubeSearchNoResults)
+        or "youtube search returned 0 items" in raw_msg.casefold()
+    ):
+        return _make_error(
+            "err_no_search_results", ErrorSeverity.WARNING, raw_msg,
+            retriable=True,
         )
 
     # ── yt-dlp DownloadError ──────────────────────────────────────────────────
