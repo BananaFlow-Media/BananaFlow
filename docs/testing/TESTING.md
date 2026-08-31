@@ -73,7 +73,25 @@ The gate validates internal Markdown references, canonical documentation structu
 - Artist-catalog duplicate tests must distinguish an exact repeated release
   occurrence from a recording kept in separate releases. Spotify matching
   tests must verify that distinct source identities cannot silently claim the
-  same concrete YouTube video and that bounded rematching remains deterministic.
+  same concrete YouTube video, that bounded rematching remains deterministic,
+  and that query-variant fallback preserves both artist and title, scores all
+  discovered candidates and stops issuing requests after a decisive match.
+  Album-fallback tests must verify release/artist identity, bounded expansion
+  and reuse of one cached catalog across adjacent tracks. Manual-source tests
+  must prove that only a single YouTube track URL is accepted and that the
+  retry retains the original metadata, numbering and output layout.
+- Filename-numbering tests must cover source/release combinations with the
+  provider's original position and must keep filename prefixes independent
+  from embedded track-number tags. Queue order is never an accepted fallback.
+- Output-layout tests must keep collection identity separate from per-track
+  album/artist tags, cover direct and artist-import folder trees, and exercise
+  title-collision and multi-disc behavior.
+- Download-recovery tests must prove that local errors do not close admission,
+  equivalent failures update one incident, authentication/network work stops
+  exactly on the third consecutive failure, every collected authentication
+  track is resubmitted after repair, and explicit rate limits retain their raw
+  message, safety margin, countdown and same-track canary ordering. Use injected
+  clocks and sub-second waits; never exercise a real provider limit.
 - Filesystem-destructive tests use disposable temporary directories/files only.
 - New Qt work must cover teardown/cancellation ownership when threads/timers/callbacks are involved.
 - New user-facing strings must preserve i18n coverage.

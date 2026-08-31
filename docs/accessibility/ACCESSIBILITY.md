@@ -17,6 +17,16 @@ Accessibility is a product requirement, not a final polish pass.
 - Interactive widgets, including icon-only controls, expose meaningful accessible names and roles.
 - Status is not conveyed by color alone; provide text/icon/state semantics.
 - Progress and errors have textual representations.
+- Equivalent download failures update one non-modal incident dialog instead of
+  repeatedly stealing focus. The affected-track count, whether the remaining
+  queue is continuing or paused, Retry/Skip actions and the complete item list
+  are expressed in text. YouTube rate-limit state includes a textual countdown;
+  the exact technical message remains available in the keyboard-accessible
+  Details section.
+- No-result incidents expose a keyboard-focusable source-choice action. During
+  source repair, a textual banner names the original track and progress through
+  the failed group; every candidate retains its artist and duration text, and
+  the action label changes from Add to Use source without relying on color.
 - Artist-category and duplicate-review dialogs use real checkboxes with readable category, release and position labels. Exact/probable confidence and selection state are expressed in text, not by icon or color alone; category-level and release-level “Only …” actions remain available through keyboard focus.
 
 ## RTL and mixed-direction content

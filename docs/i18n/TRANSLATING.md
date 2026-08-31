@@ -30,6 +30,9 @@ The English and Hebrew full user guides are companions, not independent products
 - settings and defaults that users rely on;
 - current limitations/troubleshooting;
 - Spotify search vs Spotify URL-import behavior;
+- grouped download incidents (one/many affected tracks, queue continuing vs
+  all new work paused, Retry group vs Skip group) and YouTube rate-limit
+  countdown/safety-margin wording;
 - artist-catalog category/release names and duplicate-confidence wording (Albums, Singles & EPs, Compilations, Appears On, exact/probable, category-level and release-level “Only …”);
 - release/update behavior.
 

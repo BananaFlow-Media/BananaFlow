@@ -74,7 +74,24 @@ A higher bitrate cannot restore quality that was already missing from the origin
 
 ## 6. Output folders and duplicates
 
-The default output location is under `Downloads/BananaFlow`, unless you change it in Settings. Collections such as playlists/albums can be organized into subfolders and numbered automatically.
+The default output location is under `Downloads/BananaFlow`, unless you change it in Settings. Collections such as playlists/albums can be organized into subfolders.
+
+Filename prefixes follow the source's original position on both Spotify and YouTube Music; reordering the download queue does not change them:
+
+- a directly downloaded song has no number and uses `Artist - Title` when an artist is known;
+- an album or EP always uses its original track number (`01 -`, `02 -`, ...);
+- a compilation has no filename number and uses `Artist - Title` to avoid title collisions;
+- a playlist uses its original playlist position only when **Playlist Position Prefix** is enabled in Settings;
+- an artist import applies the same rule per item: albums and EPs use release track numbers, compilations and standalone singles/videos/performances do not, and playlists follow the playlist setting.
+
+With collection subfolders enabled, the source collection—not a member track's album tag—controls the folder:
+
+- a direct playlist uses `Playlist/` and a direct album uses `Album/`;
+- an artist import uses `Artist/Albums/Album`, `Artist/Singles & EPs/EP`, `Artist/Compilations/Compilation` or `Artist/Playlists/Playlist`;
+- when provider metadata identifies a multi-disc album, it adds `Disc 1`, `Disc 2`, ... below the release folder so equal track numbers on different discs cannot collide, even when only one disc is selected;
+- disabling collection subfolders keeps every automatic folder out of the path. Disabling the Singles & EPs category keeps EP release folders directly below the artist.
+
+Meaningful version labels such as Live, Acoustic, Remix, Edit, Original and Remaster are retained in filenames. Promotional labels such as “Official Video” are removed.
 
 When BananaFlow finds an existing file, the duplicate policy can skip, warn or overwrite according to your settings and the current workflow. Read the prompt before confirming an overwrite.
 
@@ -128,6 +145,18 @@ If you manually use a `cookies.txt` file, treat it like a password. Never post i
 
 Settings also provides **Delete stored sign-in data** for BananaFlow-owned sign-in state.
 
+### What happens when downloads fail
+
+An ordinary track-specific failure does not stop the queue. The first affected track opens one non-blocking incident dialog; later tracks with the equivalent error update that same dialog and its details list instead of opening duplicate popups. Other tracks keep downloading. **Retry these tracks** resubmits every track collected in the dialog, while **Skip these tracks** settles that group without retrying it.
+
+Authentication, cookie, bot-challenge and connectivity failures are counted as consecutive systemic failures. The same incident is visible from the first failure and updates on the second. Other work continues until the third consecutive failure; at exactly the third failure BananaFlow pauses all new download starts because continuing with the same broken condition would only fail more tracks. A successful track breaks an unpaused streak. After sign-in/cookies are repaired, BananaFlow retries every track collected for that incident—it does not silently skip them.
+
+An explicit YouTube rate limit is different: BananaFlow pauses all new YouTube work immediately. The dialog keeps YouTube's exact message in **Details**, shows a live countdown and adds a small safety margin after the advertised wait. When the timer expires, the track that observed the limit is tried first as a canary; the remaining work is released only after that attempt proves requests can continue.
+
+When the first Spotify-to-YouTube wording has no usable match, BananaFlow automatically tries a bounded set of alternatives: normalized punctuation, title/artist order and album context when available. Every search still includes both the artist and title. Results are combined and scored by title, artist credits, duration and recording version; a clear match stops the extra searches. When song search still misses and album metadata is available, BananaFlow also checks the verified YouTube Music album and scores its track list. If all searches and the final conservative request return zero usable YouTube items, BananaFlow reports **No matching YouTube result**. This means no source was available or safely identifiable at that time and no output file was created; it does not mean a downloaded file disappeared.
+
+The no-result dialog offers **Choose other sources** in addition to retry and skip. It opens YouTube search inside BananaFlow for each stopped track. Compare the original track shown in the banner with each result's title, artist and duration, then choose **Use source**. BananaFlow stages the choices and retries them together through the normal bounded download pool, while keeping the original Spotify title, artist, album, numbering and folder layout. You can edit the search wording or stop choosing; choices already made are retried and the aggregate incident reopens for the remaining tracks. The application never accepts a weak alternative automatically: a source cannot be guaranteed when the exact recording was never uploaded, is private, region-blocked or temporarily hidden by YouTube.
+
 ## 12. YouTube Doctor
 
 If YouTube suddenly stops working, open **YouTube Doctor** in Settings. It checks the local download environment and gives a recommendation without showing your cookie values.
@@ -162,7 +191,7 @@ Run YouTube Doctor and check whether a newer BananaFlow release exists.
 
 ### Rate limit / HTTP 429
 
-Stop creating more requests, leave Conservative Mode enabled and try again after the service has had time to recover. More parallel downloads are not always faster.
+Leave Conservative Mode enabled and let BananaFlow's visible countdown finish. It already stops new YouTube work, waits for the advertised duration plus a safety margin and tests the same track before releasing the queue. Hiding the dialog does not cancel the timer; do not start repeated manual retries.
 
 ### 403 / sign-in required
 

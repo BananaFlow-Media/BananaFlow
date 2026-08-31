@@ -4,6 +4,18 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Changed
+
+- Download failures now use one live incident per equivalent error: local failures let the queue continue, while authentication/cookie and connectivity failures stop new work only after three consecutive affected tracks and retry the whole collected group after repair.
+- Explicit YouTube rate limits now show the exact upstream error and a visible countdown, wait for the advertised duration plus a bounded safety margin, and probe the same track before releasing queued work.
+- Spotify-to-YouTube resolution now expands a genuine miss through a bounded set of artist-and-title query variants, merges and scores their candidates, and normalizes decorative punctuation without forcing an `audio` keyword or falling back unsafely to title-only matching.
+- Spotify matching now checks a verified YouTube Music album catalog after song-search variants miss, and a no-result incident offers an in-app source chooser that retries the existing track while preserving its Spotify metadata, numbering and folder layout.
+
+### Fixed
+
+- Report a zero-item YouTube search as “No matching YouTube result” instead of incorrectly claiming that a completed download's output file disappeared.
+- Prevent repeated download errors from opening nested modal dialogs and overflowing the Qt UI stack.
+
 ## [1.1.1] — 2026-08-21
 
 ### Changed

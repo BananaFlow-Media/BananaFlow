@@ -78,7 +78,11 @@ see "Layering rule" above.
 
 Download + resolution: `downloader.py`, `download_orchestrator.py`
 (thread-pool batch manager + history persistence), `playlist_parser.py`
-(URL classifier + metadata extractor), `hls_downloader.py`,
+(URL classifier + metadata extractor), `filename_numbering.py`
+(provider-neutral filename-prefix and embedded-track-number policy),
+`output_layout.py` (provider-neutral folder hierarchy and collision-safe
+filename-body policy), `download_recovery.py` (process-wide rate-limit canary,
+systemic-failure thresholds and aggregate incident models), `hls_downloader.py`,
 `universal_extractor.py`, `listing_scraper.py`, `retry_policy.py`,
 `youtube_reliability.py` (YouTube-only conservative serialization).
 
