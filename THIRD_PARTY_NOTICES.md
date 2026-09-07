@@ -32,6 +32,10 @@ The current recorded staged input from the 1.0.0 release preparation was:
 
 These are point-in-time release inputs, not promises about future builds.
 
+The reviewed Windows input for the 1.2.0 release is `N-126455-gecc7eb519e`
+from `autobuild-2026-09-07-15-39`; its downloaded archive SHA-256 is
+`95e1817d8717f2b0c34b1c1422f3840cebd5afc533bb5dd1050e093657d42326`.
+
 ### bgutil yt-dlp PO Token Provider stack
 
 | Field | Policy/current pin |
