@@ -8,7 +8,7 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ### Changed
 
-- Updated all direct Python runtime/development dependencies to their current reviewed releases, including `yt-dlp 2026.8.19`, `PySide6 6.11.2`, Playwright 1.62.0 and the PO Token Provider 1.3.2.
+- Updated all direct Python runtime/development dependencies to their current reviewed releases, including `yt-dlp 2026.8.30.232658.dev0`, `PySide6 6.11.2`, Playwright 1.62.0 and the PO Token Provider 1.3.2.
 - Download failures now use one live incident per equivalent error: local failures let the queue continue, while authentication/cookie and connectivity failures stop new work only after three consecutive affected tracks and retry the whole collected group after repair.
 - Explicit YouTube rate limits now show the exact upstream error and a visible countdown, wait for the advertised duration plus a bounded safety margin, and probe the same track before releasing queued work.
 - Spotify-to-YouTube resolution now expands a genuine miss through a bounded set of artist-and-title query variants, merges and scores their candidates, and normalizes decorative punctuation without forcing an `audio` keyword or falling back unsafely to title-only matching.
