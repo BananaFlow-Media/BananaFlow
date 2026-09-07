@@ -86,10 +86,10 @@ _NATIVE_COMPONENTS = [
     },
     {
         "name": "bgutil-ytdlp-pot-provider",
-        "version": "1.3.1",
+        "version": "1.3.2",
         "license": "GPL-3.0-or-later",
         "source": "https://github.com/Brainicism/bgutil-ytdlp-pot-provider",
-        "purl": "pkg:pypi/bgutil-ytdlp-pot-provider@1.3.1",
+        "purl": "pkg:pypi/bgutil-ytdlp-pot-provider@1.3.2",
     },
     {
         "name": "Playwright Chromium (bundled)",

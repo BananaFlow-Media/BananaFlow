@@ -12,8 +12,8 @@ except ModuleNotFoundError:  # Python 3.10 compatibility
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FLOOR = "2026.7.4"
-REVIEWED_PIN = "2026.8.20.234504.dev0"
+FLOOR = "2026.8.19"
+REVIEWED_PIN = "2026.8.19"
 
 
 def _active_requirements() -> list[str]:
@@ -31,12 +31,12 @@ def test_pyproject_uses_safe_upgradeable_source_floor():
     assert not any(re.match(r"^yt-dlp-ejs(?:[<>=!~]|$)", dep) for dep in dependencies)
 
 
-def test_ci_dev_extra_pins_the_reviewed_nightly():
+def test_ci_dev_extra_pins_the_reviewed_release():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert f"yt-dlp[default]=={REVIEWED_PIN}" in data["project"]["optional-dependencies"]["dev"]
 
 
-def test_requirements_pins_the_same_reviewed_nightly_for_release_builds():
+def test_requirements_pins_the_same_reviewed_release_for_release_builds():
     active = _active_requirements()
     assert f"yt-dlp[default]=={REVIEWED_PIN}" in active
     assert not any(re.match(r"^yt-dlp-ejs(?:[<>=!~]|$)", line) for line in active)

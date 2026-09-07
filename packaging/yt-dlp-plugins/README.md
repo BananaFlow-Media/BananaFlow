@@ -4,7 +4,7 @@ This directory is the build-time staging slot for yt-dlp plugins that must
 ship inside the packaged BananaFlow build.
 
 For the public Windows package, `scripts/build_windows.ps1` installs the
-pinned `bgutil-ytdlp-pot-provider==1.3.1` package and then runs
+pinned `bgutil-ytdlp-pot-provider==1.3.2` package and then runs
 `python packaging/stage_pot_provider.py`. That script copies the provider
 plugin source into this folder in yt-dlp's expected plugin layout:
 

@@ -2,7 +2,7 @@
 
 Status: **Current release-compliance inventory**
 
-Version reference: BananaFlow `1.1.1` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
+Version reference: BananaFlow `1.2.0` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
 
 BananaFlow is licensed as GPL-3.0-or-later. This document records third-party packages, staged binaries/components, their license families, source locations and release-handling obligations. It is a best-effort open-source compliance document, not legal advice.
 
@@ -38,7 +38,7 @@ These are point-in-time release inputs, not promises about future builds.
 |---|---|
 | Project | `bgutil-ytdlp-pot-provider` |
 | License | GPL v3 |
-| Current staged pin | `1.3.1` — source of truth for the staging step is `packaging/stage_pot_provider.py`; `pyproject.toml` exposes the matching source/venv optional dependency |
+| Current staged pin | `1.3.2` — source of truth for the staging step is `packaging/stage_pot_provider.py`; `pyproject.toml` exposes the matching source/venv optional dependency |
 | Source | https://github.com/Brainicism/bgutil-ytdlp-pot-provider |
 | Use | yt-dlp PO Token Provider plugin + matching Deno script backend |
 | Release requirement | Preserve GPL notice/source availability for the plugin/backend, stage the reviewed matching source, and verify the packaged provider path with YouTube Doctor |
@@ -79,8 +79,8 @@ Chromium is intentionally a large packaged dependency because browser-backed Spo
 
 The important yt-dlp distinction is intentional:
 
-- project/source compatibility floor: **`yt-dlp[default]>=2026.7.4`**;
-- reviewed reproducible CI/release install: currently **`yt-dlp[default]==2026.8.20.234504.dev0`** in `requirements.txt`/the matching release path.
+- project/source compatibility floor: **`yt-dlp[default]>=2026.8.19`**;
+- reviewed reproducible CI/release install: currently **`yt-dlp[default]==2026.8.19`** in `requirements.txt`/the matching release path.
 
 A newer reviewed exact release pin does not change the minimum compatibility floor, and the floor must not be inferred from an old developer environment.
 

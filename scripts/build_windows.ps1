@@ -291,7 +291,7 @@ if (-not $SkipTests) {
 Write-Host "==> Installing build dependencies" -ForegroundColor Cyan
 & python -m pip install --upgrade pip pyinstaller | Out-Null
 & python -m pip install -r requirements.txt | Out-Null
-& python -m pip install "bgutil-ytdlp-pot-provider==1.3.1" | Out-Null
+& python -m pip install "bgutil-ytdlp-pot-provider==1.3.2" | Out-Null
 
 # Stage the PO Token Provider plugin and Deno script backend so PyInstaller
 # bundles the full official provider path next to the EXE. The public Windows

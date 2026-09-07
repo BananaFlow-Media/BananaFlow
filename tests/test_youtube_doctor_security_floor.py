@@ -12,6 +12,6 @@ def test_doctor_warns_for_last_known_vulnerable_baseline():
     assert check.status.value == "warn"
 
 
-def test_doctor_accepts_first_security_patched_release():
+def test_doctor_warns_for_a_release_below_the_current_reviewed_floor():
     check = check_yt_dlp_version("2026.7.4")
-    assert check.status.value == "pass"
+    assert check.status.value == "warn"

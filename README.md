@@ -48,7 +48,7 @@ Advanced/technical references:
 |---|---|
 | Python | 3.10 or newer |
 | FFmpeg | Recent version on `PATH` for source media operations |
-| yt-dlp | Compatibility floor **≥ 2026.7.4**; reproducible release/test installs use the reviewed exact version from `requirements.txt` / release constraints |
+| yt-dlp | Compatibility floor **≥ 2026.8.19**; reproducible release/test installs use the reviewed exact version from `requirements.txt` / release constraints |
 | Playwright Chromium | Required for source workflows that use browser-backed Spotify/channel/generic features |
 
 Recommended editable development setup:

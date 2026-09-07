@@ -143,7 +143,7 @@ class TestYtDlpVersionCheck:
         assert check.status == DoctorStatus.PASS
 
     def test_newer_version_passes(self):
-        check = check_yt_dlp_version(installed_version="2026.7.4")
+        check = check_yt_dlp_version(installed_version="2026.9.1")
         assert check.status == DoctorStatus.PASS
 
     def test_too_old_version_warns(self):

@@ -3,7 +3,7 @@ tests/test_dependency_versions.py  –  Dependency-version drift guard
 ========================================================================
 pyproject.toml defines BananaFlow's oldest supported/safe yt-dlp source
 version. requirements.txt is the reproducible application/release install and
-may deliberately pin a newer reviewed nightly. YouTube Doctor must never call
+may deliberately pin a newer reviewed exact release. YouTube Doctor must never call
 a known-vulnerable version healthy and must remain compatible with the source
 floor.
 """

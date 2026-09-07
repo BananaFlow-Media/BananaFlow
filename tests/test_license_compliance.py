@@ -243,7 +243,7 @@ def test_packaging_bundles_full_po_provider_backend_inputs():
     build_script = _read("scripts/build_windows.ps1")
     spec = _read("packaging/bananaflow.spec")
 
-    assert 'pip install "bgutil-ytdlp-pot-provider==1.3.1"' in build_script
+    assert 'pip install "bgutil-ytdlp-pot-provider==1.3.2"' in build_script
     assert "Staging PO Token Provider plugin and Deno script backend" in build_script
     assert "PO Token Provider staging failed" in build_script
     assert "_stage_tree(HERE / 'pot-provider-backend', 'pot-provider-backend')" in spec
