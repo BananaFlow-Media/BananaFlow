@@ -44,6 +44,12 @@ The regular CI matrix exercises the source tree on Windows and Ubuntu across the
 5. **Real-network tests** — explicitly separated because third-party sites change and CI egress can be challenged.
 6. **Manual acceptance** — clean-machine packaged smoke, visual QA and destructive-file safety checks on disposable fixtures.
 
+Startup-loading regression tests also verify in fresh interpreter processes that importing UI data types does not eagerly load provider/network stacks, that package-level worker exports remain lazy, and that production navigation preparation materializes Settings and the Tag Editor before handoff. Release acceptance should still measure the exact packaged artifact on a clean machine because antivirus and cold-disk effects are outside source-mode unit tests.
+
+Startup-preflight shutdown tests must cover cooperative cancellation before the Playwright probe, joining the worker before interpreter teardown, and a Playwright 1.62 availability probe that exits without pending asyncio task/future errors. A passing functional preflight is insufficient if process exit emits cleanup diagnostics.
+
+Immediate-close coverage must also verify that the startup update worker honours interruption between app and component checks and never emits results after cancellation; Qt must not destroy a running child `QThread`.
+
 ## Real-network tests
 
 ```bash

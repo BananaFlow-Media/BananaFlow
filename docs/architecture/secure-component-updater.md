@@ -32,6 +32,8 @@ Manifest metadata declares compatible BananaFlow versions/component combinations
 
 Downloaded components install under `components/downloader/bundles/<bundle-id>/site-packages` in BananaFlow's per-user app-data directory. Activation changes only `active.json`, and startup prepends the selected valid overlay before the first `yt_dlp` import. A separately authenticated, cached `control.json` records the channel's disabled/revoked-bundle state; it is refreshed from the official channel at most once per 24 hours after a component update has been approved.
 
+Every activation still recomputes the exact stored tree digest before any overlay code can be imported. To avoid serial per-file antivirus latency on packages containing thousands of small files, bytes are read with a bounded worker pool and fed into the existing SHA-256 calculation in the same deterministic path order. This is a performance implementation detail only: the expected digest, covered names/bytes and fail-closed decision are unchanged.
+
 ### Atomic install and rollback
 
 - download to temporary state;

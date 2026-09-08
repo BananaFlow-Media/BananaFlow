@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -353,17 +354,25 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 def _tree_sha256(root: Path) -> str:
     """Digest extracted bytes and relative names to detect later corruption."""
     digest = hashlib.sha256()
+    paths: list[Path] = []
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if path.is_symlink():
             raise ComponentUpdateError("A prepared component overlay contains a symbolic link.")
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
+        if path.is_file():
+            paths.append(path)
+
+    # A downloader overlay contains thousands of small Python files. Reading
+    # them serially makes Windows real-time protection add its per-file latency
+    # thousands of times. Read a bounded number concurrently, then feed the
+    # bytes to SHA-256 in the exact original path order. The resulting digest
+    # and security decision are byte-for-byte identical to the serial scheme.
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(paths)))) as executor:
+        contents = executor.map(Path.read_bytes, paths)
+        for path, data in zip(paths, contents):
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(4, "big"))
+            digest.update(relative)
+            digest.update(data)
     return digest.hexdigest()
 
 

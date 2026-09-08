@@ -39,11 +39,21 @@ from enum import Enum, auto
 from typing import Callable, Iterator, Optional
 from urllib.parse import urlparse, parse_qs
 
-import yt_dlp
-try:
-    import yt_dlp_ejs  # noqa: F401  – loads QuickJS runtime for YouTube PO-token
-except ImportError:
-    pass
+# URL classification and metadata dataclasses are needed while the first
+# window is built.  Actual extractor code is loaded only when parsing starts.
+yt_dlp = None
+
+
+def _load_yt_dlp():
+    global yt_dlp
+    if yt_dlp is None:
+        import yt_dlp as module
+        try:
+            import yt_dlp_ejs  # noqa: F401
+        except ImportError:
+            pass
+        yt_dlp = module
+    return yt_dlp
 
 from utils.time_format import seconds_to_str as _seconds_to_str
 from utils.logger import SilentLogger as _SilentLogger
@@ -747,6 +757,7 @@ class PlaylistParser:
         on_error: Optional[Callable[[str], None]] = None,
     ) -> ParseResult:
         """Parse via yt-dlp directly with robust error propagation."""
+        _load_yt_dlp()
         result = ParseResult(url=url, kind=kind, platform=platform)
         extract_logger = _SilentLogger()
         ydl_opts = self._build_opts(cookies_file=cookies_file, logger=extract_logger)

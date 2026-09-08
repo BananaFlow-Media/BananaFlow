@@ -67,12 +67,14 @@ see "Layering rule" above.
 
 | File | Role |
 |------|------|
-| `main.py` | GUI entry point. Builds `QApplication`, loads `AppConfig`, activates any bundled downloader components, applies language + theme, shows `AppWindow`, runs a startup preflight, enters the Qt event loop. |
+| `main.py` | GUI entry point. Builds `QApplication`, loads `AppConfig`, applies language, displays the lightweight startup splash, activates bundled downloader paths, builds/shows `AppWindow`, runs a background startup preflight, then enters the Qt event loop. |
 | `cli.py` | Headless CLI (`bananaflow-cli`). Same core engine, no Qt. Adds `--list`, `--version`, `--doctor`. |
 | `config.py` | `AppConfig` — typed, persistent user preferences in `<app-data>/config.json`; atomic writes. |
 | `config_migrate.py` | Forward-only config schema migrations (see `CURRENT_VERSION` there for the current schema). |
 | `error_handler.py` | Classifies raw exceptions into localized `ErrorInfo`; startup `run_preflight()` (FFmpeg / network / output dir / cookies / Playwright). |
 | `version.py` | Single source of truth for version + product/publisher metadata (SemVer core, pre-release suffix, PEP 440 form and the Windows version tuple all derive from here). |
+
+`ui.app_window` keeps initial construction small by representing Settings and the Tag Editor with navigation placeholders. Normal GUI startup prepares both real pages on the GUI thread behind the already-visible splash before exposing the interactive window; the placeholders remain the fallback for embedded/tests and Tag Editor recovery. Provider libraries are imported inside their first worker-backed operation rather than by UI data types at module import time.
 
 ## `core/` — backend (no Qt)
 

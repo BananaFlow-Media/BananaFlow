@@ -4,10 +4,22 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
-## [1.2.0] — 2026-09-07
+## [1.2.0] — 2026-09-08
+
+This release was reissued on 2026-09-08 with rebuilt artifacts from the
+updated `v1.2.0` source tag. The replacement adds the startup and immediate-
+shutdown fixes below; previously published 1.2.0 artifacts did not include
+those fixes.
 
 ### Changed
 
+- Application startup now presents an immediate lightweight loading window,
+  defers expensive imports and component verification until after that first
+  frame, and prepares the Tag Editor and Settings before exposing the main
+  window so navigation is immediately usable.
+- Provider and worker dependencies are imported only when their feature is
+  needed, and verified component-tree hashing uses bounded parallel reads
+  without weakening the authenticated digest check.
 - Updated all direct Python runtime/development dependencies to their current reviewed releases, including `yt-dlp 2026.8.30.232658.dev0`, `PySide6 6.11.2`, Playwright 1.62.0 and the PO Token Provider 1.3.2; refreshed the reviewed Windows FFmpeg input to its currently published verified archive.
 - Download failures now use one live incident per equivalent error: local failures let the queue continue, while authentication/cookie and connectivity failures stop new work only after three consecutive affected tracks and retry the whole collected group after repair.
 - Explicit YouTube rate limits now show the exact upstream error and a visible countdown, wait for the advertised duration plus a bounded safety margin, and probe the same track before releasing queued work.
@@ -18,6 +30,11 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ### Fixed
 
+- Closing immediately after launch now drains startup and update workers cleanly,
+  preventing Playwright `TargetClosedError`, pending `asyncio` tasks and Qt
+  thread-destruction warnings during interpreter shutdown.
+- Suppressed QFluentWidgets' unsolicited Pro advertisement during normal
+  application startup while preserving application warnings and errors.
 - Report a zero-item YouTube search as “No matching YouTube result” instead of incorrectly claiming that a completed download's output file disappeared.
 - Prevent repeated download errors from opening nested modal dialogs and overflowing the Qt UI stack.
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 import socket
-from typing import Optional
+from typing import Callable, Optional
 
 from utils.security import redact_data, redact_text
 
@@ -120,13 +120,18 @@ _PROBE_TARGETS = [
 ]
 
 
-def probe_connectivity(timeout: float = 3.0) -> bool:
+def probe_connectivity(
+    timeout: float = 3.0,
+    cancelled: Callable[[], bool] | None = None,
+) -> bool:
     """
     Return True if at least one probe target is reachable.
     Uses a raw TCP connection (no HTTP), so it works even when
     requests / yt-dlp are not installed.
     """
     for host, port in _PROBE_TARGETS:
+        if cancelled is not None and cancelled():
+            return False
         try:
             sock = socket.create_connection((host, port), timeout=timeout)
             sock.close()
@@ -691,15 +696,8 @@ def check_playwright() -> bool:
     flows do not need Playwright.
     """
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return False
-
-    try:
-        with sync_playwright() as p:
-            exe = p.chromium.executable_path
-            from pathlib import Path
-            return bool(exe) and Path(exe).exists()
+        from utils.playwright_check import is_playwright_available
+        return is_playwright_available()
     except Exception:
         return False
 
@@ -830,7 +828,8 @@ class PreflightResult:
 def run_preflight(
     output_dir: str = "",
     cookies_file: str = "",
-) -> PreflightResult:
+    should_cancel: Callable[[], bool] | None = None,
+) -> PreflightResult | None:
     """
     Run startup checks. Returns a PreflightResult the GUI can inspect.
     Does NOT raise – all failures are captured into the result.
@@ -843,6 +842,9 @@ def run_preflight(
     cookies_file : Optional path to a cookies.txt. When non-empty, the
                    file is validated (existence + minimal Netscape
                    header). Empty string skips the check.
+    should_cancel: Optional cooperative-cancellation callback used by the GUI
+                   startup worker. A cancelled run returns ``None`` and never
+                   starts a new Playwright driver connection.
     """
     warnings: list[PreflightWarning] = []
     details: list[str] = []
@@ -861,7 +863,13 @@ def run_preflight(
     if not ffmpeg_ok:
         warnings.append(PreflightWarning("preflight_ffmpeg_missing"))
 
-    network_ok = probe_connectivity()
+    network_ok = (
+        probe_connectivity(cancelled=should_cancel)
+        if should_cancel is not None
+        else probe_connectivity()
+    )
+    if should_cancel is not None and should_cancel():
+        return None
     details.append(f"Network         : {'OK' if network_ok else 'OFFLINE'}")
     if not network_ok:
         warnings.append(PreflightWarning("preflight_no_internet"))
@@ -890,6 +898,8 @@ def run_preflight(
     else:
         details.append("Cookies file    : not configured (optional)")
 
+    if should_cancel is not None and should_cancel():
+        return None
     playwright_ok = check_playwright()
     details.append(
         f"Playwright      : {'OK' if playwright_ok else 'NOT INSTALLED'} "

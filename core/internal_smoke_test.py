@@ -15,9 +15,8 @@ Contract:
 
 * uses the real production entry point and the real ``AppWindow`` navigation
   -- no shadow/test-only widgets;
-* makes no network request (``check_updates`` is forced off before the
-  window is built, and the event loop is pumped for less than the 300 ms
-  delay before ``AppWindow`` would otherwise start its background workers);
+* makes no network request (``check_updates`` is forced off and the production
+  window suppresses background workers while internal-smoke mode is active);
 * never modifies media files;
 * never writes into the installation directory -- all user data is wherever
   ``AppConfig``/``utils.paths.get_app_data_dir`` resolves to, which the
@@ -96,16 +95,20 @@ def run_tag_editor_smoke_test() -> int:
         window = AppWindow(config=cfg, services=svc)
         _step(steps, "app_window_constructed", True)
 
+        window.show()
+        metadata_page = window._metadata_page
+        window.switchTo(metadata_page)
+        # Use the same one-shot materialization method scheduled by the real
+        # navigation signal. Calling it synchronously keeps the smoke fully
+        # deterministic while still exercising the production lazy path.
+        panel = window._ensure_metadata_panel()
+
         from ui.panels.metadata_editor.panel import MetadataEditorPanel
-        panel = getattr(window, "_metadata_panel", None)
         _step(steps, "tag_editor_panel_constructed",
               isinstance(panel, MetadataEditorPanel),
               type(panel).__name__ if panel is not None else "missing")
-
-        window.show()
-        window.switchTo(panel)
         _step(steps, "tag_editor_navigation",
-              window.stackedWidget.currentWidget() is panel)
+              window.stackedWidget.currentWidget() is metadata_page)
 
         # The draft store must resolve inside the app-data dir the caller gave
         # us, not the launching user's home. Before F-13 this was false, and a

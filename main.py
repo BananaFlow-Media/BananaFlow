@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import sys
 import os
+import time
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 # On Windows, the Playwright browser is bundled inside the EXE folder.
@@ -53,25 +56,89 @@ _install_crash_reporting()
 
 logger = logging.getLogger(__name__)
 
-# Select a previously verified per-user downloader overlay before any project
-# path can import yt_dlp. This performs no network or installation work.
-try:
-    from core.component_overlay import (
-        activate_component_overlay,
-        should_activate_component_overlay,
+
+def _load_qfluentwidgets_without_console_ad() -> None:
+    """Import the UI library without its unconditional Pro advertisement."""
+    with redirect_stdout(StringIO()):
+        import qfluentwidgets  # noqa: F401
+
+
+def _create_startup_splash(app, product_name: str, status: str):
+    """Show a lightweight first frame before importing the full UI stack."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
+    from PySide6.QtWidgets import QSplashScreen
+
+    pixmap = QPixmap(520, 270)
+    painter = QPainter(pixmap)
+    gradient = QLinearGradient(0, 0, pixmap.width(), pixmap.height())
+    gradient.setColorAt(0.0, QColor("#161923"))
+    gradient.setColorAt(1.0, QColor("#24203a"))
+    painter.fillRect(pixmap.rect(), gradient)
+
+    title_font = QFont(app.font())
+    title_font.setPointSize(30)
+    title_font.setBold(True)
+    painter.setFont(title_font)
+    painter.setPen(QColor("#f6c945"))
+    painter.drawText(
+        pixmap.rect().adjusted(24, 20, -24, -54),
+        Qt.AlignmentFlag.AlignCenter,
+        product_name,
     )
-    from utils.paths import is_frozen as _is_frozen
-    _component_overlay = (
-        activate_component_overlay()
-        if should_activate_component_overlay(argv=sys.argv, frozen=_is_frozen())
-        else None
+    painter.end()
+
+    splash = QSplashScreen(
+        pixmap,
+        Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
     )
-except Exception:
-    _component_overlay = None
-    logger.warning("Component-overlay activation failed (using bundled components)", exc_info=True)
+    splash.setAccessibleName(product_name)
+    splash.setAccessibleDescription(status)
+    splash.showMessage(
+        status,
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#f2f2f2"),
+    )
+    splash.show()
+    app.processEvents()
+    return splash
+
+
+def _set_startup_status(app, splash, status: str) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+
+    splash.setAccessibleDescription(status)
+    splash.showMessage(
+        status,
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#f2f2f2"),
+    )
+    app.processEvents()
+
+def _activate_selected_component_overlay():
+    """Select a verified downloader overlay after first-frame feedback."""
+    try:
+        from core.component_overlay import (
+            activate_component_overlay,
+            should_activate_component_overlay,
+        )
+        from utils.paths import is_frozen as _is_frozen
+        return (
+            activate_component_overlay()
+            if should_activate_component_overlay(argv=sys.argv, frozen=_is_frozen())
+            else None
+        )
+    except Exception:
+        logger.warning(
+            "Component-overlay activation failed (using bundled components)",
+            exc_info=True,
+        )
+        return None
 
 
 def main() -> int:
+    startup_started = time.perf_counter()
     logger.info("Starting BananaFlow (debug=%s)", _debug_mode)
 
     # 1. High-DPI policy must be set before QApplication is constructed
@@ -102,7 +169,19 @@ def main() -> int:
 
     # 4. Now that QApplication is alive, safely import backend & UI singletons
     from config import AppConfig
+    cfg = AppConfig()
+    from ui.i18n import apply_language, t
+    apply_language(app, cfg.language)
+    splash = _create_startup_splash(
+        app, PRODUCT_NAME, t("startup_loading_interface"),
+    )
+    splash_shown = time.perf_counter()
+    logger.info("Startup splash shown after %.2fs", splash_shown - startup_started)
+
+    _set_startup_status(app, splash, t("startup_loading_components"))
+    _activate_selected_component_overlay()
     from core.services import ServiceContainer
+    _load_qfluentwidgets_without_console_ad()
     from ui.app_window import AppWindow
 
     # Activate any downloader components bundled with this build (PO Token
@@ -119,22 +198,29 @@ def main() -> int:
     except Exception:
         logger.warning("Bundled-component activation failed (non-fatal)", exc_info=True)
 
-    cfg = AppConfig()
     logger.info("Config loaded from %s", cfg._path)
 
     # 5. Service container — owns all shared backend singletons
     svc = ServiceContainer.create_default(cfg)
 
-    # Set UI language and layout direction (single entry point).
-    from ui.i18n import apply_language
-    apply_language(app, cfg.language)
-
     # 6. Main window — receives services via DI and applies the theme before show.
     try:
+        _set_startup_status(app, splash, t("startup_opening_workspace"))
         window = AppWindow(config=cfg, services=svc)
+        # Prepare expensive navigation pages while the lightweight splash is
+        # already visible. Once the interactive window is handed to the user,
+        # switching pages cannot introduce a surprise main-thread stall.
+        window.prepare_navigation_pages()
         window.show()
-        logger.info("Main window shown")
+        splash.finish(window)
+        window_shown = time.perf_counter()
+        logger.info(
+            "Main window shown after %.2fs (%.2fs after splash)",
+            window_shown - startup_started,
+            window_shown - splash_shown,
+        )
     except Exception:
+        splash.close()
         logger.critical("Failed to create main window", exc_info=True)
         svc.close()
         return 1
@@ -171,6 +257,7 @@ def main() -> int:
         except Exception:
             logger.warning("[Preflight] Could not report result", exc_info=True)
 
+    preflight_worker = None
     try:
         from ui.workers.preflight_worker import PreflightWorker
         preflight_worker = PreflightWorker(
@@ -186,8 +273,17 @@ def main() -> int:
     # 9. Event loop
     exit_code = app.exec()
 
-    # 9. Cleanup (AppWindow.closeEvent handles most of this,
-    #    but svc.close() is a safety net for abnormal exits)
+    # 9. Cleanup. Playwright owns an asyncio connection inside the preflight
+    #    thread. Never let interpreter teardown destroy that connection while
+    #    its cancellation task is still pending: request cooperative stop and
+    #    join the short-lived worker before returning from main.
+    if preflight_worker is not None and preflight_worker.isRunning():
+        logger.info("Waiting for startup preflight to stop cleanly")
+        preflight_worker.requestInterruption()
+        preflight_worker.wait()
+
+    # AppWindow.closeEvent handles most cleanup; svc.close() is a safety net
+    # for abnormal exits.
     svc.close()
     logger.info("Application exiting with code %d", exit_code)
     return exit_code
@@ -200,6 +296,10 @@ def _run_internal_smoke_test(argv: list[str]) -> int:
     executable can reach the Tag Editor through the real production
     navigation path. See core/internal_smoke_test.py for the full contract.
     """
+    # Preserve production's selected downloader path for packaged smoke tests.
+    # The component-healthcheck mode is routed separately and must never run
+    # normal activation against its private staging directory.
+    _activate_selected_component_overlay()
     index = argv.index("--internal-smoke-test")
     target = argv[index + 1] if index + 1 < len(argv) else ""
     if target == "tag-editor":

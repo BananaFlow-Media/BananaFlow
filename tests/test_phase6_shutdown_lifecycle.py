@@ -54,9 +54,13 @@ class _WindowHarness:
         self._metadata_ctrl = controller
         self._metadata_shutdown_wired = False
         self.close_count = 0
+        self.hide_count = 0
 
     def close(self):
         self.close_count += 1
+
+    def hide(self):
+        self.hide_count += 1
 
     def _on_metadata_shutdown_timeout(self):
         pass
@@ -160,6 +164,62 @@ def test_appwindow_idle_close_remains_immediate(monkeypatch):
         assert event.accepted == 1 and event.ignored == 0
     finally:
         controller.deleteLater()
+
+
+def test_appwindow_immediate_close_drains_update_worker_before_quit(monkeypatch):
+    _app()
+    controller = MetadataController()
+    harness = _WindowHarness(controller)
+    harness._save_state = lambda: None
+    harness._save_queue_state = lambda: None
+    harness._clipboard_worker = None
+    harness._download_ctrl = SimpleNamespace(_dl_worker=None)
+    harness._fetch_ctrl = SimpleNamespace(_fetch_worker=None, _scraper_worker=None)
+    harness._search_ctrl = SimpleNamespace(_search_worker=None)
+
+    class _UpdateWorker(QObject):
+        finished = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.running = True
+            self.interruptions = 0
+
+        def isRunning(self):
+            return self.running
+
+        def requestInterruption(self):
+            self.interruptions += 1
+
+        def complete(self):
+            self.running = False
+            self.finished.emit()
+
+    worker = _UpdateWorker()
+    harness._update_worker = worker
+    scheduled = []
+    monkeypatch.setattr(
+        "ui.app_window.QTimer.singleShot", lambda _ms, callback: scheduled.append(callback),
+    )
+    monkeypatch.setitem(sys.modules, "keyboard", SimpleNamespace(unhook_all=lambda: None))
+    first = _CloseEvent()
+    try:
+        AppWindow.closeEvent(harness, first)
+        assert first.ignored == 1 and first.accepted == 0
+        assert harness.hide_count == 1
+        assert worker.interruptions == 1
+        assert harness._quit_after_deferred_close is True
+
+        worker.complete()
+        assert harness.close_count == 1
+
+        second = _CloseEvent()
+        AppWindow.closeEvent(harness, second)
+        assert second.accepted == 1 and second.ignored == 0
+        assert len(scheduled) == 1
+    finally:
+        controller.deleteLater()
+        worker.deleteLater()
 
 
 def test_appwindow_defers_service_close_until_prefetch_has_joined(monkeypatch):

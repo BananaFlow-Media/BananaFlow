@@ -90,8 +90,8 @@ async def intercept_page(
 
     Sorted largest-first (by size_hint) so callers can pick the best stream.
     """
-    from utils.playwright_check import is_playwright_available
-    if not is_playwright_available():
+    from utils.playwright_check import is_playwright_available_async
+    if not await is_playwright_available_async():
         logger.warning(
             "[universal_extractor] Playwright Chromium not installed — "
             "stream interception is disabled. Run "

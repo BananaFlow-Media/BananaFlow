@@ -36,6 +36,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "en": {
         # ── Navigation ──────────────────────────────────────────────────────────
         "app_name": "BananaFlow",
+        "startup_loading_interface": "Starting BananaFlow…",
+        "startup_loading_components": "Loading application components…",
+        "startup_opening_workspace": "Opening your workspace…",
+        "tag_editor_loading": "Loading Tag Editor…",
+        "settings_loading": "Loading Settings…",
         "queue": "Queue",
         "search": "Search",
         "history": "History",
@@ -1562,6 +1567,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "he": {
         # ── Navigation ──────────────────────────────────────────────────────────
         "app_name": "BananaFlow מנהל הורדות",
+        "startup_loading_interface": "מפעיל את BananaFlow…",
+        "startup_loading_components": "טוען את רכיבי התוכנה…",
+        "startup_opening_workspace": "פותח את סביבת העבודה…",
+        "tag_editor_loading": "טוען את עורך התגיות…",
+        "settings_loading": "טוען את ההגדרות…",
         "queue": "תור",
         "search": "חיפוש",
         "history": "היסטוריה",

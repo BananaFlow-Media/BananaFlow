@@ -28,11 +28,22 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import yt_dlp
-try:
-    import yt_dlp_ejs  # noqa: F401
-except ImportError:
-    pass
+# Importing yt-dlp eagerly pulls in hundreds of extractors and is one of the
+# most expensive cold-start operations in the packaged application.  The
+# engine's request/data types are needed at startup; the extractor is not.
+yt_dlp = None
+
+
+def _load_yt_dlp():
+    global yt_dlp
+    if yt_dlp is None:
+        import yt_dlp as module
+        try:
+            import yt_dlp_ejs  # noqa: F401
+        except ImportError:
+            pass
+        yt_dlp = module
+    return yt_dlp
 
 from utils.cookie_validator import check_cookies_valid
 from utils.paths import _set_hidden_attribute, get_app_cookies_path, get_bundled_ffmpeg_dir
@@ -693,6 +704,8 @@ class DownloadEngine:
             self._download_with_stream_intercept(request)
             return
 
+        _load_yt_dlp()
+
         cancel_ev    = request.cancel_event or self._cancel_event
         global_cancel = self._cancel_event
 
@@ -1122,6 +1135,7 @@ class DownloadEngine:
 
         Falls back to yt-dlp if stream interception fails.
         """
+        _load_yt_dlp()
         page_url = request.url
 
         self._fire(request, DownloadProgress(

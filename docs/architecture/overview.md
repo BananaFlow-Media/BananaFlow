@@ -20,6 +20,18 @@ Utilities + configuration (utils/, config.py)
 
 `core/` and `utils/` must not depend on Qt/PySide6 symbols. The documented `ui.i18n.t()` plain-Python lookup exception does not pull Qt objects into the backend. The CLI skips UI/controllers/workers and drives the same backend behavior directly.
 
+## Startup boundary
+
+The GUI displays a lightweight, localized splash immediately after `QApplication` and configuration/language setup. Heavy provider clients such as yt-dlp, ytmusicapi, HTTP search clients, and optional page widgets must not be imported before that first frame. The main download workspace is constructed first, then Settings and the Tag Editor are prepared on the GUI thread behind the visible splash before the interactive window is shown. Their lightweight navigation placeholders remain a safe fallback for embedded/test construction and recovery. This ordering preserves immediate launch feedback while ensuring first navigation cannot stall on Qt widget construction. Provider-specific clients remain lazy until their worker-backed operation requires them.
+
+The post-show system preflight remains a background `QThread`. Shutdown requests cooperative cancellation, prevents a cancelled probe from opening a new Playwright driver connection, and joins the worker before Python interpreter teardown. Playwright availability uses the async API for both sync callers (through `asyncio.run`) and native async callers; this avoids the Playwright 1.62 sync wrapper leaving its internal `Connection.run` cancellation task pending after an executable-path-only probe on Python 3.12.
+
+The qfluentwidgets import is performed once behind the splash with its import-time standard output redirected in memory. This contains the dependency's unconditional Pro advertisement without muting application logs or later runtime errors.
+
+The startup update-check `QThread` follows the same shutdown ownership rule. An immediate close requests interruption between its app and component HTTP checks, hides the closing window while any current bounded request finishes, and retries `closeEvent` from the worker's `finished` signal. The window therefore never destroys a running child thread.
+
+Lazy provider initialization stays inside the same background worker paths used for the corresponding search, metadata fetch or download. It must not move network or extraction work onto the Qt GUI thread.
+
 ## Threading boundary
 
 Network access, scraping, downloading, conversion, metadata scans and other long operations never run on the GUI thread. Workers communicate back through Qt signals; they do not mutate widgets from worker threads. Shutdown of disk-changing operations must be bounded and event-loop safe.

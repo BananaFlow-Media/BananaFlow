@@ -80,10 +80,15 @@ class UpdateWorker(QThread):
 
     def run(self) -> None:
         results = UpdateCheckResults()
+        if self.isInterruptionRequested():
+            return
         if self._check_app:
             results.app = self._checker.check_detailed(
                 include_prereleases=self._include_prereleases,
             )
+        if self.isInterruptionRequested():
+            return
         if self._check_components:
             results.components = ComponentUpdateChecker().check()
-        self.results_ready.emit(results)
+        if not self.isInterruptionRequested():
+            self.results_ready.emit(results)

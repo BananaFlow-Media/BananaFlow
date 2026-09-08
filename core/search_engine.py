@@ -46,12 +46,27 @@ import threading
 import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-import httpx
-import yt_dlp
-from bs4 import BeautifulSoup
-from ytmusicapi import YTMusic
+if TYPE_CHECKING:
+    from ytmusicapi import YTMusic
+
+# The UI imports this module for SearchResult/ResultKind while constructing its
+# first page. Provider clients are loaded at the first real search instead of
+# making every application launch pay their cold-import cost.
+yt_dlp = None
+
+
+def _load_yt_dlp():
+    global yt_dlp
+    if yt_dlp is None:
+        import yt_dlp as module
+        try:
+            import yt_dlp_ejs  # noqa: F401
+        except ImportError:
+            pass
+        yt_dlp = module
+    return yt_dlp
 
 from core.playlist_parser import SourcePlatform, classify_url, _best_thumbnail
 from utils.logger import SilentLogger as _SilentLogger
@@ -214,6 +229,7 @@ class _YTMusicBackend:
 
     def __init__(self) -> None:
         # Unauthenticated client – works for all public YTM data
+        from ytmusicapi import YTMusic
         self._ytm: YTMusic = YTMusic()
 
     # ── helpers ────────────────────────────────────────────────────────────────
@@ -534,6 +550,7 @@ class _YTDLPBackend:
         on_result:   Optional[Callable[[SearchResult], None]] = None,
     ) -> list[SearchResult]:
         """Plain ytsearch for individual videos."""
+        _load_yt_dlp()
         opts = self._opts(max_results)
         results: list[SearchResult] = []
 
@@ -598,6 +615,7 @@ class _YTDLPBackend:
         flat-playlist extractor parses the resulting playlist cards correctly
         and requires no further ie_key filtering.
         """
+        _load_yt_dlp()
         # sp=EgIQAw%3D%3D is YouTube's search filter token for "Type: Playlist"
         safe_url = (
             "https://www.youtube.com/results?"
@@ -672,6 +690,7 @@ class _YTDLPBackend:
         on_result:   Optional[Callable[[SearchResult], None]] = None,
     ) -> list[SearchResult]:
         """ytsearch for official artist channels."""
+        _load_yt_dlp()
         opts = self._opts(max(10, max_results))
         results: list[SearchResult] = []
 
@@ -898,6 +917,8 @@ class SearchEngine:
         proxy_url : URL of the BananaFlow Spotify proxy API, e.g.
                     "http://localhost:8765".  If None, returns [].
         """
+        import httpx
+
         self.reset()
         if not proxy_url:
             return []
@@ -1074,6 +1095,10 @@ class PageScraper:
         ------
         ScraperError on HTTP or parse failure.
         """
+        import httpx
+        from bs4 import BeautifulSoup
+
+        _load_yt_dlp()
         self.reset()
         found:  list[str] = []
         seen:   set[str]  = set()

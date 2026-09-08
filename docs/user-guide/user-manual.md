@@ -14,6 +14,8 @@ Official website: <https://bananaflow.bananaflow-media.workers.dev/> — downloa
 
 For most users, the easiest path is the official download page. You do **not** need to install Python separately when using the Windows or macOS packaged release.
 
+When BananaFlow starts, a lightweight startup window appears first so Windows never leaves the launch click without visible feedback. While that window is visible, BananaFlow prepares Settings and the Tag Editor before exposing the interactive workspace, so the first navigation to either page does not pause. Provider-specific extraction clients remain deferred until their worker-backed operation needs them.
+
 ## 2. What BananaFlow does
 
 BananaFlow gives you one desktop app for:

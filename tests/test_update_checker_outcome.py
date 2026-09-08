@@ -110,6 +110,35 @@ class TestWorkerFlags:
         assert sig.parameters["check_app"].default is True
         assert sig.parameters["check_components"].default is False
 
+    def test_interruption_between_checks_skips_components_and_result(self, monkeypatch):
+        pytest.importorskip("PySide6")
+        import ui.workers.update_worker as worker_module
+
+        worker = worker_module.UpdateWorker(check_app=True, check_components=True)
+        component_checks = []
+        emitted = []
+
+        def app_check(**_kwargs):
+            worker.requestInterruption()
+            return object()
+
+        class UnexpectedComponentChecker:
+            def check(self):
+                component_checks.append(True)
+                return object()
+
+        worker._checker.check_detailed = app_check
+        monkeypatch.setattr(
+            worker_module, "ComponentUpdateChecker", UnexpectedComponentChecker,
+        )
+        worker.results_ready.connect(emitted.append)
+
+        worker.start()
+        assert worker.wait(5_000)
+
+        assert component_checks == []
+        assert emitted == []
+
 
 class TestReleaseUrlIsNotBlindlyTrusted:
     """A release URL is untrusted input on its way to the Windows shell.

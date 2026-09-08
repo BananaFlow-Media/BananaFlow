@@ -19,14 +19,32 @@ UpdateWorker     – App-release (GitHub) + component (PyPI) update check
 ComponentInstallWorker – User-approved in-place pip upgrade of components
 """
 
-from ui.workers.fetch_worker     import FetchWorker
-from ui.workers.download_worker  import DownloadWorker
-from ui.workers.thumbnail_worker import ThumbnailWorker
-from ui.workers.clipboard_worker import ClipboardWorker
-from ui.workers.search_worker    import SearchWorker
-from ui.workers.scraper_worker   import ScraperWorker
-from ui.workers.update_worker    import UpdateWorker, UpdateCheckResults
-from ui.workers.component_install_worker import ComponentInstallWorker
+from __future__ import annotations
+
+from importlib import import_module
+
+
+_EXPORTS = {
+    "FetchWorker": "ui.workers.fetch_worker",
+    "DownloadWorker": "ui.workers.download_worker",
+    "ThumbnailWorker": "ui.workers.thumbnail_worker",
+    "ClipboardWorker": "ui.workers.clipboard_worker",
+    "SearchWorker": "ui.workers.search_worker",
+    "ScraperWorker": "ui.workers.scraper_worker",
+    "UpdateWorker": "ui.workers.update_worker",
+    "UpdateCheckResults": "ui.workers.update_worker",
+    "ComponentInstallWorker": "ui.workers.component_install_worker",
+}
+
+
+def __getattr__(name: str):
+    """Preserve package-level imports without importing every worker at once."""
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "FetchWorker",

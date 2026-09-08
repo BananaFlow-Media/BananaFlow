@@ -17,6 +17,7 @@ Accessibility is a product requirement, not a final polish pass.
 - Interactive widgets, including icon-only controls, expose meaningful accessible names and roles.
 - Status is not conveyed by color alone; provide text/icon/state semantics.
 - Progress and errors have textual representations.
+- The startup splash and fallback page placeholders expose localized textual status through accessible names/descriptions; startup preparation must not present a silent blank interval.
 - Equivalent download failures update one non-modal incident dialog instead of
   repeatedly stealing focus. The affected-track count, whether the remaining
   queue is continuing or paused, Retry/Skip actions and the complete item list

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
@@ -56,7 +56,8 @@ from ui.controllers.download_controller import DownloadController
 # ── Workers ────────────────────────────────────────────────────────────────────
 from ui.workers.thumbnail_worker import ThumbnailWorker
 from ui.workers.clipboard_worker import ClipboardWorker
-from ui.workers.update_worker    import UpdateCheckResults, UpdateWorker
+if TYPE_CHECKING:
+    from ui.workers.update_worker import UpdateCheckResults
 
 # ── Panels ─────────────────────────────────────────────────────────────────────
 from ui.panels.url_bar              import UrlBar
@@ -65,9 +66,11 @@ from ui.panels.queue_panel          import QueuePanel
 from ui.panels.history_panel        import HistoryPanel
 from ui.panels.options_bar          import OptionsBar
 from ui.panels.status_bar           import StatusBar, StatusState
-from ui.panels.settings_panel       import SettingsPanel
+if TYPE_CHECKING:
+    from ui.panels.settings_panel import SettingsPanel
 from ui.panels.converter_panel      import ConverterPanel
-from ui.panels.metadata_editor_panel import MetadataEditorPanel
+if TYPE_CHECKING:
+    from ui.panels.metadata_editor_panel import MetadataEditorPanel
 
 # ── Tag-editor controller ──────────────────────────────────────────────────────
 from ui.controllers.metadata_controller import MetadataController
@@ -318,6 +321,7 @@ class AppWindow(FluentWindow):
         self._clipboard_worker: Optional[ClipboardWorker] = None
         self._net_monitor:      Optional[OfflineMonitor]  = None
         self._tray:             Optional[QSystemTrayIcon] = None
+        self._update_worker:    Optional["UpdateWorker"]  = None
 
         # ── Build ─────────────────────────────────────────────────────────────
         self._build_panels()
@@ -378,8 +382,28 @@ class AppWindow(FluentWindow):
         self._offline_banner  = OfflineBanner()
         self._dl_bar          = _DownloadBar()
         self._converter_panel  = ConverterPanel()
-        self._metadata_panel   = MetadataEditorPanel(config=self._cfg)
-        self._settings_panel   = SettingsPanel(self._cfg, self._theme)
+        # The Tag Editor owns a very large widget tree. Keep a lightweight
+        # navigation page now and construct the editor only when it is opened
+        # (or when startup recovery genuinely needs to show it).
+        self._metadata_panel: Optional["MetadataEditorPanel"] = None
+        self._metadata_signals_connected = False
+        self._metadata_page = QWidget()
+        self._metadata_page.setObjectName("metadataEditorPage")
+        self._metadata_page_layout = QVBoxLayout(self._metadata_page)
+        self._metadata_page_layout.setContentsMargins(0, 0, 0, 0)
+        self._metadata_loading_label = QLabel(t("tag_editor_loading"))
+        self._metadata_loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._metadata_loading_label.setAccessibleName(t("tag_editor_loading"))
+        self._metadata_page_layout.addWidget(self._metadata_loading_label)
+        self._settings_panel: Optional["SettingsPanel"] = None
+        self._settings_page = QWidget()
+        self._settings_page.setObjectName("settingsPage")
+        self._settings_page_layout = QVBoxLayout(self._settings_page)
+        self._settings_page_layout.setContentsMargins(0, 0, 0, 0)
+        self._settings_loading_label = QLabel(t("settings_loading"))
+        self._settings_loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._settings_loading_label.setAccessibleName(t("settings_loading"))
+        self._settings_page_layout.addWidget(self._settings_loading_label)
 
         # Queue composite wrapper
         queue_wrapper = QWidget()
@@ -505,27 +529,15 @@ class AppWindow(FluentWindow):
             self._converter_panel, CustomIcon("document_arrow_right"), t("converter"),
             position=NavigationItemPosition.TOP,
         )
-        self._metadata_panel.setObjectName("metadataEditorPage")
         self.addSubInterface(
-            self._metadata_panel, FluentIcon.TAG, t("tag_editor"),
+            self._metadata_page, FluentIcon.TAG, t("tag_editor"),
             position=NavigationItemPosition.TOP,
         )
-        self._settings_panel.setObjectName("settingsPage")
-        self._settings_panel.clipboard_monitor_changed.connect(
-            self._on_clipboard_setting_change
-        )
-        self._settings_panel.accessibility_changed.connect(self._apply_accessibility)
-        self._settings_panel.login_fix_requested.connect(
-            lambda: self._run_cookie_wizard_ui(prompt_for_url=True)
-        )
-        self._settings_panel.settings_saved.connect(
-            lambda: self._options_bar.apply_config(self._cfg)
-        )
-        self._settings_panel.settings_saved.connect(self._on_settings_saved)
         self.addSubInterface(
-            self._settings_panel, FluentIcon.SETTING, t("settings"),
+            self._settings_page, FluentIcon.SETTING, t("settings"),
             position=NavigationItemPosition.BOTTOM,
         )
+        self.stackedWidget.currentChanged.connect(self._on_navigation_page_changed)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Signal wiring  (AppWindow is the mediator — all connections live here)
@@ -600,12 +612,12 @@ class AppWindow(FluentWindow):
         self._history_panel.open_folder_requested.connect(self._on_open_folder)
 
         # ── Metadata (Tag Editor) ──────────────────────────────────────────────
-        self._connect_metadata_signals()
+        # The Tag Editor is connected when its deferred widget tree is built.
 
     def _check_tag_apply_recovery(self) -> None:
         """Scan retained disk journals and proposal drafts without writing media."""
         try:
-            self._metadata_ctrl.check_for_recovery()
+            recovery = self._metadata_ctrl.check_for_recovery()
             from core.runtime_mode import is_internal_smoke
             if is_internal_smoke():
                 # The packaged smoke runs with no human present, so the modal
@@ -617,7 +629,16 @@ class AppWindow(FluentWindow):
                 logger.info("[AppWindow] Internal smoke: draft recovery prompt "
                             "suppressed (draft present: %s)", bool(found))
                 return
-            self._metadata_ctrl.check_for_draft()
+            if recovery is not None and self._metadata_panel is None:
+                # The signal was emitted before the deferred panel existed.
+                # Build it only for real recovery work, then deliver the same
+                # read-only summary directly.
+                self._ensure_metadata_panel().on_recovery_available(recovery)
+
+            panel_existed = self._metadata_panel is not None
+            draft = self._metadata_ctrl.check_for_draft()
+            if draft is not None and not panel_existed:
+                self._ensure_metadata_panel().on_draft_available(draft)
         except Exception:
             logger.debug("[AppWindow] Tag apply recovery check failed", exc_info=True)
 
@@ -635,10 +656,75 @@ class AppWindow(FluentWindow):
         except Exception:
             logger.info("[AppWindow] Tag Editor disk op still finishing; app kept open")
 
+    def _on_navigation_page_changed(self, _index: int) -> None:
+        """Materialize expensive pages only after the user selects them."""
+        current = self.stackedWidget.currentWidget()
+        if current is self._metadata_page and self._metadata_panel is None:
+            QTimer.singleShot(0, self._ensure_metadata_panel)
+        elif current is self._settings_page and self._settings_panel is None:
+            QTimer.singleShot(0, self._ensure_settings_panel)
+
+    def _ensure_settings_panel(self) -> "SettingsPanel":
+        """Build and wire Settings on first visit."""
+        if self._settings_panel is not None:
+            return self._settings_panel
+
+        from ui.panels.settings_panel import SettingsPanel
+
+        panel = SettingsPanel(self._cfg, self._theme)
+        self._settings_panel = panel
+        self._settings_page_layout.replaceWidget(self._settings_loading_label, panel)
+        self._settings_loading_label.hide()
+        self._settings_loading_label.deleteLater()
+        panel.clipboard_monitor_changed.connect(self._on_clipboard_setting_change)
+        panel.accessibility_changed.connect(self._apply_accessibility)
+        panel.login_fix_requested.connect(
+            lambda: self._run_cookie_wizard_ui(prompt_for_url=True)
+        )
+        panel.settings_saved.connect(lambda: self._options_bar.apply_config(self._cfg))
+        panel.settings_saved.connect(self._on_settings_saved)
+        apply_touch_support(panel)
+        logger.info("[AppWindow] Deferred Settings initialized")
+        return panel
+
+    def _ensure_metadata_panel(self) -> "MetadataEditorPanel":
+        """Build and wire the Tag Editor once, preserving its safety lifecycle."""
+        if self._metadata_panel is not None:
+            return self._metadata_panel
+
+        from ui.panels.metadata_editor_panel import MetadataEditorPanel
+
+        panel = MetadataEditorPanel(config=self._cfg)
+        self._metadata_panel = panel
+        self._metadata_page_layout.replaceWidget(self._metadata_loading_label, panel)
+        self._metadata_loading_label.hide()
+        self._metadata_loading_label.deleteLater()
+        self._connect_metadata_signals()
+        apply_touch_support(panel)
+        logger.info("[AppWindow] Deferred Tag Editor initialized")
+        return panel
+
+    def prepare_navigation_pages(self) -> None:
+        """Finish primary navigation before exposing the interactive window.
+
+        ``main`` calls this while the startup splash is visible. Keeping the
+        fallback placeholders and on-demand builders remains useful for
+        embedded/test construction and recovery, but a normal packaged launch
+        hands control to the user only after both pages are ready. Qt widgets
+        must be constructed on the GUI thread; a worker thread is not safe.
+        """
+        self._ensure_metadata_panel()
+        self._ensure_settings_panel()
+        logger.info("[AppWindow] Primary navigation pages prepared")
+
     def _connect_metadata_signals(self) -> None:
         """Wire MetadataEditorPanel ↔ MetadataController."""
+        if self._metadata_signals_connected:
+            return
         p  = self._metadata_panel
         c  = self._metadata_ctrl
+        if p is None:
+            return
         # Phase 2: panel and controller consult one workspace state object for
         # edit/visibility/Apply semantics; Qt selection is never Apply scope.
         p.set_workspace_state(c.workspace_state)
@@ -766,12 +852,17 @@ class AppWindow(FluentWindow):
         c.external_changes_updated.connect(p.on_external_changes_updated)
         c.workspace_refresh_applied.connect(p.on_workspace_refresh_applied)
         c.conflict_resolution_finished.connect(p.on_conflict_resolution_finished)
+        self._metadata_signals_connected = True
 
     # ──────────────────────────────────────────────────────────────────────────
     # Background workers startup
     # ──────────────────────────────────────────────────────────────────────────
 
     def _start_background_workers(self) -> None:
+        from core.runtime_mode import is_internal_smoke
+        if is_internal_smoke():
+            logger.info("[AppWindow] Internal smoke: background workers suppressed")
+            return
         self._clipboard_worker = ClipboardWorker(parent=self)
         self._clipboard_worker.url_detected.connect(self._on_clipboard_url)
         if self._cfg.clipboard_monitor:
@@ -779,6 +870,7 @@ class AppWindow(FluentWindow):
         self._url_bar.set_clipboard_monitor_active(self._cfg.clipboard_monitor)
 
         if self._cfg.check_updates:
+            from ui.workers.update_worker import UpdateWorker
             self._update_worker = UpdateWorker(
                 check_app=True, check_components=True, parent=self,
             )
@@ -2595,6 +2687,24 @@ class AppWindow(FluentWindow):
         self._metadata_ctrl.cancel_scan()
         self._metadata_ctrl.cancel_apply()
 
+        # The startup update check can still be inside an HTTP timeout when a
+        # user opens and immediately closes the application. A running QThread
+        # must never be destroyed with its parent. Hide the already-closing
+        # window, request cooperative stop, and finish the same close sequence
+        # when the worker exits instead of blocking the GUI thread.
+        update_worker = getattr(self, "_update_worker", None)
+        if update_worker is not None and update_worker.isRunning():
+            event.ignore()
+            self._quit_after_deferred_close = True
+            self.hide()
+            if not getattr(self, "_update_shutdown_wired", False):
+                self._update_shutdown_wired = True
+                update_worker.requestInterruption()
+                update_worker.finished.connect(self.close)
+            logger.info("[AppWindow] Deferring close while update check stops")
+            return
+        self._update_shutdown_wired = False
+
         # 5. Hotkeys
         try:
             import keyboard
@@ -2610,3 +2720,9 @@ class AppWindow(FluentWindow):
             logger.info("[AppWindow] Services closed — shutdown complete")
 
         event.accept()
+        if getattr(self, "_quit_after_deferred_close", False):
+            # Hiding the last window while a child QThread drains means Qt no
+            # longer emits its normal last-visible-window auto-quit when the
+            # retried close is accepted. Exit only after every cleanup stage
+            # above has completed successfully.
+            QTimer.singleShot(0, QApplication.quit)

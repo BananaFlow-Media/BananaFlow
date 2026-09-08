@@ -33,6 +33,42 @@ def _keys(warnings: list[PreflightWarning]) -> list[str]:
 
 class TestRunPreflightWarningKeys:
 
+    def test_connectivity_probe_stops_between_targets_when_cancelled(self, monkeypatch):
+        import error_handler
+
+        attempts = []
+        cancelled = False
+
+        def fail_first_connection(address, timeout):
+            nonlocal cancelled
+            attempts.append((address, timeout))
+            cancelled = True
+            raise OSError("offline")
+
+        monkeypatch.setattr(error_handler.socket, "create_connection", fail_first_connection)
+        result = error_handler.probe_connectivity(
+            cancelled=lambda: cancelled,
+        )
+        assert result is False
+        assert len(attempts) == 1
+
+    def test_cancelled_preflight_does_not_start_playwright(self, monkeypatch):
+        import error_handler
+
+        monkeypatch.setattr("utils.paths.get_ffmpeg_executable", lambda: None)
+        monkeypatch.setattr("utils.paths.get_bundled_ffmpeg_dir", lambda: None)
+        monkeypatch.setattr(
+            error_handler,
+            "probe_connectivity",
+            lambda timeout=3.0, cancelled=None: False,
+        )
+
+        def unexpected_playwright_probe():
+            raise AssertionError("cancelled preflight started Playwright")
+
+        monkeypatch.setattr(error_handler, "check_playwright", unexpected_playwright_probe)
+        assert run_preflight(should_cancel=lambda: True) is None
+
     def test_all_ok_produces_no_warnings(self, tmp_path, monkeypatch):
         import error_handler
         monkeypatch.setattr(error_handler, "check_ffmpeg", lambda: True)
@@ -220,3 +256,11 @@ class TestMainWiresTranslatedPreflightToTheMessageBox:
         assert source.count("preflight.warning_text()") == 1
         idx = source.index("preflight.warning_text()")
         assert "logger.warning(" in source[max(0, idx - 200):idx]
+
+    def test_main_joins_preflight_worker_before_service_cleanup(self):
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        loop_exit = source.index("exit_code = app.exec()")
+        request_stop = source.index("preflight_worker.requestInterruption()", loop_exit)
+        join_worker = source.index("preflight_worker.wait()", request_stop)
+        service_cleanup = source.index("svc.close()", join_worker)
+        assert loop_exit < request_stop < join_worker < service_cleanup

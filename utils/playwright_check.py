@@ -21,6 +21,7 @@ Zero GUI imports.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -56,24 +57,37 @@ class PlaywrightNotAvailable(RuntimeError):
         super().__init__(self.message_en)
 
 
-def is_playwright_available() -> bool:
+async def is_playwright_available_async() -> bool:
     """Return True iff the playwright package AND a browser are installed.
 
     The package alone is not enough: ``pip install playwright`` does
-    not download Chromium. We need both the Python bindings and the
-    browser binary on disk.
+    not download Chromium. Use Playwright's async lifecycle because the sync
+    wrapper in Playwright 1.62 can leave its internal ``Connection.run`` task
+    pending after an executable-path-only probe on Python 3.12.
     """
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
         return False
     try:
-        with sync_playwright() as p:
+        async with async_playwright() as p:
             exe = p.chromium.executable_path
             return bool(exe) and Path(exe).exists()
     except Exception as exc:
         logger.debug("Playwright probe failed: %s", exc)
         return False
+
+
+def is_playwright_available() -> bool:
+    """Synchronous entry point for non-async callers."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(is_playwright_available_async())
+    raise RuntimeError(
+        "is_playwright_available() cannot run inside an active event loop; "
+        "await is_playwright_available_async() instead"
+    )
 
 
 def require_playwright_or_raise(feature: str) -> None:

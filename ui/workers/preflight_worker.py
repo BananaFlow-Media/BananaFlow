@@ -49,5 +49,7 @@ class PreflightWorker(QThread):
         result = run_preflight(
             output_dir=self._output_dir,
             cookies_file=self._cookies_file,
+            should_cancel=self.isInterruptionRequested,
         )
-        self.completed.emit(result)
+        if result is not None and not self.isInterruptionRequested():
+            self.completed.emit(result)
