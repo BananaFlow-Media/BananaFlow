@@ -251,6 +251,7 @@ IMPACT_RULES = (
         (
             r"^core/(?:update_checker|component_updates|runtime_components|component_overlay)\.py$",
             r"^\.github/workflows/component-channel\.yml$",
+            r"^scripts/check_downloader_freshness\.py$",
         ),
         review_required=(
             "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
