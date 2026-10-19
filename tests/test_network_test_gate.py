@@ -90,13 +90,37 @@ def test_the_weekly_workflow_invokes_the_runner():
     )
 
 
-def test_the_workflow_does_not_block_pull_requests():
-    """YouTube blocks many GitHub Actions egress IPs, so this signal is too
-    noisy to gate merges on — it is advisory, and CONTRIBUTING.md's
-    pre-release check from a real network is the blocking one."""
+def test_downloader_pin_pull_requests_run_the_complete_read_only_suite():
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "pull_request:" not in workflow
-    assert "push:" not in workflow
+    trigger = workflow.split("permissions:", 1)[0]
+    assert "pull_request:" in trigger
+    assert "pull_request_target" not in workflow
+    assert "      - requirements.txt" in trigger
+    assert "      - pyproject.toml" in trigger
+    test_job = workflow.split("  report-scheduled-failure:", 1)[0]
+    assert "contents: read" in test_job
+    assert "issues: write" not in test_job
+    assert "github.event.pull_request.head.sha || github.sha" in test_job
+    assert "persist-credentials: false" in test_job
+    assert "GH_TOKEN" not in test_job
+    assert 'pip install -e ".[dev]"' in test_job
+    assert "python scripts/run_network_tests.py" in test_job
+    assert "set -o pipefail" in test_job
+    assert "continue-on-error" not in test_job
+    assert "|| true" not in test_job
+    assert "Retain network test evidence" in test_job
+
+
+def test_only_scheduled_failure_reporting_has_write_permissions():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    report = workflow.split("  report-scheduled-failure:", 1)[1]
+    assert "github.event_name == 'schedule'" in report
+    assert "needs.network-tests.outputs.network-outcome == 'failure'" in report
+    assert "issues: write" in report
+    assert "GH_REPO: ${{ github.repository }}" in report
+    assert "actions/checkout@" not in report
+    assert "actions/download-artifact@" in report
+    assert "workflow_run" not in workflow
 
 
 def test_contributing_documents_the_pre_release_check():

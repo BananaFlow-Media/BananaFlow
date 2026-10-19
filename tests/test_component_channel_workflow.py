@@ -51,3 +51,11 @@ def test_builder_runs_when_invoked_by_path_outside_the_repository(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert (output / "bananaflow-components.json").is_file()
+
+
+def test_freshness_uses_tested_checker_without_suppressing_errors():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    freshness = text.split("  publish:", 1)[0]
+    assert "python scripts/check_downloader_freshness.py" in freshness
+    assert "continue-on-error" not in freshness
+    assert "|| true" not in freshness

@@ -5,33 +5,40 @@ name: Real-network tests
 # stale-selector bug directly". The test was written, gated behind
 # BANANAFLOW_RUN_NETWORK_TESTS=1, and then never ran — so it has caught nothing.
 #
-# This workflow runs it on a schedule. It is deliberately NOT part of the
-# blocking Tests workflow and never gates a PR: YouTube blocks a good share of
-# GitHub Actions egress IPs, so a failure here is as likely to mean "the runner
-# got a CAPTCHA" as "BananaFlow is broken". What it gives is a weekly signal that
-# something on YouTube's side changed, months before a user reports it.
-#
-# The blocking counterpart is the pre-release check in CONTRIBUTING.md, run
-# from a real network by a human.
+# Scheduled runs monitor third-party drift. Downloader-pin PRs also run the
+# complete opt-in suite against the proposed dependency set, with read-only
+# permissions. A challenged runner is a failure to investigate, not a pass.
+# Normal-network maintainer acceptance remains required before release.
 
 on:
   schedule:
     # Mondays 05:00 UTC, before the week's dependency updates land.
     - cron: "0 5 * * 1"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - requirements.txt
+      - pyproject.toml
+      - .github/workflows/network-tests.yml
+      - scripts/run_network_tests.py
+      - tests/test_channel_tab_discoverer_phase6.py
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   network-tests:
     name: Real-network tab discovery
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      network-outcome: ${{ steps.network.outcome }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
@@ -54,10 +61,33 @@ jobs:
           set -o pipefail
           python scripts/run_network_tests.py 2>&1 | tee network-tests.log
 
+      - name: Retain network test evidence
+        if: always() && steps.network.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: network-test-evidence-${{ github.sha }}
+          path: network-tests.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  report-scheduled-failure:
+    # No PR code executes in a write-enabled job. Only the trusted scheduled
+    # run may update the existing rolling diagnostic issue.
+    if: always() && github.event_name == 'schedule' && needs.network-tests.outputs.network-outcome == 'failure'
+    needs: network-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download this scheduled run's evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: network-test-evidence-${{ github.sha }}
       - name: Report a failure as an issue
-        if: failure() && steps.network.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # One rolling issue, not one per week: reopen and comment on the

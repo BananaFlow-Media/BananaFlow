@@ -56,7 +56,7 @@ Immediate-close coverage must also verify that the startup update worker honours
 python scripts/run_network_tests.py
 ```
 
-These tests are not part of ordinary deterministic runs. Run them before release from a normal network. The scheduled GitHub Actions run is useful evidence but advisory because YouTube and other services may challenge CI IP ranges.
+These tests are not part of ordinary deterministic runs. Run them before release from a normal network. The scheduled GitHub Actions run is useful evidence but advisory because YouTube and other services may challenge CI IP ranges. Downloader-pin pull requests also run the complete opt-in suite against their proposed dependency set in a read-only job and retain logs. A failed or challenged run must be investigated; it is never converted to a passing result. PR/manual runs do not create diagnostic issues; only scheduled failures update the rolling issue in a separate write-enabled job. A green CI run does not replace normal-network maintainer release acceptance.
 
 A new network-gated test file must be registered with the network-test runner so it cannot become invisible coverage.
 
