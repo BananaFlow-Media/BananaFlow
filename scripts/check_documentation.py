@@ -283,7 +283,7 @@ IMPACT_RULES = (
     ),
     ImpactRule(
         "platform/package support",
-        (r"^\.github/workflows/(?:tests|release-[^/]+)\.yml$", r"^packaging/(?:bananaflow|macos)"),
+        (r"^\.github/workflows/(?:tests|network-tests|release-[^/]+)\.yml$", r"^packaging/(?:bananaflow|macos)"),
         review_required=(
             "README.md", "docs/release/RELEASING.md", "SECURITY.md",
             "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
