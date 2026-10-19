@@ -65,7 +65,9 @@ Then explicitly verify:
 
 ### Component pin automation
 
-The daily component-channel workflow compares the exact reviewed `yt-dlp[default]` pin with the newest non-yanked PyPI candidate. A newer candidate intentionally fails that advisory job for maintainer review; it does not create a bot-authored commit, change a pin or publish unreviewed executable code.
+The daily component-channel workflow compares the exact reviewed `yt-dlp[default]` pin with the newest non-yanked PyPI candidate. A newer candidate emits a visible workflow warning and a job-summary review checklist, not a failed build. Network/JSON errors, malformed release metadata and a missing or fully yanked reviewed pin still fail the check. This is a read-only advisory: it does not create a bot-authored commit, change a pin or publish unreviewed executable code. Maintainers must review the warning, synchronize the exact `requirements.txt` and `pyproject.toml` dev pins, and complete the supply-chain validation before merging.
+
+A downloader-only pin change does not require a new BananaFlow application version for users of an overlay-capable release. Older builds without overlay support need a normal application upgrade. A fresh installer with the newer bundled downloader still requires the normal tagged application release process.
 
 After a human-reviewed pin change is merged to `main`:
 

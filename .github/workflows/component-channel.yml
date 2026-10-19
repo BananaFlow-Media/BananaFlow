@@ -12,6 +12,7 @@ on:
       - constraints-release.txt
       - pyproject.toml
       - scripts/build_component_channel.py
+      - scripts/check_downloader_freshness.py
       - core/component_overlay.py
       - .github/workflows/component-channel.yml
     tags:
@@ -32,31 +33,10 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: '3.12'
+      - name: Install version comparison tooling
+        run: python -m pip install packaging==25.0
       - name: Compare the reviewed yt-dlp pin with PyPI
-        shell: bash
-        run: |
-          python - <<'PY'
-          import json, re, urllib.request
-          from pathlib import Path
-
-          text = Path('requirements.txt').read_text(encoding='utf-8')
-          match = re.search(r'^yt-dlp\[default\]==([^\s#]+)', text, re.MULTILINE)
-          if not match:
-              raise SystemExit('requirements.txt has no exact yt-dlp[default] pin')
-          reviewed = match.group(1)
-          with urllib.request.urlopen('https://pypi.org/pypi/yt-dlp/json', timeout=20) as response:
-              data = json.load(response)
-          releases = [
-              version for version, files in data.get('releases', {}).items()
-              if files and not all(item.get('yanked') for item in files)
-          ]
-          numeric = lambda value: tuple(int(part) for part in re.findall(r'\d+', value))
-          latest = max(releases, key=numeric)
-          with Path(__import__('os').environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
-              summary.write(f'## Downloader freshness\n\nReviewed: `{reviewed}`  \nNewest: `{latest}`\n')
-          if numeric(latest) > numeric(reviewed):
-              raise SystemExit(f'New yt-dlp candidate {latest} requires human review; current pin is {reviewed}')
-          PY
+        run: python scripts/check_downloader_freshness.py
 
   publish:
     name: Build, verify and publish the component channel
