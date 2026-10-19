@@ -69,6 +69,8 @@ The daily component-channel workflow compares the exact reviewed `yt-dlp[default
 
 A downloader-only pin change does not require a new BananaFlow application version for users of an overlay-capable release. Older builds without overlay support need a normal application upgrade. A fresh installer with the newer bundled downloader still requires the normal tagged application release process.
 
+Downloader-pin PRs run `scripts/run_network_tests.py` in a read-only GitHub Actions job. Review its exact-commit evidence alongside deterministic CI before merging; investigate any failure rather than suppressing it. This supporting CI evidence does not replace the normal-network maintainer pre-release check above.
+
 After a human-reviewed pin change is merged to `main`:
 
 1. `.github/workflows/component-channel.yml` installs the release dependency set, builds the deterministic `yt-dlp` / `yt-dlp-ejs` overlay, runs focused updater tests, records build provenance and updates the official `component-channel-v1` pre-release assets (bundle first, authenticated manifest last). The same publication job also runs for an application version tag, ensuring the first packaged release that supports overlays has a channel to consume.
