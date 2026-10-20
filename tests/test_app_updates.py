@@ -28,7 +28,13 @@ def _zip(files=None):
             "bananaflow.exe": b"new application",
             "_internal/runtime.dll": b"new runtime",
         }).items():
-            archive.writestr(name, content)
+            # ZipInfo normally normalizes Windows separators / NULs even
+            # before writing. Preserve the requested raw name so hostile
+            # fixtures test the archive bytes, not a sanitized substitute.
+            entry = zipfile.ZipInfo(name)
+            entry.filename = name
+            entry.orig_filename = name
+            archive.writestr(entry, content)
     return stream.getvalue()
 
 
@@ -251,16 +257,42 @@ def test_checker_preserves_assets_for_discovery():
 @pytest.mark.parametrize("name", [
     "../escape", "/absolute", "C:/escape", "nested\\escape", "a/../escape",
     "CON", "aux.txt", "folder/NUL.log", "file:stream", "trailing.", "trailing ",
+    "safe-prefix\x00hidden-suffix",
 ])
 def test_portable_archive_paths_cannot_escape(tmp_path, name):
     archive = tmp_path / "asset.zip"
     archive.write_bytes(_zip({
         "bananaflow.exe": b"new", "_internal/a": b"runtime", name: b"bad",
     }))
+    with zipfile.ZipFile(archive) as raw_archive:
+        assert name in [entry.orig_filename for entry in raw_archive.infolist()]
     destination = tmp_path / "staged"
     destination.mkdir()
     with pytest.raises(helper.AppUpdateError):
         helper.extract_portable(archive, destination)
+    assert list(destination.iterdir()) == []
+
+
+def test_portable_guard_uses_original_name_after_windows_normalization(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    name = "nested\\escape"
+    archive.write_bytes(_zip({
+        "bananaflow.exe": b"new", "_internal/a": b"runtime", name: b"bad",
+    }))
+    destination = tmp_path / "staged"
+    destination.mkdir()
+    # Exercise Windows ZipInfo normalization even on the Linux unit runner.
+    # Context-scoped os separators leave pytest and pathlib unaffected after
+    # this explicit read/validation operation.
+    with monkeypatch.context() as windows_paths:
+        windows_paths.setattr(zipfile.os, "sep", "\\")
+        windows_paths.setattr(zipfile.os, "altsep", "/")
+        with zipfile.ZipFile(archive) as raw_archive:
+            entry = raw_archive.infolist()[-1]
+            assert entry.orig_filename == name
+            assert entry.filename == "nested/escape"
+        with pytest.raises(helper.AppUpdateError, match="unsafe path"):
+            helper.extract_portable(archive, destination)
     assert list(destination.iterdir()) == []
 
 

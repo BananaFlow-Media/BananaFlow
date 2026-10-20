@@ -23,7 +23,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from core.app_update_smoke import MARKER, SENTINELS  # noqa: E402
+from core.app_update_smoke import MARKER, SENTINELS, smoke_qt_platform  # noqa: E402
 
 
 # Reviewed, publicly released baseline, pinned independently of the CI network
@@ -139,7 +139,7 @@ def seed_profile(case: Path) -> tuple[Path, dict]:
     (profile / "tag_backups/keep.bin").write_bytes(b"existing-backup-\x00\xff")
     (profile / "paused_batches.json").write_text('{"fixture":"keep-paused-work"}', encoding="utf-8")
     env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), APPDATA=str(appdata),
-               QT_QPA_PLATFORM="offscreen")
+               QT_QPA_PLATFORM=smoke_qt_platform())
     return profile, env
 
 
@@ -195,7 +195,10 @@ def verify_native_gui_exit(request: dict, env: dict, evidence: Path) -> dict:
         "--app-update-smoke-result", native_request["result"],
     ], env=env, timeout=180)  # check=True requires exit zero, including teardown
     result = json.loads(Path(native_request["result"]).read_text(encoding="utf-8"))
-    if not result.get("ok") or not result.get("gui", {}).get("shutdown_accepted"):
+    if (
+        not result.get("ok") or not result.get("gui", {}).get("shutdown_accepted")
+        or result["gui"].get("qt_platform") != smoke_qt_platform()
+    ):
         raise RuntimeError("The installed replacement GUI did not close safely")
     result["supervised_process_exit_code"] = 0
     write_json(evidence / "replacement-native-exit.json", result)
@@ -363,6 +366,8 @@ def exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) ->
         wait_for_process_exit(result["pid"])
         if result["version"] != versions["new"] or Path(result["executable"]) != target / executable:
             raise RuntimeError("Relaunch used the wrong package, path, or version")
+        if result["gui"].get("qt_platform") != smoke_qt_platform():
+            raise RuntimeError("Relaunch did not use the required real GUI backend")
         if result["pid"] == process.pid or result["profile"] != str(profile):
             raise RuntimeError("The app did not restart into the preserved user profile")
         for key in ("preferences", "sentinels"):

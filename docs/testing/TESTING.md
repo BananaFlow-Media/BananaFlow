@@ -21,7 +21,7 @@ Run a focused file or test while iterating:
 QT_QPA_PLATFORM=offscreen pytest tests/test_example.py -q
 ```
 
-On PowerShell, set the environment variable using PowerShell syntax when needed. GUI tests must run offscreen unless the test is explicitly a manual visual check.
+On PowerShell, set the environment variable using PowerShell syntax when needed. Ordinary widget tests run offscreen. The real full-window updater smoke is a narrow native-platform exception on macOS: its source subprocess and disposable packaged fixture use `QT_QPA_PLATFORM=cocoa`. The macOS frameless-window adapter dereferences Qt window IDs as Cocoa `NSView` objects; offscreen synthetic IDs are not valid native handles and cannot exercise that path safely. This smoke must create `QApplication` before importing `AppWindow`, report the actual Qt platform, open the real window/navigation and pass accepted safe shutdown. A missing native graphical session or a native crash is a failure, not a reason to skip or weaken acceptance. Windows and Linux source smoke continue to use offscreen Qt; manual visual checks remain separate.
 
 ## Supported full gate
 

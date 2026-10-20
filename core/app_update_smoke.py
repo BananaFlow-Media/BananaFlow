@@ -39,6 +39,13 @@ def fixture_request(path: Path) -> dict:
     return request
 
 
+def smoke_qt_platform() -> str:
+    # The real macOS frameless window dereferences its winId as an NSView.
+    # Qt's offscreen plugin cannot provide that native handle. Use the same
+    # Cocoa backend as normal macOS startup, not a mocked/disabled window.
+    return "cocoa" if sys.platform == "darwin" else "offscreen"
+
+
 def configure_smoke_environment(result_path: Path) -> dict:
     """Run before logging, including when LaunchServices discards parent env."""
     request = fixture_request(result_path.parent / "request.json")
@@ -47,7 +54,7 @@ def configure_smoke_environment(result_path: Path) -> dict:
     os.environ["HOME"] = request["home"]
     os.environ["USERPROFILE"] = request["home"]
     os.environ["APPDATA"] = request["appdata"]
-    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    os.environ["QT_QPA_PLATFORM"] = smoke_qt_platform()
     return request
 
 

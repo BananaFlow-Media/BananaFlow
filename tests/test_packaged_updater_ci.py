@@ -47,7 +47,9 @@ def test_smoke_rejects_profile_and_result_escape(tmp_path, key):
         app_update_smoke.fixture_request(path)
 
 
-def test_smoke_restores_launchservices_environment_only_after_validation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform,qt_platform", [("darwin", "cocoa"), ("win32", "offscreen"), ("linux", "offscreen")])
+def test_smoke_restores_launchservices_environment_only_after_validation(tmp_path, monkeypatch, platform, qt_platform):
+    monkeypatch.setattr(app_update_smoke.sys, "platform", platform)
     path, request = marked_request(tmp_path)
     for name in ("HOME", "USERPROFILE", "APPDATA", "QT_QPA_PLATFORM"):
         monkeypatch.setenv(name, "untouched")
@@ -57,7 +59,7 @@ def test_smoke_restores_launchservices_environment_only_after_validation(tmp_pat
     app_update_smoke.configure_smoke_environment(Path(request["result"]))
     assert os.environ["HOME"] == request["home"]
     assert os.environ["APPDATA"] == request["appdata"]
-    assert os.environ["QT_QPA_PLATFORM"] == "offscreen"
+    assert os.environ["QT_QPA_PLATFORM"] == qt_platform
 
 
 def test_build_failure_restores_canonical_version(tmp_path, monkeypatch):
@@ -194,7 +196,7 @@ def test_replacement_gui_native_exit_records_separate_supervised_evidence(tmp_pa
                "target": str(tmp_path / "app"), "executable": "bananaflow.exe"}
     def clean_exit(args, **kwargs):
         assert args[1] == "--app-update-smoke-result"
-        Path(args[2]).write_text(json.dumps({"ok": True, "gui": {"shutdown_accepted": True}}))
+        Path(args[2]).write_text(json.dumps({"ok": True, "gui": {"shutdown_accepted": True, "qt_platform": app_update_smoke.smoke_qt_platform()}}))
         return ""
     monkeypatch.setattr(run_packaged_update_smoke, "run", clean_exit)
     result = run_packaged_update_smoke.verify_native_gui_exit(request, {}, tmp_path)

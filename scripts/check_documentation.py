@@ -124,6 +124,15 @@ class ImpactRule:
 
 IMPACT_RULES = (
     ImpactRule(
+        "conversion/output preservation",
+        (r"^core/converter_service\.py$",),
+        review_required=(
+            "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
+            "docs/testing/TESTING.md",
+        ),
+        allow_no_impact=False,
+    ),
+    ImpactRule(
         "downloader/reliability",
         (
             r"^error_handler\.py$",
@@ -249,13 +258,15 @@ IMPACT_RULES = (
     ImpactRule(
         "updaters/components",
         (
-            r"^core/(?:update_checker|component_updates|runtime_components|component_overlay)\.py$",
+            r"^core/(?:update_checker|component_updates|runtime_components|component_overlay|app_updates|app_update_helper|app_update_smoke)\.py$",
+            r"^scripts/run_packaged_update_smoke\.py$",
             r"^\.github/workflows/component-channel\.yml$",
             r"^scripts/check_downloader_freshness\.py$",
         ),
         review_required=(
             "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
             "SECURITY.md", "PRIVACY.md", "docs/architecture/secure-component-updater.md",
+            "docs/architecture/application-updater.md",
             "docs/security/threat-model.md", "docs/security/supply-chain.md",
             "docs/release/RELEASING.md", "THIRD_PARTY_NOTICES.md", "SOURCE_OFFER.md",
         ),
@@ -283,7 +294,7 @@ IMPACT_RULES = (
     ),
     ImpactRule(
         "platform/package support",
-        (r"^\.github/workflows/(?:tests|network-tests|release-[^/]+)\.yml$", r"^packaging/(?:bananaflow|macos)"),
+        (r"^\.github/workflows/(?:tests|network-tests|packaged-updater|release-[^/]+)\.yml$", r"^packaging/(?:bananaflow|macos)"),
         review_required=(
             "README.md", "docs/release/RELEASING.md", "SECURITY.md",
             "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",

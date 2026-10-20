@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import stat
 import struct
 import tarfile
 import urllib.error
@@ -156,7 +158,16 @@ def test_source_extracts_regular_files_without_privileged_bits(tmp_path):
     archive = _tar(tmp_path / "test.tar", [("ffmpeg-8.1.3/configure", "file")])
     directory = mac.extract_source(archive, tmp_path / "out", {"name": "ffmpeg", "version": "8.1.3"})
     assert (directory / "configure").read_bytes() == b"data"
-    assert (directory / "configure").stat().st_mode & 0o7777 == 0o755
+    mode = (directory / "configure").stat().st_mode
+    assert not mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+    if os.name == "nt":
+        # Windows chmod controls the read-only attribute, not POSIX executable
+        # bits. Still verify preserved content, writable/readable extraction,
+        # and the absence of privileged bits rather than skipping this test.
+        assert mode & stat.S_IREAD
+        assert mode & stat.S_IWRITE
+    else:
+        assert stat.S_IMODE(mode) == 0o755
 
 
 @pytest.mark.parametrize("name,kind", [

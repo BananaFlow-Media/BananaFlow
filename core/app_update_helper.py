@@ -338,10 +338,14 @@ def extract_portable(artifact: Path, destination: Path) -> None:
         if len(entries) > MAX_ARCHIVE_FILES:
             raise AppUpdateError("The application archive contains too many files.")
         for entry in entries:
-            raw = entry.filename
+            # ZipInfo sanitizes filename while reading: Windows backslashes
+            # become slashes and NUL suffixes are truncated on every platform.
+            # Validate the actual archive name before accepting normalization.
+            raw = entry.orig_filename
             relative = PurePosixPath(raw)
             if (
-                not raw or "\\" in raw or "\x00" in raw or relative.is_absolute()
+                not raw or raw != entry.filename
+                or "\\" in raw or "\x00" in raw or relative.is_absolute()
                 or any(p in {"", ".", ".."} for p in raw.rstrip("/").split("/"))
                 or any(":" in p or p.endswith((".", " ")) for p in relative.parts)
                 or any(re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", p) for p in relative.parts)
