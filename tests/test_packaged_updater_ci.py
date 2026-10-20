@@ -38,6 +38,62 @@ def test_smoke_requires_marked_sandbox(tmp_path):
         app_update_smoke.fixture_request(path)
 
 
+def test_old_smoke_records_failure_and_exits_nonzero_without_dialog(tmp_path, monkeypatch):
+    path, _ = marked_request(tmp_path)
+    monkeypatch.setenv("BANANAFLOW_UPDATE_SMOKE_REQUEST", str(path))
+    def unsupported(*args):
+        raise RuntimeError("Packaged update unsupported: missing installer identity")
+    monkeypatch.setattr(app_update_smoke, "_run_update_smoke", unsupported)
+    assert app_update_smoke.run_update_smoke() == 1
+    failure = json.loads((path.parent / "failure.json").read_text())
+    assert failure["ok"] is False
+    assert failure["stage"] == "old-application-handoff"
+    assert "missing installer identity" in failure["error"]
+    assert "RuntimeError" in failure["traceback"]
+
+
+def test_old_smoke_does_not_write_diagnostics_for_unvalidated_request(tmp_path, monkeypatch):
+    path, request = marked_request(tmp_path)
+    (Path(request["root"]) / app_update_smoke.MARKER).unlink()
+    monkeypatch.setenv("BANANAFLOW_UPDATE_SMOKE_REQUEST", str(path))
+    with pytest.raises(ValueError, match="marked disposable"):
+        app_update_smoke.run_update_smoke()
+    assert not (path.parent / "failure.json").exists()
+
+
+def test_relaunch_smoke_records_failure_and_exits_nonzero(tmp_path, monkeypatch):
+    path, request = marked_request(tmp_path)
+    # Keep the environment restoration local to the test.
+    monkeypatch.setattr(app_update_smoke, "configure_smoke_environment", lambda result: request)
+    def failure():
+        raise RuntimeError("replacement startup failure")
+    monkeypatch.setattr(app_update_smoke, "snapshot", failure)
+    assert app_update_smoke.report_relaunch(Path(request["result"])) == 1
+    result = json.loads(Path(request["result"]).read_text())
+    assert result["ok"] is False
+    assert result["error"] == "replacement startup failure"
+
+
+def test_early_handoff_failure_still_collects_fixture_diagnostics(tmp_path, monkeypatch):
+    from argparse import Namespace
+
+    case = tmp_path / "windows-installed"
+    case.mkdir()
+    (case / "failure.json").write_text('{"ok": false, "error": "unsupported"}')
+    (case / "progress.json").write_text('{"phase": "detecting-installation"}')
+    evidence = tmp_path / "evidence"
+    failure = RuntimeError("old process exited 1")
+    def fail_before_handoff(*args):
+        raise failure
+    monkeypatch.setattr(run_packaged_update_smoke, "_exercise", fail_before_handoff)
+    with pytest.raises(RuntimeError) as raised:
+        run_packaged_update_smoke.exercise(
+            tmp_path, "windows-installed", Namespace(evidence_dir=evidence), {})
+    assert raised.value is failure
+    assert json.loads((evidence / "windows-installed/failure.json").read_text())["ok"] is False
+    assert json.loads((evidence / "windows-installed/progress.json").read_text())["phase"] == "detecting-installation"
+
+
 @pytest.mark.parametrize("key", ["home", "appdata", "profile", "result"])
 def test_smoke_rejects_profile_and_result_escape(tmp_path, key):
     path, request = marked_request(tmp_path)

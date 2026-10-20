@@ -45,6 +45,10 @@ not start replacement or relaunch a second interactive application.
 The replacement helper is a separately packaged executable. It runs outside
 the installation being replaced, waits for the old process to exit, rechecks
 the prepared artifact, and uses the supported platform installation path.
+Windows installation detection preserves the exact historical Inno AppId,
+including its literal double closing brace, and requires the matching 64-bit
+uninstall registry entry and installation path. It does not rename the installer
+identity, infer installation from an uninstaller alone, or accept guessed aliases.
 Windows installed and portable packages remain distinct. A portable update
 must not silently become an installed application. macOS updates replace the
 selected application bundle, not an arbitrary user-supplied directory.

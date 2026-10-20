@@ -326,6 +326,21 @@ def published_handoff(request: dict, old_exe: Path, current_dist: Path, env: dic
 
 
 def exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) -> dict:
+    """Collect diagnostics even when old-package preparation/handoff fails."""
+    case = root / kind
+    evidence = args.evidence_dir / kind
+    try:
+        return _exercise(root, kind, args, versions)
+    finally:
+        evidence.mkdir(parents=True, exist_ok=True)
+        for name in ("before.json", "handoff.json", "relaunch.json", "old-gui.json",
+                     "failure.json", "progress.json"):
+            source = case / name
+            if source.is_file():
+                shutil.copy2(source, evidence / name)
+
+
+def _exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) -> dict:
     case = root / kind
     case.mkdir()
     evidence = args.evidence_dir / kind

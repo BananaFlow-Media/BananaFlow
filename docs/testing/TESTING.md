@@ -58,6 +58,8 @@ The packaged updater gate must use real Windows installer/portable and macOS app
 
 On failure, the harness retains its synthetic sandbox until runner teardown: an error status can precede the helper's recovery relaunch, so deleting the tree immediately could interrupt recovery and mask the original failure. It never kills the helper or app. Successful runs still require complete cleanup; failed sandboxes are not uploaded as evidence.
 
+Hidden packaged smoke failures write bounded fixture diagnostics and exit nonzero rather than leaving an unhandled windowed-runtime error dialog. Installation detection, preparation, real GUI restart and helper-handoff progress are collected even when failure occurs before the helper starts. These diagnostics do not waive any lifecycle or timeout gate.
+
 The macOS packaged-updater job and release job share the native Apple Silicon `macos-15` runner; changing this build host must retain explicit arm64 checks.
 
 PR jobs must have no release/channel publication path, and must not bypass platform warnings. A build blocked on staging, signing, OS policy or installation is not a passing update test. Normal-network and representative-machine release checks below and in `docs/release/RELEASING.md` remain necessary for public release.

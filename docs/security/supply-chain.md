@@ -44,6 +44,11 @@ bundle retains unchanged upstream archives plus the exact adjustment recipe.
 The normal libvorbis build and its `lib` self-test remain mandatory, followed
 by FFmpeg architecture, linkage, license and audio-roundtrip gates.
 
+The shared FFmpeg license gate requires the complete GNU Lesser General Public
+License name while allowing upstream's whitespace/line wrapping. Abbreviations,
+partial names and GPL-only/nonfree notices do not satisfy it; enabled GPL or
+nonfree build flags remain independently forbidden.
+
 ### Licenses/source availability
 
 - `THIRD_PARTY_NOTICES.md` — dependency/component inventory and license handling.

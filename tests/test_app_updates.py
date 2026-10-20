@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import nullcontext
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 import zipfile
 
 import httpx
@@ -241,6 +244,69 @@ def test_platform_support_preserves_installed_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(updates, "_windows_install_mode", lambda _: "")
     (target / "unins000.exe").write_bytes(b"unknown installer")
     assert updates.app_update_support().reason == "unknown-installation"
+
+
+def test_windows_registry_identity_matches_actual_inno_app_id():
+    installer = Path(__file__).resolve().parents[1] / "packaging" / "bananaflow.iss"
+    app_id = re.search(r'^#define\s+AppId\s+"([^"]+)"', installer.read_text(), re.M)
+    assert app_id is not None
+    # Inno escapes "{{" only: closing braces are literal, not paired escapes.
+    identity = app_id.group(1).replace("{{", "{")
+    assert identity == "{225AE960-D765-430C-BD88-5DED07F420E4}}"
+    assert updates.WINDOWS_UNINSTALL_KEY == (
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + identity + "_is1"
+    )
+
+
+@pytest.mark.parametrize("hive,mode", [("HKCU", "currentuser"), ("HKLM", "allusers")])
+@pytest.mark.parametrize("matching_path", [True, False])
+@pytest.mark.parametrize("historical_identity", [True, False])
+def test_windows_installed_support_requires_exact_identity_and_path(
+    tmp_path, monkeypatch, hive, mode, matching_path, historical_identity,
+):
+    target = tmp_path / "Installed"
+    target.mkdir()
+    executable = target / "bananaflow.exe"
+    executable.write_bytes(b"exe")
+    (target / "bananaflow-updater.exe").write_bytes(b"helper")
+    (target / "unins000.exe").write_bytes(b"Inno uninstaller")
+    registered_key = (
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        r"\{225AE960-D765-430C-BD88-5DED07F420E4}}_is1"
+    )
+    if not historical_identity:
+        registered_key = registered_key.replace("}}_is1", "}_is1")
+    location = target if matching_path else tmp_path / "Different installed copy"
+    calls = []
+
+    def open_key(requested_hive, key, reserved, access):
+        calls.append((requested_hive, key))
+        assert reserved == 0 and access == 0x201
+        if requested_hive != hive or key != registered_key:
+            raise FileNotFoundError("No matching installation")
+        return nullcontext("installation")
+
+    def query_value(handle, name):
+        assert handle == "installation" and name == "InstallLocation"
+        return str(location), 1
+
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
+        HKEY_CURRENT_USER="HKCU", HKEY_LOCAL_MACHINE="HKLM",
+        KEY_READ=1, KEY_WOW64_64KEY=0x200,
+        OpenKey=open_key, QueryValueEx=query_value,
+    ))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(updates.platform, "machine", lambda: "AMD64")
+    info = updates.app_update_support()
+    if matching_path and historical_identity:
+        assert info.supported
+        assert info.kind == "windows-installed" and info.install_mode == mode
+        assert info.target == target
+    else:
+        assert not info.supported and info.reason == "unknown-installation"
+    assert all(key == updates.WINDOWS_UNINSTALL_KEY for _, key in calls)
 
 
 def test_checker_preserves_assets_for_discovery():

@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import traceback
 import uuid
 
 
@@ -85,33 +86,57 @@ def report_relaunch(result_path: Path) -> int:
     from ui.app_update_smoke import run_gui_update_smoke
 
     request = configure_smoke_environment(result_path)
-    # Exact-byte preservation is observed before normal startup can initialize
-    # schemas or save window geometry. GUI health is independently required.
-    result = snapshot()
-    result["gui"] = run_gui_update_smoke()
-    result["ok"] = (
-        bool(getattr(sys, "frozen", False))
-        and result["version"] == request.get("expected_relaunch_version", request["new_version"])
-        and result["profile"] == request["profile"]
-        and result["gui"].get("ok", False)
-    )
+    try:
+        # Exact-byte preservation is observed before normal startup can initialize
+        # schemas or save window geometry. GUI health is independently required.
+        result = snapshot()
+        result["gui"] = run_gui_update_smoke()
+        result["ok"] = (
+            bool(getattr(sys, "frozen", False))
+            and result["version"] == request.get("expected_relaunch_version", request["new_version"])
+            and result["profile"] == request["profile"]
+            and result["gui"].get("ok", False)
+        )
+    except Exception as error:
+        # A windowed PyInstaller unhandled-error dialog can wait forever on CI.
+        # Record only within the already validated sandbox and still fail.
+        result = {"ok": False, "stage": "replacement-gui",
+                  "error": str(error), "traceback": traceback.format_exc()}
     atomic_json(result_path, result)
     return 0 if result["ok"] else 1
 
 
 def run_update_smoke() -> int:
+    from core.app_update_helper import atomic_json
+
+    request_path = Path(os.environ["BANANAFLOW_UPDATE_SMOKE_REQUEST"])
+    request = fixture_request(request_path)
+    try:
+        return _run_update_smoke(request_path, request)
+    except Exception as error:
+        atomic_json(request_path.parent / "failure.json", {
+            "ok": False, "stage": "old-application-handoff",
+            "error": str(error), "traceback": traceback.format_exc(),
+        })
+        return 1
+
+
+def _run_update_smoke(request_path: Path, request: dict) -> int:
     from core.app_update_helper import atomic_json, verify_artifact
     from core.app_updates import (
         app_update_support, get_prepared_app_update, launch_prepared_app_update,
     )
     from utils.paths import get_app_data_dir
 
-    request_path = Path(os.environ["BANANAFLOW_UPDATE_SMOKE_REQUEST"])
-    request = fixture_request(request_path)
+    def phase(name: str) -> None:
+        atomic_json(request_path.parent / "progress.json", {"phase": name})
+
+    phase("validating-old-package")
     configure_smoke_environment(Path(request["result"]))
     before = snapshot()
     if not getattr(sys, "frozen", False) or before["version"] != request["old_version"]:
         raise RuntimeError("The old frozen package is not the requested fixture")
+    phase("detecting-installation")
     support = app_update_support()
     if not support.supported or support.kind != request["kind"]:
         raise RuntimeError(f"Packaged update unsupported: {support}")
@@ -120,6 +145,7 @@ def run_update_smoke() -> int:
         raise RuntimeError("Refusing to replace an application outside the sandbox")
     artifact = Path(request["artifact"])
     # The artifact comes from this job's package build, not a release API mock.
+    phase("verifying-artifact")
     verify_artifact(artifact, request["size"], request["sha256"])
     update_root = get_app_data_dir().resolve() / "app-updates"
     work = update_root / uuid.uuid4().hex
@@ -137,10 +163,12 @@ def run_update_smoke() -> int:
     }
     atomic_json(work / "prepared.json", state)
     atomic_json(update_root / "prepared.json", {"schema": 1, "directory": work.name})
+    phase("verifying-prepared-state")
     prepared = get_prepared_app_update()
     if prepared is None:
         raise RuntimeError("Production prepared-state verification rejected the fixture")
     from ui.app_update_smoke import run_gui_update_smoke
+    phase("real-gui-safe-restart")
     gui = run_gui_update_smoke(prepared)
     if not gui.get("ok") or not gui.get("safe_restart_requested"):
         raise RuntimeError(f"The old packaged GUI refused safe restart: {gui}")
@@ -148,11 +176,13 @@ def run_update_smoke() -> int:
     before = snapshot()
     before["gui"] = gui
     atomic_json(request_path.parent / "before.json", before)
+    phase("launching-helper")
     child = launch_prepared_app_update(prepared, smoke_result=Path(request["result"]))
     atomic_json(request_path.parent / "handoff.json", {
         "helper_pid": child.pid, "parent_pid": os.getpid(),
         "status_path": str(work / "status.json"),
     })
+    phase("handoff-complete")
     # Returning releases all old-package handles. The helper must wait for this
     # actual frozen process, not a mocked PID, before installing/replacing.
     return 0

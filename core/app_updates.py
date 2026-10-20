@@ -35,6 +35,13 @@ API_ROOT = f"https://api.github.com/repos/{OFFICIAL_REPO}"
 ASSET_API_PREFIX = API_ROOT + "/releases/assets/"
 MAX_RELEASE_BYTES = 2 * 1024 * 1024
 _DOWNLOAD_HOSTS = {"api.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+# Keep the exact historical Inno identity. Its AppId escapes the opening brace
+# with "{{", but the two closing braces are literal, so the registered key
+# really ends in "}}_is1". Changing it would create a different installation.
+WINDOWS_UNINSTALL_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    r"\{225AE960-D765-430C-BD88-5DED07F420E4}}_is1"
+)
 Progress = Callable[[int, int], None]
 
 
@@ -82,10 +89,9 @@ def _windows_install_mode(target: Path) -> str:
     if sys.platform != "win32":
         return ""
     import winreg
-    key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{225AE960-D765-430C-BD88-5DED07F420E4}_is1"
     for hive, mode in ((winreg.HKEY_CURRENT_USER, "currentuser"), (winreg.HKEY_LOCAL_MACHINE, "allusers")):
         try:
-            with winreg.OpenKey(hive, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as handle:
+            with winreg.OpenKey(hive, WINDOWS_UNINSTALL_KEY, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as handle:
                 location = winreg.QueryValueEx(handle, "InstallLocation")[0]
             if Path(location).resolve() == target:
                 return mode

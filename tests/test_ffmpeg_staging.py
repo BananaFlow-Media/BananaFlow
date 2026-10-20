@@ -338,12 +338,52 @@ def test_lgpl_and_version_validation():
     mac.verify_lgpl("ffmpeg version N-127032-g6ae491a26c-20260930", "GNU Lesser General Public License", "ffmpeg", "N-127032-g6ae491a26c")
 
 
+@pytest.fixture
+def native_macos_lgpl_output():
+    # Exact license body from native job 118657702740, with log timestamps
+    # removed: https://github.com/BananaFlow-Media/BananaFlow/actions/runs/39431583215
+    return (ROOT / "tests" / "fixtures" / "ffmpeg-8.1.3-macos-lgpl.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_lgpl_accepts_actual_wrapped_native_output(native_macos_lgpl_output, newline):
+    assert "GNU Lesser General Public License" not in native_macos_lgpl_output
+    assert "GNU Lesser General Public\nLicense" in native_macos_lgpl_output
+    mac.verify_lgpl(
+        "ffmpeg version 8.1.3\nconfiguration: --disable-gpl --disable-nonfree",
+        native_macos_lgpl_output.replace("\n", newline), "ffmpeg", "8.1.3",
+    )
+
+
+@pytest.mark.parametrize("flag", ["--enable-gpl", "--enable-nonfree"])
+def test_wrapped_lgpl_does_not_override_forbidden_build_flags(native_macos_lgpl_output, flag):
+    with pytest.raises(ValueError, match="GPL/nonfree"):
+        mac.verify_lgpl(
+            f"ffmpeg version 8.1.3\nconfiguration: {flag}\n",
+            native_macos_lgpl_output, "ffmpeg", "8.1.3",
+        )
+
+
+def test_wrapped_gpl_output_is_rejected(native_macos_lgpl_output):
+    with pytest.raises(ValueError, match="does not report an LGPL"):
+        mac.verify_lgpl(
+            "ffmpeg version 8.1.3", native_macos_lgpl_output.replace("Lesser ", ""),
+            "ffmpeg", "8.1.3",
+        )
+
+
 @pytest.mark.parametrize("version,license_text", [
     ("ffmpeg version 8.1.2", "GNU Lesser General Public License"),
     ("ffmpeg version 8.1.30", "GNU Lesser General Public License"),
     ("ffmpeg version 8.1.3\nconfiguration: --enable-gpl", "GNU Lesser General Public License"),
     ("ffmpeg version 8.1.3\nconfiguration: --enable-nonfree", "GNU Lesser General Public License"),
     ("ffmpeg version 8.1.3", "GNU General Public License"),
+    ("ffmpeg version 8.1.3", "LGPL"),
+    ("ffmpeg version 8.1.3", "GNU Lesser General Public"),
+    ("ffmpeg version 8.1.3", "GNU Lesser General Public Unlicensed"),
+    ("ffmpeg version 8.1.3", "GNU Lesser General Public Licenses"),
+    ("ffmpeg version 8.1.3", "GNU LesserGeneral Public License"),
+    ("ffmpeg version 8.1.3", "This version of ffmpeg has nonfree parts compiled in."),
 ])
 def test_wrong_version_or_license_is_rejected(version, license_text):
     with pytest.raises(ValueError):

@@ -202,7 +202,9 @@ def verify_lgpl(version_output: str, license_output: str, tool: str, expected_ve
         raise ValueError(f"{tool} does not report pinned version {expected_version}")
     if re.search(r"--enable-(?:gpl|nonfree)(?:\s|$)", version_output):
         raise ValueError(f"{tool} enabled GPL/nonfree components")
-    if "GNU Lesser General Public License" not in license_output:
+    # Upstream wraps its full license name across lines in `-L` output.
+    # Accept whitespace variations only, not abbreviated or partial names.
+    if not re.search(r"\bGNU\s+Lesser\s+General\s+Public\s+License\b", license_output):
         raise ValueError(f"{tool} does not report an LGPL license")
 
 
