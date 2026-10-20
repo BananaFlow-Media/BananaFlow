@@ -4,6 +4,14 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.2.2]
+
+### Changed
+
+- Version-only rebuild of 1.2.1 to validate the installed application's
+  1.2.1-to-1.2.2 update path. No application behavior or dependency pins changed.
+- The existing 1.2.1 tag and published artifacts are not replaced.
+
 ## [1.2.1]
 
 The existing 1.2.0 release and its published artifacts are not replaced.
