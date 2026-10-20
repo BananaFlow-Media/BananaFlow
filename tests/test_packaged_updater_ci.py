@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -218,6 +219,72 @@ def test_successful_sandbox_cleanup_failure_is_still_fatal(tmp_path, monkeypatch
         with run_packaged_update_smoke.disposable_sandbox():
             pass
     assert "cleanup failed" in capsys.readouterr().err
+
+
+def test_fixture_cleanup_clears_only_confirmed_readonly_attribute(tmp_path, monkeypatch):
+    path, request = marked_request(tmp_path)
+    root, case = Path(request["root"]), path.parent
+    changes, removed = [], []
+    permission = PermissionError("read-only directory")
+    monkeypatch.setattr(run_packaged_update_smoke.sys, "platform", "win32")
+    monkeypatch.setattr(run_packaged_update_smoke, "_fixture_cleanup_attributes",
+                        lambda entry, sandbox: 0x13)  # directory + hidden + read-only
+    monkeypatch.setattr(run_packaged_update_smoke, "_set_windows_file_attributes",
+                        lambda entry, attributes: changes.append((entry, attributes)))
+    def removal(target, *, onerror):
+        onerror(lambda entry: removed.append(entry), str(case), (PermissionError, permission, None))
+    monkeypatch.setattr(run_packaged_update_smoke.shutil, "rmtree", removal)
+    run_packaged_update_smoke.remove_fixture_tree(case, root)
+    assert changes == [(case, 0x12)]
+    assert removed == [str(case)]
+
+
+def test_fixture_cleanup_does_not_change_attributes_for_other_access_denial(tmp_path, monkeypatch):
+    path, request = marked_request(tmp_path)
+    permission = PermissionError("ACL or live handle")
+    monkeypatch.setattr(run_packaged_update_smoke.sys, "platform", "win32")
+    monkeypatch.setattr(run_packaged_update_smoke, "_fixture_cleanup_attributes",
+                        lambda entry, sandbox: 0x10)
+    monkeypatch.setattr(run_packaged_update_smoke, "_set_windows_file_attributes",
+                        lambda *args: pytest.fail("must not change non-read-only attributes"))
+    def removal(target, *, onerror):
+        onerror(lambda entry: None, str(path.parent), (PermissionError, permission, None))
+    monkeypatch.setattr(run_packaged_update_smoke.shutil, "rmtree", removal)
+    with pytest.raises(PermissionError) as raised:
+        run_packaged_update_smoke.remove_fixture_tree(path.parent, Path(request["root"]))
+    assert raised.value is permission
+
+
+def test_fixture_cleanup_refuses_unowned_and_reparse_paths(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    path, request = marked_request(tmp_path)
+    root, case = Path(request["root"]), path.parent
+    with pytest.raises(ValueError, match="outside the marked fixture"):
+        run_packaged_update_smoke._fixture_cleanup_attributes(tmp_path, root)
+    original_lstat = Path.lstat
+    def reparse_lstat(entry):
+        metadata = original_lstat(entry)
+        if entry == case:
+            return SimpleNamespace(st_mode=metadata.st_mode, st_file_attributes=0x410)
+        return metadata
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    with pytest.raises(ValueError, match="reparse point"):
+        run_packaged_update_smoke._fixture_cleanup_attributes(case, root)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows file attributes")
+def test_native_windows_cleanup_removes_readonly_fixture_directory(tmp_path):
+    path, request = marked_request(tmp_path)
+    root, case = Path(request["root"]), path.parent
+    directory = case / "home/AppData/Roaming/Microsoft/Windows/Start Menu/Programs"
+    directory.mkdir(parents=True)
+    attributes = directory.stat().st_file_attributes
+    run_packaged_update_smoke._set_windows_file_attributes(directory, attributes | 0x1)
+    assert directory.stat().st_file_attributes & 0x1
+    run_packaged_update_smoke.remove_fixture_tree(case, root)
+    assert not case.exists()
+    assert (root / app_update_smoke.MARKER).is_file()
 
 
 def test_packaged_update_requires_clean_exit_including_gui_teardown():

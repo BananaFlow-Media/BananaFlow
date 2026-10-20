@@ -25,7 +25,8 @@ import httpx
 
 from core.app_update_helper import (
     AppUpdateError, MAX_ARTIFACT_BYTES, VERSION_RE, atomic_json, read_json,
-    update_lock_is_held, verify_artifact,
+    read_macos_quarantine, update_lock_is_held, verify_artifact,
+    write_macos_quarantine,
 )
 from core.update_checker import ReleaseInfo, _is_newer
 from version import FULL_VERSION
@@ -249,7 +250,8 @@ def _quarantine(artifact: Path) -> None:
         with open(str(artifact) + ":Zone.Identifier", "w", encoding="utf-8") as handle:
             handle.write("[ZoneTransfer]\nZoneId=3\nHostUrl=https://github.com/BananaFlow-Media/BananaFlow\n")
     elif sys.platform == "darwin":
-        os.setxattr(artifact, "com.apple.quarantine", f"0081;{int(time.time()):x};BananaFlow;".encode())
+        if read_macos_quarantine(artifact) is None:
+            write_macos_quarantine(artifact, f"0081;{int(time.time()):x};BananaFlow;".encode())
 
 
 def prepare_app_update(

@@ -31,6 +31,7 @@ MAX_EXPANDED_BYTES = 12 * 1024**3
 MAX_ARCHIVE_FILES = 100_000
 MAX_PLAN_BYTES = 64 * 1024
 MAX_ZONE_IDENTIFIER_BYTES = 64 * 1024
+MAX_QUARANTINE_BYTES = 64 * 1024
 KINDS = {"windows-installed", "windows-portable", "macos-app"}
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?")
 _IS_WINDOWS = os.name == "nt"
@@ -432,6 +433,68 @@ def _check_macos_tree(root: Path, version: str) -> None:
         raise AppUpdateError("The disk image does not contain the expected BananaFlow version.")
 
 
+def _macos_xattr_api():
+    """Bind Darwin's six-argument API, not the Linux-only Python os API.
+
+    ABI/constants: Apple's xnu bsd/sys/{xattr,errno}.h. The absolute system
+    library is also present through the dyld shared cache on modern macOS.
+    """
+    import ctypes
+    if sys.platform != "darwin":
+        raise AppUpdateError("Native macOS origin metadata is unavailable.")
+    try:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        arguments = [
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+            ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int,
+        ]
+        library.getxattr.argtypes = arguments
+        library.getxattr.restype = ctypes.c_ssize_t
+        library.setxattr.argtypes = arguments
+        library.setxattr.restype = ctypes.c_int
+    except (OSError, AttributeError) as exc:
+        raise AppUpdateError("Native macOS origin metadata is unavailable.") from exc
+    return library
+
+
+def read_macos_quarantine(path: Path) -> bytes | None:
+    """Read exact quarantine bytes; only Darwin ENOATTR means absent."""
+    import ctypes
+    library = _macos_xattr_api()
+    # One bounded read avoids the size-query/read race. ERANGE and every error
+    # except ENOATTR fail closed; a larger/unreadable mark is never ignored.
+    buffer = ctypes.create_string_buffer(MAX_QUARANTINE_BYTES + 1)
+    ctypes.set_errno(0)
+    size = library.getxattr(
+        os.fsencode(path), b"com.apple.quarantine", buffer, len(buffer), 0, 1,
+    )  # position=0; XATTR_NOFOLLOW=1 (never XATTR_NOSECURITY).
+    if size == -1:
+        error = ctypes.get_errno()
+        if error == 93:  # Darwin ENOATTR, not Linux ENODATA.
+            return None
+        raise AppUpdateError(f"Cannot read macOS origin metadata (errno={error}).")
+    if not 0 <= size <= MAX_QUARANTINE_BYTES:
+        raise AppUpdateError("The package origin metadata exceeds the safe limit.")
+    return buffer.raw[:size]
+
+
+def write_macos_quarantine(path: Path, value: bytes) -> None:
+    """Preserve the byte value without text decoding or warning bypass flags."""
+    import ctypes
+    if not isinstance(value, bytes) or len(value) > MAX_QUARANTINE_BYTES:
+        raise AppUpdateError("The package origin metadata is invalid or too large.")
+    library = _macos_xattr_api()
+    buffer = ctypes.create_string_buffer(value)
+    ctypes.set_errno(0)
+    result = library.setxattr(
+        os.fsencode(path), b"com.apple.quarantine", buffer, len(value), 0, 1,
+    )
+    if result != 0:
+        raise AppUpdateError(
+            f"Cannot preserve macOS origin metadata (errno={ctypes.get_errno()})."
+        )
+
+
 def stage_macos(artifact: Path, staging: Path, version: str, work: Path) -> None:
     mount = work / "mount"
     mount.mkdir(exist_ok=False)
@@ -456,12 +519,9 @@ def stage_macos(artifact: Path, staging: Path, version: str, work: Path) -> None
         _check_macos_tree(staging, version)
         # The downloaded image's quarantine attribute must travel to the new
         # app even when the mounted filesystem did not expose it.
-        try:
-            quarantine = os.getxattr(artifact, "com.apple.quarantine")
-        except OSError:
-            quarantine = None
+        quarantine = read_macos_quarantine(artifact)
         if quarantine is not None:
-            os.setxattr(staging, "com.apple.quarantine", quarantine)
+            write_macos_quarantine(staging, quarantine)
     finally:
         if attached:
             subprocess.run(

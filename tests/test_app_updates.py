@@ -676,6 +676,159 @@ def test_macos_bundle_identity_and_symlink_boundary(tmp_path):
         helper._check_macos_tree(app, "99.0.0")
 
 
+@pytest.fixture
+def macos_xattr_api(monkeypatch):
+    import ctypes
+    state = {"values": {}, "read_errno": 0, "write_errno": 0, "reads": []}
+
+    def getxattr(path, name, buffer, size, position, options):
+        assert name == b"com.apple.quarantine" and position == 0 and options == 1
+        state["reads"].append(size)
+        error = state["read_errno"]
+        if not error and path not in state["values"]:
+            error = 93
+        if error:
+            ctypes.set_errno(error)
+            return -1
+        value = state["values"][path]
+        assert len(value) <= size
+        ctypes.memmove(buffer, value, len(value))
+        return len(value)
+
+    def setxattr(path, name, buffer, size, position, options):
+        assert name == b"com.apple.quarantine" and position == 0 and options == 1
+        if state["write_errno"]:
+            ctypes.set_errno(state["write_errno"])
+            return -1
+        state["values"][path] = ctypes.string_at(buffer, size)
+        return 0
+
+    library = SimpleNamespace(getxattr=getxattr, setxattr=setxattr)
+    def load_library(path, **kwargs):
+        assert path == "/usr/lib/libSystem.B.dylib" and kwargs == {"use_errno": True}
+        return library
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(ctypes, "CDLL", load_library)
+    # Python's os APIs are not provided on macOS, even though Linux has them.
+    monkeypatch.delattr(os, "getxattr", raising=False)
+    monkeypatch.delattr(os, "setxattr", raising=False)
+    state["library"] = library
+    return state
+
+
+@pytest.mark.parametrize("value", [b"", b"0081;01234567;BananaFlow;", b"\x00\xff\x80text\x00"])
+def test_macos_quarantine_uses_exact_darwin_abi_and_binary_bytes(tmp_path, macos_xattr_api, value):
+    import ctypes
+    path = tmp_path / "Hebrew-עברית image.dmg"
+    assert helper.read_macos_quarantine(path) is None
+    helper.write_macos_quarantine(path, value)
+    assert helper.read_macos_quarantine(path) == value
+    library = macos_xattr_api["library"]
+    assert library.getxattr.argtypes == [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+        ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int,
+    ]
+    assert library.getxattr.restype is ctypes.c_ssize_t
+    assert library.setxattr.restype is ctypes.c_int
+    assert macos_xattr_api["reads"] == [helper.MAX_QUARANTINE_BYTES + 1] * 2
+
+
+@pytest.mark.parametrize("error", [2, 5, 13, 34, 45, 96])
+def test_macos_quarantine_read_errors_are_not_absent(tmp_path, macos_xattr_api, error):
+    # Missing file, IO, permissions, ERANGE, unsupported FS, and Darwin ENODATA.
+    macos_xattr_api["read_errno"] = error
+    with pytest.raises(helper.AppUpdateError, match=f"errno={error}"):
+        helper.read_macos_quarantine(tmp_path / "artifact")
+
+
+def test_macos_quarantine_bounds_and_write_errors(tmp_path, macos_xattr_api):
+    path = tmp_path / "artifact"
+    macos_xattr_api["values"][os.fsencode(path)] = b"x" * (helper.MAX_QUARANTINE_BYTES + 1)
+    with pytest.raises(helper.AppUpdateError, match="safe limit"):
+        helper.read_macos_quarantine(path)
+    with pytest.raises(helper.AppUpdateError, match="too large"):
+        helper.write_macos_quarantine(path, b"x" * (helper.MAX_QUARANTINE_BYTES + 1))
+    macos_xattr_api["write_errno"] = 13
+    with pytest.raises(helper.AppUpdateError, match="errno=13"):
+        helper.write_macos_quarantine(path, b"0081;01234567;BananaFlow;")
+
+
+def test_macos_quarantine_missing_native_api_fails_closed(tmp_path, monkeypatch):
+    import ctypes
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **kw: SimpleNamespace())
+    with pytest.raises(helper.AppUpdateError, match="unavailable"):
+        helper.read_macos_quarantine(tmp_path / "artifact")
+
+
+def test_production_macos_download_is_marked_without_overwriting_origin(tmp_path, macos_xattr_api):
+    path = tmp_path / "download.dmg"
+    updates._quarantine(path)
+    value = helper.read_macos_quarantine(path)
+    assert re.fullmatch(rb"0081;[0-9a-f]+;BananaFlow;", value)
+    existing = b"0083;12345678;Original Browser;\x00\xff"
+    helper.write_macos_quarantine(path, existing)
+    updates._quarantine(path)
+    assert helper.read_macos_quarantine(path) == existing
+
+
+@pytest.mark.parametrize("origin", [None, b"0081;01234567;BananaFlow;\x00\xff"])
+def test_macos_staging_preserves_quarantine_exactly(tmp_path, monkeypatch, macos_xattr_api, origin):
+    import shutil
+    artifact = tmp_path / "download.dmg"
+    artifact.write_bytes(b"fixture")
+    staging = tmp_path / "staged.app"
+    work = tmp_path / "work"
+    work.mkdir()
+    if origin is not None:
+        helper.write_macos_quarantine(artifact, origin)
+
+    def run(command, **kwargs):
+        assert kwargs.get("check") is True
+        source = work / "mount" / "BananaFlow.app"
+        if command[:2] == ["/usr/bin/hdiutil", "attach"]:
+            (source / "Contents" / "MacOS").mkdir(parents=True)
+            (source / "Contents" / "MacOS" / "bananaflow").write_bytes(b"exe")
+            with (source / "Contents" / "Info.plist").open("wb") as file:
+                plistlib.dump({
+                    "CFBundleIdentifier": "media.bananaflow.app",
+                    "CFBundleShortVersionString": "99.0.0",
+                }, file)
+        elif command[0] == "/usr/bin/ditto":
+            shutil.copytree(source, staging)
+        else:
+            assert command[:2] == ["/usr/bin/hdiutil", "detach"]
+            shutil.rmtree(source)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(helper.subprocess, "run", run)
+    helper.stage_macos(artifact, staging, "99.0.0", work)
+    assert helper.read_macos_quarantine(staging) == origin
+    assert helper.read_macos_quarantine(artifact) == origin
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires actual Darwin xattr ABI and filesystem")
+def test_native_macos_quarantine_roundtrip_and_production_marking(tmp_path, monkeypatch):
+    # Use an ordinary disposable file, never an executable; no warnings are
+    # cleared, security settings changed, or marked programs launched here.
+    monkeypatch.delattr(os, "getxattr", raising=False)
+    monkeypatch.delattr(os, "setxattr", raising=False)
+    path = tmp_path / "native-quarantine-fixture.dmg"
+    path.write_bytes(b"not an executable or actual disk image")
+    assert helper.read_macos_quarantine(path) is None
+    updates._quarantine(path)
+    assert re.fullmatch(rb"0081;[0-9a-f]+;BananaFlow;", helper.read_macos_quarantine(path))
+    value = b"0081;01234567;BananaFlow fixture;\x00\xff"
+    helper.write_macos_quarantine(path, value)
+    assert helper.read_macos_quarantine(path) == value
+    # Independent native utility verifies the ABI did not merely agree with
+    # itself on an incorrect buffer length or truncate at the embedded NUL.
+    output = subprocess.check_output(["/usr/bin/xattr", "-px", "com.apple.quarantine", str(path)])
+    assert bytes.fromhex(output.decode("ascii")) == value
+    with pytest.raises(helper.AppUpdateError, match="errno=2"):
+        helper.read_macos_quarantine(tmp_path / "missing-file")
+
+
 def test_launch_uses_ready_handshake_reset_environment_and_no_shell(support, monkeypatch):
     payload = _zip()
     _transport(monkeypatch, _release(support, payload), payload)

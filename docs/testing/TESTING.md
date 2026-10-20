@@ -58,6 +58,8 @@ The packaged updater gate must use real Windows installer/portable and macOS app
 
 On failure, the harness retains its synthetic sandbox until runner teardown: an error status can precede the helper's recovery relaunch, so deleting the tree immediately could interrupt recovery and mask the original failure. It never kills the helper or app. Successful runs still require complete cleanup; failed sandboxes are not uploaded as evidence.
 
+Completed Windows fixture cleanup may remove only a confirmed read-only file-attribute bit from an entry within the marked sandbox, retaining all other attributes and never changing ACLs or ownership. Reparse-point paths are refused for attribute changes; other access failures remain fatal. A native Windows filesystem regression checks this path before packaging.
+
 Hidden packaged smoke failures write bounded fixture diagnostics and exit nonzero rather than leaving an unhandled windowed-runtime error dialog. Installation detection, preparation, real GUI restart and helper-handoff progress are collected even when failure occurs before the helper starts. These diagnostics do not waive any lifecycle or timeout gate.
 
 The macOS packaged-updater job and release job share the native Apple Silicon `macos-15` runner; changing this build host must retain explicit arm64 checks.

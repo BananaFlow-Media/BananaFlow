@@ -32,6 +32,10 @@ Portable extraction preserves the archive's exact existing `Zone.Identifier`
 on extracted files; it neither removes a mark nor invents one for a locally
 built, unmarked archive. Native launch failures retain the Windows return/error
 codes, executable existence/architecture and rollback outcome for diagnosis.
+On macOS, download marking and DMG-to-application quarantine propagation use
+Darwin's native extended-attribute API, preserving bounded binary attribute
+bytes without following symlinks. Only `ENOATTR` means no quarantine attribute;
+permission, unsupported-operation and other errors stop the update.
 
 ## Lifecycle and process boundaries
 

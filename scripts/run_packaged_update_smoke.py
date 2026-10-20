@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,63 @@ def disposable_sandbox():
             print(f"Successful updater sandbox cleanup failed: {root}",
                   file=sys.stderr, flush=True)
             raise
+
+
+def _fixture_cleanup_attributes(path: Path, root: Path) -> int:
+    """Check ownership before changing an ordinary Windows fixture attribute."""
+    if (
+        root.resolve() != root or not root.name.startswith("bf-upd-")
+        or not (root / MARKER).is_file() or (root / MARKER).is_symlink()
+        or path == root or not path.is_relative_to(root) or path.resolve() != path
+    ):
+        raise ValueError("Refusing cleanup attribute changes outside the marked fixture")
+    current = path
+    attributes = 0
+    while True:
+        metadata = current.lstat()
+        current_attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode) or current_attributes & 0x400:  # REPARSE_POINT
+            raise ValueError("Refusing cleanup attribute changes through a reparse point")
+        if current == path:
+            attributes = current_attributes
+        if current == root:
+            return attributes
+        current = current.parent
+
+
+def _set_windows_file_attributes(path: Path, attributes: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    kernel.SetFileAttributesW.restype = wintypes.BOOL
+    if not kernel.SetFileAttributesW(str(path), attributes):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def remove_fixture_tree(path: Path, root: Path) -> None:
+    """Remove a completed case, preserving strict cleanup and filesystem safety."""
+    _fixture_cleanup_attributes(path, root)
+
+    def onerror(function, name, exc_info):
+        error = exc_info[1]
+        if sys.platform != "win32" or not isinstance(error, PermissionError):
+            raise error
+        entry = Path(name)
+        attributes = _fixture_cleanup_attributes(entry, root)
+        print(f"Windows fixture cleanup denied: {entry}; attributes=0x{attributes:x}",
+              file=sys.stderr, flush=True)
+        if not attributes & 0x1:  # READONLY, not an ACL or security setting
+            raise error
+        # The shell can mark synthetic Start Menu folders read-only. Change
+        # only that ordinary bit, never ACLs, ownership, or reparse metadata.
+        _set_windows_file_attributes(entry, attributes & ~0x1)
+        function(name)
+
+    # CPython 3.8+ removes Windows junctions without traversing their targets.
+    # The error handler additionally refuses attribute changes on/through one.
+    shutil.rmtree(path, onerror=onerror)
 
 
 def run(args: list[str], *, env: dict | None = None, timeout: int = 600) -> str:
@@ -487,7 +545,7 @@ def main() -> None:
             # Windows bootloader handles can briefly outlive the Python exit.
             for attempt in range(10):
                 try:
-                    shutil.rmtree(root / kind)
+                    remove_fixture_tree(root / kind, root)
                     break
                 except OSError:
                     if attempt == 9:
