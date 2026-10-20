@@ -17,6 +17,10 @@ When cutting a version:
 3. add/update `CHANGELOG.md`;
 4. run all release gates below.
 
+A version-only rebuild still requires matching source, embedded application and
+installer metadata, tag and artifact names. Renaming an older release's files
+is not a version upgrade and must not substitute for a fresh verified build.
+
 Do not hard-code the new “latest version” into unrelated manuals/security policy. Those documents should point to release/version sources so they do not immediately drift.
 
 Finalize the version's change and upgrade notes before the tagged build.
