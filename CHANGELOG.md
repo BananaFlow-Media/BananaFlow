@@ -4,10 +4,8 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
-## [1.2.1] — Unreleased
+## [1.2.1]
 
-Release candidate preparation. Public publication remains blocked on the
-manual acceptance in [`docs/release/RELEASING.md`](docs/release/RELEASING.md).
 The existing 1.2.0 release and its published artifacts are not replaced.
 
 ### Added
