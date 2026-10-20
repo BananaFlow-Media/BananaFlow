@@ -1,0 +1,67 @@
+name: Packaged updater validation
+
+# Untrusted PR code executes without secrets or write/OIDC permissions.
+# This builds disposable test packages only. It cannot create a release.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packaged-updater-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: Real packaged update on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15]
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and build dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" pyinstaller pyyaml
+          python -m playwright install chromium
+      - name: Validate updater tests before packaging
+        shell: bash
+        run: |
+          python scripts/run_isolated_tests.py --evidence-dir update-evidence/unit --files tests/test_app_update*.py tests/test_packaged_updater*.py
+      - name: Stage Windows release components
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/stage_ffmpeg.py --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg staging failed" }
+          pwsh -NoProfile -File scripts/fetch_deno_runtime.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Deno staging failed" }
+      - name: Build real old and new packages without publishing
+        run: python scripts/build_update_test_packages.py
+      - name: Install, update, relaunch and verify preserved data
+        run: python scripts/run_packaged_update_smoke.py --old-dist update-fixtures/old --new-dist dist --versions update-fixtures/versions.json --evidence-dir update-evidence
+      - name: Verify published 1.2.0 package migration
+        run: python scripts/run_packaged_update_smoke.py --published-baseline --new-dist dist --versions update-fixtures/versions.json --evidence-dir update-evidence/published
+      - name: Upload real platform update evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packaged-update-evidence-${{ matrix.os }}
+          path: update-evidence/
+          if-no-files-found: warn
+          retention-days: 30

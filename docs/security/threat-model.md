@@ -58,7 +58,7 @@ This threat model focuses on security properties of the desktop application and 
 
 ### Update and supply chain
 
-- The packaged-app update path directs users to BananaFlow's official website download page and does not silently download or execute replacement application code.
+- The packaged-app update path retains the official website option and offers an explicit download/verify followed by a separately approved install/restart. Only the exact official repository, platform/install-kind asset and verified bounded size/SHA-256 are accepted; unsupported or unverifiable inputs fail closed. Replacement must not interrupt active work or overwrite user data. See [`../architecture/application-updater.md`](../architecture/application-updater.md).
 - Release artifacts publish checksums/SBOM/attestation evidence as configured by the release pipeline.
 - Bundled components are staged through reviewed scripts and documented with source/license/version information.
 - Independently downloaded `yt-dlp` / `yt-dlp-ejs` updates are accepted only from the exact official GitHub component-channel release, after GitHub asset digest/size verification, manifest/bundle agreement, compatibility and bounded safe-unpack checks. A fresh authenticated control record can disable the channel or revoke a bundle; an expired record must refresh successfully before an overlay is reused.
@@ -66,7 +66,7 @@ This threat model focuses on security properties of the desktop application and 
 
 ## Important residual risks
 
-- Unsigned Windows binaries cannot provide publisher identity through Authenticode; checksums/attestations help integrity/provenance but are not a substitute for code signing.
+- Unsigned Windows binaries cannot provide publisher identity through Authenticode; checksums/attestations help integrity/provenance but are not a substitute for code signing. Full-app updating trusts the official GitHub release authority, not an independent publisher-signed manifest. A compromise of that authority remains a residual risk; the client never bypasses OS warnings.
 - Browser automation and third-party extraction operate against changing remote services and may expose ordinary network metadata.
 - Artist-category labels, release cards and track metadata are untrusted remote input. Discovery/expansion stays in background workers, duplicate decisions remain local, and remote text must not be treated as a path or instruction. Spotify target-collision recovery is bounded, invalidates only the affected cache entry and fails closed rather than silently reusing another recording's concrete video target.
 - Cookies remain sensitive even when protected at rest; same-user malware is not defeated by DPAPI/file permissions.

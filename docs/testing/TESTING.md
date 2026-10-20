@@ -50,6 +50,18 @@ Startup-preflight shutdown tests must cover cooperative cancellation before the 
 
 Immediate-close coverage must also verify that the startup update worker honours interruption between app and component checks and never emits results after cancellation; Qt must not destroy a running child `QThread`.
 
+## Application updater acceptance
+
+Updater changes require more than button or mocked subprocess tests. Cover both independently prepared downloader components and full application updates, including a successful explicit restart, Later/close without restarting, active-work vetoes, thread ownership and failures before replacement. Retain English/Hebrew UI coverage.
+
+The packaged updater gate must use real Windows installer/portable and macOS application artifacts, disposable installation/profile directories, a running old process, the packaged helper, actual replacement and a fresh process reporting the candidate version. Assert preserved user data and a real failure/recovery case. Configuration migration alone is not old-to-new application upgrade evidence. Record exact artifact hashes, versions and process outcomes. Test fixture releases must never be published or selected by real clients.
+
+The macOS packaged-updater job and release job share the native Apple Silicon `macos-15` runner; changing this build host must retain explicit arm64 checks.
+
+PR jobs must have no release/channel publication path, and must not bypass platform warnings. A build blocked on staging, signing, OS policy or installation is not a passing update test. Normal-network and representative-machine release checks below and in `docs/release/RELEASING.md` remain necessary for public release.
+
+Converter tests must preserve existing read-only destinations on all platforms, including POSIX where writable parent directories otherwise permit atomic replacement. Deterministic coverage checks both an initially read-only file and one made read-only during conversion; real-FFmpeg integration must retain the same guarantee.
+
 ## Real-network tests
 
 ```bash
@@ -100,6 +112,7 @@ The gate validates internal Markdown references, canonical documentation structu
   clocks and sub-second waits; never exercise a real provider limit.
 - Filesystem-destructive tests use disposable temporary directories/files only.
 - New Qt work must cover teardown/cancellation ownership when threads/timers/callbacks are involved.
+- Local HTTP-server fixtures must stop their accept loop, close the server, and join active request handlers before interpreter teardown. Expected client disconnects during cancellation must not leak tracebacks after the test summary.
 - New user-facing strings must preserve i18n coverage.
 - New persisted state needs migration/failure-path tests.
 

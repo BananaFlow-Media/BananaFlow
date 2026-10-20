@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -268,6 +269,21 @@ def _same_file(a: Path, b: Path) -> bool:
     except OSError:
         pass
     return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
+
+
+def _require_writable_existing_destination(dest: Path) -> None:
+    """Preserve read-only files even where directory permissions allow rename.
+
+    POSIX atomic replacement checks the parent directory, not the destination's
+    write bit. Explicit overwrite is not permission to discard that protection.
+    Check both mode bits (including privileged callers) and effective access.
+    """
+    try:
+        mode = dest.stat().st_mode
+    except FileNotFoundError:
+        return
+    if not mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH) or not os.access(dest, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(dest))
 
 
 def _unique_destination(dest: Path, source: Path) -> Path:
@@ -520,6 +536,7 @@ class ConverterService:
         # 3. Preflight: directory, writability, disk space.
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
+            _require_writable_existing_destination(dest)
         except OSError as exc:
             return FileResult(
                 source=str(src), destination=str(dest), outcome=FileOutcome.FAILED,
@@ -600,6 +617,7 @@ class ConverterService:
                     error_kind=ConversionErrorKind.SAME_FILE,
                     message="refusing to replace the source file",
                 )
+            _require_writable_existing_destination(dest)
             os.replace(temp, dest)
         except OSError as exc:
             self._cleanup_temp(temp)

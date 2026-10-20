@@ -1,10 +1,9 @@
 """Phase 4 (reproducible builds / supply chain) static workflow gates.
 
-FFmpeg is bundled into every release build, so its download must be pinned
-to an exact, immutable version and verified by checksum before use — never
-downloaded from a "latest" alias with no integrity check. These are text
-assertions over the workflow, the only way to test a workflow without
-running it.
+FFmpeg staging is shared by release and PR packaging. Structural workflow
+contracts live here; deterministic behavioral source/architecture/checksum
+coverage lives in test_ffmpeg_staging.py. Native release builds also execute
+license, linkage and six audio roundtrip checks before bundling.
 """
 
 from __future__ import annotations
@@ -44,127 +43,27 @@ def _ffmpeg_step(text: str, heading: str) -> str:
     return body.split("\n      - name:", 1)[0]
 
 
-class TestWindowsFfmpegPinning:
+class TestFfmpegSharedStaging:
+    def test_release_workflows_use_the_same_verified_stager(self, windows_text, macos_text):
+        assert "python scripts/stage_ffmpeg.py --platform windows-x64" in windows_text
+        assert "python scripts/stage_ffmpeg.py --platform macos-arm64" in macos_text
+        assert "evermeet.cx/ffmpeg/" not in macos_text
+        assert "releases/download/latest/" not in windows_text
 
-    def test_does_not_use_the_mutable_latest_tag(self, windows_text: str):
-        step = _ffmpeg_step(windows_text, "Download FFmpeg (LGPL) for bundling")
-        assert "/releases/download/latest/" not in step, (
-            "the mutable 'latest' release alias must not be used for a "
-            "bundled binary — it can change what a release ships with no audit trail"
-        )
-        assert "ffmpeg-master-latest" not in step
+    def test_local_macos_build_does_not_trust_arbitrary_staged_binaries(self, macos_build_script_text):
+        section = macos_build_script_text.split("FFmpeg (LGPL) staging", 1)[1].split("# ── Tests", 1)[0]
+        assert "$PY scripts/stage_ffmpeg.py --platform macos-arm64" in section
+        assert "Using already-staged" not in section
+        assert "evermeet.cx" not in section
 
-    def test_pins_an_exact_tag_and_asset(self, windows_text: str):
-        step = _ffmpeg_step(windows_text, "Download FFmpeg (LGPL) for bundling")
-        assert re.search(r'\$tag\s*=\s*"autobuild-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}"', step), (
-            "an exact, dated BtbN release tag must be pinned"
-        )
-        assert re.search(r'\$asset\s*=\s*"ffmpeg-[^"]+-win64-lgpl\.zip"', step)
-
-    def test_verifies_a_sha256_checksum_and_fails_closed(self, windows_text: str):
-        step = _ffmpeg_step(windows_text, "Download FFmpeg (LGPL) for bundling")
-        assert re.search(r'\$expectedSha256\s*=\s*"[0-9a-f]{64}"', step), (
-            "an expected SHA-256 must be pinned alongside the URL"
-        )
-        assert "Get-FileHash" in step
-        assert "checksum mismatch" in step.lower()
-        assert "throw" in step, "a checksum mismatch must fail the build, not warn"
-
-    def test_removes_the_downloaded_zip_after_verification(self, windows_text: str):
-        step = _ffmpeg_step(windows_text, "Download FFmpeg (LGPL) for bundling")
-        assert "Remove-Item -Recurse -Force ffmpeg-tmp, ffmpeg-lgpl.zip" in step
-
-
-class TestMacosFfmpegPinning:
-
-    def test_does_not_use_the_mutable_getrelease_alias(self, macos_text: str):
-        step = _ffmpeg_step(macos_text, "Stage LGPL FFmpeg (arm64) for bundling")
-        download_line = next(
-            line for line in step.splitlines() if "curl" in line and "evermeet.cx" in line
-        )
-        assert "getrelease" not in download_line, (
-            "evermeet.cx's 'getrelease' endpoint always serves whatever is "
-            "currently published — an exact version must be pinned instead"
-        )
-
-    def test_pins_an_exact_version(self, macos_text: str):
-        step = _ffmpeg_step(macos_text, "Stage LGPL FFmpeg (arm64) for bundling")
-        assert re.search(r'version="\d+\.\d+(\.\d+)?"', step)
-        assert re.search(r"\$tool-\$version\.zip", step)
-
-    def test_verifies_a_sha256_checksum_per_tool_and_fails_closed(self, macos_text: str):
-        # A plain `case`, not an associative array: macOS runners execute
-        # this via bash 3.2 (Apple's frozen GPLv2 release), which has no
-        # `declare -A` support -- see test_release_workflow_policy.py's
-        # test_macos_workflow_avoids_bash_4_only_syntax.
-        step = _ffmpeg_step(macos_text, "Stage LGPL FFmpeg (arm64) for bundling")
-        assert re.search(r'ffmpeg\)\s+expected="[0-9a-f]{64}"', step)
-        assert re.search(r'ffprobe\)\s+expected="[0-9a-f]{64}"', step)
-        assert "shasum -a 256" in step
-        assert "checksum mismatch" in step.lower()
-        assert re.search(r"exit 1", step), "a checksum mismatch must fail the build, not warn"
-
-
-class TestMacosBuildScriptFfmpegPinning:
-    """`scripts/build_macos.sh` stages FFmpeg into the very same
-    `packaging/ffmpeg/` directory PyInstaller bakes into the shipped .app.
-    Phase 4 pinned both release *workflows* but left this script on
-    evermeet.cx's mutable `getrelease` alias with no checksum at all, so a
-    locally-built .app could bundle an unverified media binary. The script
-    duplicates the workflow's pin (it cannot read a YAML step), so the
-    cross-check below is what actually keeps the two honest -- the same
-    pattern test_dependency_versions.py uses for the bgutil pin.
-    """
-
-    def test_does_not_use_the_mutable_getrelease_alias(self, macos_build_script_text: str):
-        download_line = next(
-            line for line in macos_build_script_text.splitlines()
-            if "curl" in line and "evermeet.cx" in line
-        )
-        assert "getrelease" not in download_line, (
-            "evermeet.cx's 'getrelease' endpoint always serves whatever is "
-            "currently published -- an exact version must be pinned instead"
-        )
-        assert "$tool-$FFMPEG_VERSION.zip" in download_line
-
-    def test_verifies_a_sha256_per_tool_and_fails_closed(self, macos_build_script_text: str):
-        assert "shasum -a 256" in macos_build_script_text
-        assert "checksum mismatch" in macos_build_script_text.lower()
-        staging = macos_build_script_text.split("FFmpeg (LGPL) staging", 1)[1]
-        assert re.search(r'\$actual"?\s*!=\s*"?\$expected', staging), (
-            "the computed hash must be compared against the pinned one"
-        )
-        assert "exit 1" in staging, (
-            "a checksum mismatch must fail the build, not warn and continue"
-        )
-
-    def test_pin_matches_the_release_workflow(
-        self, macos_build_script_text: str, macos_text: str
-    ):
-        """The authoritative release path is release-macos.yml; this script
-        must never drift away from it and stage a different FFmpeg."""
-        step = _ffmpeg_step(macos_text, "Stage LGPL FFmpeg (arm64) for bundling")
-
-        workflow_version = re.search(r'version="([\d.]+)"', step)
-        assert workflow_version, "could not find the workflow's pinned version"
-        script_version = re.search(r'FFMPEG_VERSION="([\d.]+)"', macos_build_script_text)
-        assert script_version, "could not find build_macos.sh's FFMPEG_VERSION"
-        assert script_version.group(1) == workflow_version.group(1), (
-            f"build_macos.sh pins FFmpeg {script_version.group(1)} but "
-            f"release-macos.yml pins {workflow_version.group(1)} -- keep them in sync."
-        )
-
-        for tool, script_var in (("ffmpeg", "FFMPEG_SHA256"), ("ffprobe", "FFPROBE_SHA256")):
-            workflow_hash = re.search(rf'{tool}\)\s+expected="([0-9a-f]{{64}})"', step)
-            assert workflow_hash, f"could not find the workflow's {tool} SHA-256"
-            script_hash = re.search(
-                rf'{script_var}="([0-9a-f]{{64}})"', macos_build_script_text
-            )
-            assert script_hash, f"could not find build_macos.sh's {script_var}"
-            assert script_hash.group(1) == workflow_hash.group(1), (
-                f"build_macos.sh's {script_var} does not match release-macos.yml's "
-                f"pinned {tool} hash -- keep them in sync."
-            )
+    def test_native_build_disables_unreviewed_dependencies_and_gpl(self):
+        script = (REPO_ROOT / "scripts" / "build_ffmpeg_macos.py").read_text()
+        for option in ("--disable-autodetect", "--disable-gpl", "--disable-nonfree", "--disable-shared", "--enable-static"):
+            assert option in script
+        for encoder in ("--enable-libmp3lame", "--enable-libopus", "--enable-libvorbis"):
+            assert encoder in script
+        assert "PKG_CONFIG_LIBDIR" in script
+        assert "--enable-gpl" not in script
 
 
 class TestDenoRuntimePinning:

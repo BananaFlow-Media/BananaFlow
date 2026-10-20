@@ -188,12 +188,11 @@ class TestHebrewQuality:
 
 
 class TestUpdateStoryConsistency:
-    """The whole app must tell one story: updating BananaFlow is the primary
-    path and component updates are advanced/source-mode support."""
+    """Full-app and independent component update choices must stay honest."""
 
-    def test_component_check_is_labeled_advanced_in_both_languages(self):
-        assert "(Advanced)" in TRANSLATIONS["en"]["check_component_updates_title"]
-        assert "(מתקדם)" in TRANSLATIONS["he"]["check_component_updates_title"]
+    def test_component_check_describes_independent_updates_in_both_languages(self):
+        assert "without downloading" in TRANSLATIONS["en"]["check_component_updates_desc"]
+        assert "בלי להוריד" in TRANSLATIONS["he"]["check_component_updates_desc"]
 
     def test_app_check_is_labeled_recommended_in_both_languages(self):
         assert "Recommended" in TRANSLATIONS["en"]["check_app_updates_desc"]

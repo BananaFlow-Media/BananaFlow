@@ -21,7 +21,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl
+from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, QThread
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QSystemTrayIcon, QMenu, QVBoxLayout, QWidget,
@@ -87,9 +87,10 @@ from core.download_recovery       import (
 )
 
 # ── Theme / i18n ───────────────────────────────────────────────────────────────
-from ui.i18n         import current_language, t, request_language_restart
+from ui.i18n         import current_language, t
 from ui.dialogs.styled_dialog import (
     StyledMessageDialog,
+    make_button,
     confirm,
     get_text,
     show_info,
@@ -323,6 +324,16 @@ class AppWindow(FluentWindow):
         self._tray:             Optional[QSystemTrayIcon] = None
         self._update_worker:    Optional["UpdateWorker"]  = None
 
+        self._restart_request = None
+        self._restart_launched = False
+        self._shutdown_accepted = False
+        self._prepared_app_update = None
+        self._prepared_update_retry = False
+        self._components_restart_ready = False
+        self._last_update_release = None
+        self._last_component_updates = []
+        self._prepared_update_worker = None
+
         # ── Build ─────────────────────────────────────────────────────────────
         self._build_panels()
         self._url_bar.clear_url()
@@ -504,6 +515,13 @@ class AppWindow(FluentWindow):
         self.stackedWidget.setObjectName("stackedWidget")
         self.navigationInterface.setObjectName("navigationInterface")
         self.titleBar.setObjectName("titleBar")
+        self._update_available_btn = make_button(t("update_available_btn"), "secondary")
+        self._update_available_btn.setAccessibleName(t("update_available_btn"))
+        self._update_available_btn.clicked.connect(self._show_available_updates)
+        self._update_available_btn.hide()
+        # FluentTitleBar owns this layout on every supported desktop target.
+        self.titleBar.hBoxLayout.insertWidget(1, self._update_available_btn, 0)
+
         self.navigationInterface.panel.setObjectName("navigationPanel")
         self.navigationInterface.setExpandWidth(200)
         if self.layoutDirection() == Qt.LayoutDirection.RightToLeft:
@@ -646,6 +664,17 @@ class AppWindow(FluentWindow):
         """A Tag Editor disk op is still finishing after the bounded timeout —
         keep the app open and tell the user (never kill the thread; defect 6)."""
         self._metadata_shutdown_wired = False   # allow a later close to re-arm
+        if getattr(self, "_restart_request", None) is not None:
+            self._restart_request = None
+            self._restart_lifecycle_approved = False
+            self.setEnabled(True)
+            # A timed-out restart is no longer armed. A much later worker
+            # completion must not unexpectedly close the now-usable window.
+            try:
+                self._metadata_ctrl.shutdown_ready.disconnect(self.close)
+                self._metadata_ctrl.shutdown_timed_out.disconnect(self._on_metadata_shutdown_timeout)
+            except (RuntimeError, TypeError):
+                pass
         try:
             from qfluentwidgets import InfoBar, InfoBarPosition
             InfoBar.warning(
@@ -868,6 +897,13 @@ class AppWindow(FluentWindow):
         if self._cfg.clipboard_monitor:
             self._clipboard_worker.start()
         self._url_bar.set_clipboard_monitor_active(self._cfg.clipboard_monitor)
+
+        # Recovery is local-only and independent of automatic network checks.
+        # Large persisted artifacts are re-verified off the GUI thread.
+        from ui.workers.app_update_worker import AppUpdateWorker
+        self._prepared_update_worker = AppUpdateWorker(parent=self)
+        self._prepared_update_worker.completed.connect(self._on_prepared_update_restored)
+        self._prepared_update_worker.start()
 
         if self._cfg.check_updates:
             from ui.workers.update_worker import UpdateWorker
@@ -2422,6 +2458,8 @@ class AppWindow(FluentWindow):
         """Startup check finished. Show one prompt covering everything the
         user hasn't already dismissed or snoozed; stay silent otherwise
         (including on check failures — startup checks never nag)."""
+        if getattr(self, "_restart_request", None) is not None or getattr(self, "_shutdown_accepted", False):
+            return
         store = UpdateStateStore()
 
         app_release = None
@@ -2441,9 +2479,87 @@ class AppWindow(FluentWindow):
 
         if app_release is None and not component_updates:
             return
+        self.show_update_prompt(app_release, component_updates)
+
+    def show_update_prompt(self, app_release=None, component_updates=None) -> None:
+        self._last_update_release = app_release
+        self._last_component_updates = list(component_updates or [])
+        self._refresh_update_affordance()
+        prepared = self._prepared_app_update
+        if app_release is not None and prepared is not None and prepared.version != app_release.version:
+            prepared = None
         UpdatePromptDialog(
-            store, app_release, component_updates, parent=self,
+            UpdateStateStore(), app_release, component_updates, parent=self,
+            prepared_update=prepared, components_ready=self._components_restart_ready,
+            retry_update=self._prepared_update_retry,
         ).exec()
+
+    def _show_available_updates(self) -> None:
+        self.show_update_prompt(self._last_update_release, self._last_component_updates)
+
+    def _refresh_update_affordance(self) -> None:
+        ready = self._prepared_app_update is not None or self._components_restart_ready
+        self._update_available_btn.setText(t("update_ready_btn") if ready else t("update_available_btn"))
+        self._update_available_btn.setAccessibleName(self._update_available_btn.text())
+        self._update_available_btn.setVisible(bool(ready or self._last_update_release or self._last_component_updates))
+
+    def _on_updates_deferred(self, update_ids) -> None:
+        # Remind/Skip should also dismiss this session's badge, while an
+        # explicitly prepared update remains available through its ready badge.
+        release = self._last_update_release
+        if release is not None and app_update_id(release.version) in update_ids:
+            self._last_update_release = None
+        self._last_component_updates = [
+            component for component in self._last_component_updates
+            if component_update_id(component.key, component.latest_version) not in update_ids
+        ]
+        self._refresh_update_affordance()
+
+    def _on_components_prepared(self) -> None:
+        self._components_restart_ready = True
+        self._last_component_updates = []
+        self._refresh_update_affordance()
+
+    def _on_app_update_prepared(self, prepared) -> None:
+        self._prepared_app_update = prepared
+        self._prepared_update_retry = False
+        self._refresh_update_affordance()
+
+    def _on_prepared_update_restored(self, prepared, error: str) -> None:
+        if prepared is not None:
+            self._on_app_update_prepared(prepared)
+            self._prepared_update_retry = (
+                getattr(self._prepared_update_worker, "update_status", {}).get("status") == "error"
+            )
+        elif error:
+            # Corrupt/unusable local state is never silently installed. Manual
+            # Download remains available; startup should not nag on failure.
+            logger.warning("[AppWindow] Saved app update unavailable: %s", error)
+
+    def request_restart(self, prepared_update=None) -> bool:
+        """Ask the normal close path to restart, without cancelling user work.
+
+        A Tag Editor Cancel does not leave a latent restart intent. Its existing
+        continuation re-enters here only after Apply/Keep Draft/Discard succeeds.
+        """
+        from ui.services.restart import RestartRequest, restart_block_reason
+        if getattr(self, "_restart_request", None) is not None:
+            return False
+        reason = restart_block_reason(self)
+        if reason:
+            show_info(self, t("restart_required_title"), t(reason))
+            return False
+        if not self._metadata_ctrl.guard_lifecycle_action(
+            "close", lambda: self.request_restart(prepared_update),
+        ):
+            return False
+        self._restart_request = RestartRequest(prepared_update)
+        self._restart_lifecycle_approved = True
+        # Prevent new work from racing a deferred shutdown. The title-bar
+        # close/tray policy remains untouched for ordinary close requests.
+        self.setEnabled(False)
+        self.close()
+        return True
 
     # ──────────────────────────────────────────────────────────────────────────
     # Cancel  (cancels all in-flight operations)
@@ -2474,7 +2590,6 @@ class AppWindow(FluentWindow):
         # less reliable than a clean restart. See ui/i18n.py for the
         # language_changed signal that future live-retranslate work will use.
         if self._cfg.language != self._previous_language:
-            new_lang = self._cfg.language
             restart_now = confirm(
                 self,
                 t("restart_required_title"),
@@ -2483,7 +2598,7 @@ class AppWindow(FluentWindow):
                 cancel_text=t("restart_later_btn"),
             )
             if restart_now:
-                request_language_restart(QApplication.instance(), new_lang)
+                self.request_restart()
                 return
             # User declined — revert config so the in-memory state matches
             # what the user will see until they restart manually.
@@ -2563,7 +2678,8 @@ class AppWindow(FluentWindow):
         7. Accept the close event
         """
         # 1. Tray intercept
-        if self._cfg.tray_on_close and self._tray and self._tray.isVisible():
+        restarting = getattr(self, "_restart_request", None) is not None
+        if not restarting and self._cfg.tray_on_close and self._tray and self._tray.isVisible():
             event.ignore()
             self.hide()
             self._tray.showMessage(
@@ -2574,17 +2690,45 @@ class AppWindow(FluentWindow):
             )
             return
 
+        # A restart is never permission to interrupt a download, conversion,
+        # scan, Apply, restore or other Tag Editor operation.
+        if restarting:
+            from ui.services.restart import restart_block_reason
+            reason = restart_block_reason(self)
+            if reason:
+                self._restart_request = None
+                self._restart_lifecycle_approved = False
+                self.setEnabled(True)
+                event.ignore()
+                show_info(self, t("restart_required_title"), t(reason))
+                return
+        else:
+            converter = getattr(self, "_converter_panel", None)
+            converter_worker = getattr(converter, "_worker", None)
+            if converter_worker is not None and converter_worker.isRunning():
+                event.ignore()
+                show_info(self, t("restart_required_title"), t("restart_busy_conversion"))
+                return
+
         # Pending Tag Editor proposals have their own lifecycle.  The dialog
         # continuation re-enters close() only after Apply/Keep Draft/Discard;
         # Cancel leaves the window and workspace untouched.
-        if not self._metadata_ctrl.guard_lifecycle_action("close", self.close):
+        if not (restarting and getattr(self, "_restart_lifecycle_approved", False)) and not self._metadata_ctrl.guard_lifecycle_action("close", self.close):
             event.ignore()
             return
 
         metadata_panel = getattr(self, "_metadata_panel", None)
-        if metadata_panel is not None and not metadata_panel.shutdown_artwork_workers():
+        if metadata_panel is not None and not metadata_panel.shutdown_artwork_workers(timeout_ms=0):
+            # A decoder may not reach its cancellation boundary immediately.
+            # Never block the GUI for five seconds or strand a disabled restart
+            # window on this veto. The prepared update remains available.
+            if restarting:
+                self._restart_request = None
+                self._restart_lifecycle_approved = False
+                self.setEnabled(True)
+                show_info(self, t("restart_required_title"), t("restart_busy_metadata"))
             event.ignore()
-            logger.warning("[AppWindow] Artwork thumbnail worker still finishing; close deferred")
+            logger.warning("[AppWindow] Artwork thumbnail worker still finishing; app kept open")
             return
 
         # 1b. Bounded, event-loop-safe shutdown for any in-flight Tag Editor
@@ -2671,17 +2815,42 @@ class AppWindow(FluentWindow):
         fetch_worker  = self._fetch_ctrl._fetch_worker    # noqa: SLF001
         search_worker = self._search_ctrl._search_worker  # noqa: SLF001
         scraper_worker= self._fetch_ctrl._scraper_worker  # noqa: SLF001
-        for attr_name, w in (
-            ("FetchWorker",   fetch_worker),
-            ("SearchWorker",  search_worker),
-            ("ScraperWorker", scraper_worker),
-        ):
-            if w and w.isRunning():
-                if hasattr(w, "cancel"):
-                    w.cancel()
-                finished = w.wait(2000)
-                if not finished:
-                    logger.warning("[AppWindow] %s did not finish within 2s", attr_name)
+        remaining_workers = [fetch_worker, search_worker, scraper_worker]
+        # Includes converter/preflight, thumbnail, Settings checks and any
+        # updater dialog worker. QObject ownership keeps them alive until all
+        # actual QThread.finished signals have occurred, not just result signals.
+        find_children = getattr(self, "findChildren", None)
+        if callable(find_children):
+            remaining_workers.extend(find_children(QThread))
+        # The startup checker has its own hide/defer handling below.
+        startup_update = getattr(self, "_update_worker", None)
+        running_workers = [
+            worker for worker in remaining_workers
+            if worker is not None and worker is not startup_update and worker.isRunning()
+        ]
+        if running_workers:
+            interrupted = getattr(self, "_closing_worker_ids", set())
+            for worker in running_workers:
+                if id(worker) in interrupted:
+                    continue
+                worker.requestInterruption()
+                cancel = getattr(worker, "cancel", None)
+                if callable(cancel):
+                    cancel()
+                interrupted.add(id(worker))
+            self._closing_worker_ids = interrupted
+            event.ignore()
+            if not getattr(self, "_owned_workers_close_scheduled", False):
+                self._owned_workers_close_scheduled = True
+                def _retry_close_after_workers() -> None:
+                    self._owned_workers_close_scheduled = False
+                    self.close()
+                QTimer.singleShot(50, _retry_close_after_workers)
+            if not getattr(self, "_owned_workers_close_logged", False):
+                self._owned_workers_close_logged = True
+                logger.info("[AppWindow] Deferring close until owned workers finish safely")
+            return
+        self._closing_worker_ids = set()
 
         # Cancel metadata workers
         self._metadata_ctrl.cancel_scan()
@@ -2719,8 +2888,9 @@ class AppWindow(FluentWindow):
             self._svc.close()
             logger.info("[AppWindow] Services closed — shutdown complete")
 
+        self._shutdown_accepted = True
         event.accept()
-        if getattr(self, "_quit_after_deferred_close", False):
+        if restarting or getattr(self, "_quit_after_deferred_close", False):
             # Hiding the last window while a child QThread drains means Qt no
             # longer emits its normal last-visible-window auto-quit when the
             # retried close is accepted. Exit only after every cleanup stage

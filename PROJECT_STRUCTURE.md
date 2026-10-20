@@ -108,6 +108,8 @@ Data + services: `history_db.py` (SQLite + FTS5), `queue_persistence.py`,
 Reliability + updates: `youtube_doctor.py`, `warning_classifier.py`,
 `runtime_components.py` (bundled PO Token Provider / JS runtime),
 `update_checker.py` (GitHub releases), `component_updates.py` (PyPI),
+`app_updates.py` (verified full-app preparation and persisted ready state),
+`app_update_helper.py` (standalone platform replacement/relaunch),
 `update_state.py`, `cookie_wizard.py`.
 
 ## `ui/` — frontend (PySide6 + QFluentWidgets)
@@ -137,7 +139,7 @@ Reliability + updates: `youtube_doctor.py`, `warning_classifier.py`,
   `scraper_worker`, `channel_scrape_worker`, `thumbnail_worker`,
   `artist_catalog_worker`,
   `clipboard_worker`, `offline_monitor`, `update_worker`,
-  `component_install_worker`, `duplicate_detector_worker`,
+  `component_install_worker`, `app_update_worker`, `duplicate_detector_worker`,
   `metadata_worker`.
 
 ## `utils/` — shared helpers (no Qt)

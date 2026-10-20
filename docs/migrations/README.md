@@ -34,3 +34,13 @@ Any persisted schema, file location or meaning that can exist on an already-inst
 - **Conflict/failure behavior:** the migration is additive and in-memory, does not rewrite the saved record, and retains the existing tolerant defaults for truncated or version-skewed requests.
 
 The same additive release stores `filename_include_artist` in paused requests and `collection_title`/`disc_total` in general queue state. Missing values keep the legacy filename body and conservative no-invented-folder behavior. New queue items use `collection_title` to distinguish the source collection from the track's album tag and `disc_total` to retain known multi-disc layout when only part of a release is selected; no existing record is rewritten.
+
+## Explicit application updater state
+
+- **Old state:** application updates had only reminder/skip preferences and a website link. No application artifact or installation transaction was persisted.
+- **New state:** `app-updates/` under existing app data stores a schema-versioned prepared pointer and private per-preparation directory containing the verified artifact, copied standalone helper, prepared metadata, explicit installation plan and status. Reminder/skip state is unchanged.
+- **Trigger:** the user explicitly requests preparation. Reading a ready record never authorizes installation. Existing users without this directory require no data migration.
+- **Compatibility:** records must match the running application's installation layout/target and a newer version. Malformed, unsupported, missing or hash-mismatched prepared state is not installable; the manual website path remains available.
+- **Failure/interruption:** incomplete preparation does not replace live program files. Replacement transactions keep recovery state; interrupted directory replacement must preserve/restore the old installation. Windows installed upgrades use the existing Inno installer rather than claiming atomic directory rollback. Application profiles, history and downloaded media are not migration targets.
+
+See [`../architecture/application-updater.md`](../architecture/application-updater.md) for the trust and lifecycle contract.

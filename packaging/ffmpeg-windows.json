@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "target": "windows-x64",
+  "tag": "autobuild-2026-09-30-13-08",
+  "version": "N-127032-g6ae491a26c",
+  "archive": "ffmpeg-N-127032-g6ae491a26c-win64-lgpl.zip",
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-N-127032-g6ae491a26c-win64-lgpl.zip",
+  "sha256": "c73ad424c5f9d94dd48815b4d3531e57130cb9f5c3dc8f21f4aa4e1fdb0658e3",
+  "checksum_source": "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/autobuild-2026-09-30-13-08",
+  "retention_policy": "https://github.com/BtbN/FFmpeg-Builds#release-retention-policy"
+}

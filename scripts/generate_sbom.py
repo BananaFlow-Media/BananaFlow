@@ -7,10 +7,9 @@ Generates a release SBOM covering:
     dependency to keep working), and
   * the pinned native/staged binaries that importlib.metadata cannot see
     (FFmpeg/ffprobe, Deno, the bgutil PO Token Provider Python package,
-    Playwright's Chromium), sourced from the same pinned version/checksum
-    values recorded in THIRD_PARTY_NOTICES.md and the release workflows
-    so the SBOM cannot silently drift from what a release actually
-    bundles. The bgutil provider's own npm dependency tree
+    Playwright's Chromium). FFmpeg uses the selected platform's authoritative
+    pin manifests and verified staging evidence; binary and source/archive
+    hash scopes are explicit and no opposite-platform FFmpeg is invented. The bgutil provider's own npm dependency tree
     (packaging/stage_pot_provider.py) is tracked separately by its
     upstream package-lock.json/deno.lock, not itemized here.
 
@@ -31,58 +30,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import quote, urlencode
+
+import stage_ffmpeg
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Native/staged binaries that are not Python packages, so importlib.metadata
-# cannot see them. Kept in sync with THIRD_PARTY_NOTICES.md and the pinned
-# download steps in .github/workflows/release-windows.yml and
-# release-macos.yml — update all three together when a pin changes.
+# Non-FFmpeg components retain their existing inventory policy. FFmpeg itself
+# is derived below from the selected target's authoritative manifest and the
+# verified staging evidence, never copied from another platform's workflow.
 _NATIVE_COMPONENTS = [
     {
-        "name": "FFmpeg (Windows, LGPL)",
-        "version": "N-126455-gecc7eb519e",
-        "license": "LGPL-2.1-or-later WITH LGPL-3.0-linking-exception",
-        "source": "https://github.com/BtbN/FFmpeg-Builds",
-        "purl": "pkg:generic/ffmpeg@N-126455-gecc7eb519e?download_url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-07-15-39/ffmpeg-N-126455-gecc7eb519e-win64-lgpl.zip",
-        "hashes": {"SHA-256": "95e1817d8717f2b0c34b1c1422f3840cebd5afc533bb5dd1050e093657d42326"},
-    },
-    {
-        "name": "FFmpeg (macOS, LGPL)",
-        "version": "8.1.2",
-        "license": "LGPL-2.1-or-later WITH LGPL-3.0-linking-exception",
-        "source": "https://evermeet.cx/ffmpeg/",
-        "purl": "pkg:generic/ffmpeg@8.1.2?download_url=https://evermeet.cx/ffmpeg/ffmpeg-8.1.2.zip",
-        "hashes": {"SHA-256": "e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69"},
-    },
-    {
-        "name": "ffprobe (macOS, LGPL)",
-        "version": "8.1.2",
-        "license": "LGPL-2.1-or-later WITH LGPL-3.0-linking-exception",
-        "source": "https://evermeet.cx/ffmpeg/",
-        "purl": "pkg:generic/ffprobe@8.1.2?download_url=https://evermeet.cx/ffmpeg/ffprobe-8.1.2.zip",
-        "hashes": {"SHA-256": "399b93f0b9862f69767afa343e90c2f48d7e7958cadbb6deb76a012d0e3b7ce3"},
-    },
-    {
         "name": "Deno",
-        "version": "2.9.1",
         "license": "MIT",
         "source": "https://github.com/denoland/deno",
-        "purl": "pkg:github/denoland/deno@v2.9.1",
-        # Unlike the FFmpeg entries above (hash of the downloaded .zip),
-        # this is the SHA-256 of the extracted deno.exe itself, matching
-        # THIRD_PARTY_NOTICES.md's recorded evidence — not the release
-        # .zip's own hash, which scripts/fetch_deno_runtime.ps1 verifies
-        # separately (against the official .sha256sum asset) before
-        # extraction. hash_note carries this distinction into the
-        # human-readable inventory; it is not a CycloneDX field.
-        "hashes": {"SHA-256": "3819117e301d48a6931f9a1a4fb5e4a10c464163189bcff8fce5d75025d6f2a0"},
-        "hash_note": "of extracted deno.exe, not the release .zip",
+        # Version comes from the fetch script and the executable hash is
+        # computed from staging, not copied from an old release's notices.
     },
     {
         "name": "bgutil-ytdlp-pot-provider",
@@ -126,11 +96,95 @@ def _installed_python_packages() -> list[dict]:
     return components
 
 
-def _native_bom_components() -> list[dict]:
+def _ffmpeg_items(target: str | None, staging_dir: Path) -> list[dict]:
+    if target not in {"windows-x64", "macos-arm64"}:
+        return []
+    extension = ".exe" if target == "windows-x64" else ""
+    paths = {name: staging_dir / f"{name}{extension}" for name in ("ffmpeg", "ffprobe")}
+    if not any(path.exists() for path in paths.values()):
+        return []
+    evidence = json.loads((staging_dir / "ffmpeg-build.json").read_text(encoding="utf-8"))
+    if evidence["target"] != target:
+        raise ValueError("FFmpeg staging evidence belongs to another platform")
+    if target == "windows-x64":
+        pin = stage_ffmpeg.load_windows_pin()
+        if evidence["input"] != pin:
+            raise ValueError("FFmpeg staging evidence does not match the Windows release pin")
+        version = pin["version"]
+        source_url = "https://github.com/BtbN/FFmpeg-Builds"
+        inputs = [{
+            "name": "FFmpeg Windows upstream archive", "version": version,
+            "source": pin["url"], "hashes": {"SHA-256": pin["sha256"]},
+            "hash_note": "verified upstream binary archive, not an executable hash",
+            "purl": "pkg:generic/ffmpeg@" + quote(version, safe="") + "?" + urlencode({"download_url": pin["url"]}),
+        }]
+    else:
+        pins = stage_ffmpeg.macos.load_pins()
+        if (
+            evidence["sources"] != pins["sources"]
+            or evidence["source_manifest_sha256"] != stage_ffmpeg.macos.sha256(stage_ffmpeg.macos.PINS)
+            or evidence["build_recipe_sha256"] != stage_ffmpeg.macos.sha256(Path(stage_ffmpeg.macos.__file__))
+        ):
+            raise ValueError("FFmpeg staging evidence does not match the macOS source pins")
+        version = next(s["version"] for s in pins["sources"] if s["name"] == "ffmpeg")
+        source_url = "https://ffmpeg.org/"
+        inputs = [{
+            "name": source["name"] + " (macOS source)", "version": source["version"],
+            "license": source["license"], "source": source["url"],
+            "purl": f"pkg:generic/{source['name']}@{quote(source['version'], safe='')}?" + urlencode({"download_url": source["url"]}),
+            "hashes": {"SHA-256": source["sha256"]},
+            "hash_note": "verified source archive, not a built executable hash",
+        } for source in pins["sources"]]
+    items = []
+    for name, path in paths.items():
+        binary = evidence["binaries"][name]
+        actual = stage_ffmpeg.macos.sha256(path)
+        if actual != binary["sha256"]:
+            raise ValueError(f"{name} changed after verified FFmpeg staging")
+        stage_ffmpeg.macos.verify_lgpl(binary["version"], binary["license"], name, version)
+        license_id = "LGPL-3.0-or-later" if "--enable-version3" in binary["version"] else "LGPL-2.1-or-later"
+        if target == "windows-x64":
+            inputs[0]["license"] = license_id
+        items.append({
+            "type": "application", "name": f"{name} ({target}, LGPL)",
+            "version": version, "license": license_id, "source": source_url,
+            "purl": f"pkg:generic/{name}@{quote(version, safe='')}?" + urlencode({"target": target}),
+            "hashes": {"SHA-256": actual},
+            "hash_note": "verified staged executable, before packaging/signing",
+        })
+    return items + inputs
+
+
+def _native_items(target: str | None = None, staging_dir: Path | None = None) -> list[dict]:
+    if target is None:
+        target = {"win32": "windows-x64", "darwin": "macos-arm64"}.get(sys.platform)
+    items = ([] if os.environ.get("BANANAFLOW_BUNDLE_FFMPEG") == "0" else
+             _ffmpeg_items(target, staging_dir or REPO_ROOT / "packaging" / "ffmpeg"))
+    for original in _NATIVE_COMPONENTS:
+        item = dict(original)
+        if item["name"] in {"Deno", "bgutil-ytdlp-pot-provider"} and target != "windows-x64":
+            continue
+        if item["name"] == "Deno":
+            binary = REPO_ROOT / "packaging" / "runtime" / "deno.exe"
+            if not binary.is_file():
+                continue
+            fetch = (REPO_ROOT / "scripts" / "fetch_deno_runtime.ps1").read_text(encoding="utf-8")
+            version_match = re.search(r"\$Version\s*=\s*'([^']+)'", fetch)
+            if not version_match:
+                raise ValueError("Deno fetch script has no default version pin")
+            item["version"] = version_match.group(1)
+            item["purl"] = "pkg:github/denoland/deno@v" + item["version"]
+            item["hashes"] = {"SHA-256": stage_ffmpeg.macos.sha256(binary)}
+            item["hash_note"] = "actual staged deno.exe, not the upstream archive"
+        items.append(item)
+    return items
+
+
+def _native_bom_components(target: str | None = None, staging_dir: Path | None = None) -> list[dict]:
     components = []
-    for item in _NATIVE_COMPONENTS:
+    for item in _native_items(target, staging_dir):
         comp = {
-            "type": "library",
+            "type": item.get("type", "library"),
             "name": item["name"],
             "version": item["version"],
             "purl": item["purl"],
@@ -141,6 +195,8 @@ def _native_bom_components() -> list[dict]:
             comp["hashes"] = [
                 {"alg": alg, "content": digest} for alg, digest in item["hashes"].items()
             ]
+        if item.get("hash_note"):
+            comp["properties"] = [{"name": "bananaflow:hash-scope", "value": item["hash_note"]}]
         components.append(comp)
     return components
 
@@ -182,13 +238,16 @@ def write_human_readable(components: list[dict], native: list[dict], out_path: P
         "| Component | Version | License | Source | SHA-256 |",
         "|---|---|---|---|---|",
     ]
-    for item in _NATIVE_COMPONENTS:
-        digest = next(iter(item.get("hashes", {}).values()), "—")
-        if digest != "—" and item.get("hash_note"):
-            digest = f"{digest} ({item['hash_note']})"
+    for item in native:
+        digest = next((h["content"] for h in item.get("hashes", []) if h["alg"] == "SHA-256"), "—")
+        hash_note = next((p["value"] for p in item.get("properties", []) if p["name"] == "bananaflow:hash-scope"), "")
+        if digest != "—" and hash_note:
+            digest = f"{digest} ({hash_note})"
+        license_name = item["licenses"][0]["license"]["name"]
+        source = item["externalReferences"][0]["url"]
         lines.append(
-            f"| {item['name']} | {item['version']} | {item['license']} | "
-            f"{item['source']} | {digest} |"
+            f"| {item['name']} | {item['version']} | {license_name} | "
+            f"{source} | {digest} |"
         )
     lines += [
         "",
@@ -212,7 +271,11 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     python_components = _installed_python_packages()
-    native_components = _native_bom_components()
+    try:
+        native_components = _native_bom_components()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"SBOM refuses unverified native staging: {error}", file=sys.stderr)
+        return 1
     bom = build_cyclonedx(native_components + python_components)
 
     json_path = out_dir / "sbom.cyclonedx.json"

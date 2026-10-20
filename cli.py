@@ -403,6 +403,20 @@ def _run_doctor(args) -> int:
 
 def main() -> int:
     args = build_parser().parse_args()
+    # --help / --version exit in argparse and remain available. Every real
+    # operation must wait until application replacement is complete, before
+    # component imports, network requests or user-data writes begin.
+    from core.app_update_helper import AppUpdateError, update_lock_is_held
+    from utils.paths import get_app_data_dir
+    from ui.i18n import t
+    try:
+        updating = update_lock_is_held(get_app_data_dir() / "app-updates" / "apply.lock")
+    except (OSError, ValueError, AppUpdateError):
+        print(t("app_update_state_unavailable_msg"), file=sys.stderr)
+        return 2
+    if updating:
+        print(t("app_update_running_msg"), file=sys.stderr)
+        return 2
     setup_logging(debug=args.debug)
     logger = logging.getLogger("cli")
 

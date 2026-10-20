@@ -34,7 +34,7 @@ The English and Hebrew full user guides are companions, not independent products
   all new work paused, Retry group vs Skip group) and YouTube rate-limit
   countdown/safety-margin wording;
 - artist-catalog category/release names and duplicate-confidence wording (Albums, Singles & EPs, Compilations, Appears On, exact/probable, category-level and release-level “Only …”);
-- release/update behavior.
+- release/update behavior, including separate component/full-app actions, download progress, install/restart, Later, active-work refusal and the manual website option.
 
 A behavior change documented in one guide requires review of the other in the same PR.
 

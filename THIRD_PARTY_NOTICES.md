@@ -17,14 +17,14 @@ BananaFlow is licensed as GPL-3.0-or-later. This document records third-party pa
 | Field | Policy/current reviewed input |
 |---|---|
 | Project | FFmpeg / ffprobe |
-| License | Build-dependent; BananaFlow's reviewed Windows input is expected to be LGPL-compatible with the GPL application distribution |
+| License | Build-dependent: current reviewed Windows archive carries LGPL-3.0-or-later; native macOS recipe targets LGPL-2.1-or-later. Verify actual runtime license/configuration before release |
 | Source | https://ffmpeg.org/ |
 | Use | yt-dlp post-processing, conversion/probing, HLS/DASH/media operations |
 | Release requirement | Inspect the **actual staged binary** with `ffmpeg -version`; record configure/license status and checksums; never infer license from filename |
 
-For the reviewed Windows release input, the staged build has been checked as an LGPLv3-effective `--enable-version3` build with no `--enable-gpl` / `--enable-nonfree`. If FFmpeg is restaged, that conclusion must be re-verified rather than copied forward.
+The historical Windows 1.0.0 input below was checked as an LGPLv3-effective `--enable-version3` build with no `--enable-gpl` / `--enable-nonfree`. That historical runtime inspection does not certify a restaged build; every current input must pass its own executable license/configuration checks.
 
-The current recorded staged input from the 1.0.0 release preparation was:
+The historical staged input from the 1.0.0 release preparation was:
 
 - build `N-124549-g1572784128-20260519`;
 - `ffmpeg.exe` SHA-256 `2cbdf99e2c5a4fbe3c653478e11cdf331f3345f732ee64d54b096c50ea7838a6`;
@@ -32,9 +32,41 @@ The current recorded staged input from the 1.0.0 release preparation was:
 
 These are point-in-time release inputs, not promises about future builds.
 
-The reviewed Windows input for the 1.2.0 release is `N-126455-gecc7eb519e`
-from `autobuild-2026-09-07-15-39`; its downloaded archive SHA-256 is
-`95e1817d8717f2b0c34b1c1422f3840cebd5afc533bb5dd1050e093657d42326`.
+The earlier 1.2.0 release preparation used `N-126455-gecc7eb519e`
+from `autobuild-2026-09-07-15-39`. That daily archive is no longer available
+under upstream retention. The current reviewed Windows staging pin is recorded
+in [`packaging/ffmpeg-windows.json`](packaging/ffmpeg-windows.json): retained
+month-end build `N-127032-g6ae491a26c`, tag `autobuild-2026-09-30-13-08`, archive
+SHA-256 `c73ad424c5f9d94dd48815b4d3531e57130cb9f5c3dc8f21f4aa4e1fdb0658e3`.
+The verified archive includes the GNU Lesser General Public License version 3
+text. Treat this Windows input as **LGPL-3.0-or-later**, not as the macOS
+LGPL-2.1-or-later recipe below. Its archive hash, exact executable paths and
+x64 PE architecture have been verified; native runtime configuration/license
+and codec checks remain mandatory before accepting a packaged build.
+The staging script verifies the exact archive, actual executable architecture,
+configuration/license and required codecs. Retention is finite; disappearance
+must fail closed and require a newly reviewed pin, not fall back to latest.
+
+macOS Apple Silicon now builds native LGPL FFmpeg from verified source archives
+using [`scripts/build_ffmpeg_macos.py`](scripts/build_ffmpeg_macos.py). This
+replaces the previous evermeet download assumption: evermeet's Intel/GPL build
+must not be labeled native arm64/LGPL. Exact URLs, SHA-256 values and checksum
+sources are owned by
+[`packaging/ffmpeg-macos-sources.json`](packaging/ffmpeg-macos-sources.json):
+
+| Source | Reviewed version | License handling |
+|---|---|---|
+| FFmpeg | 8.1.3 | LGPL-2.1-or-later build; GPL/nonfree options excluded |
+| LAME | 3.100 | LGPL-2.0-or-later; retained source/license for MP3 encoding |
+| Opus | 1.6.1 | BSD-3-Clause; retained source/license |
+| libogg | 1.3.6 | BSD-3-Clause; retained source/license |
+| libvorbis | 1.3.7 | BSD-3-Clause; retained source/license |
+
+The script records configure flags, native architecture, executable checksums,
+license-file checksums and real audio codec smoke results. Source archives,
+build recipe and license texts are retained in the corresponding-source bundle
+when producing release artifacts. The executable validation remains mandatory;
+a source pin alone is not proof of the resulting binary's license or behavior.
 
 ### bgutil yt-dlp PO Token Provider stack
 

@@ -21,75 +21,119 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 generate_sbom = importlib.import_module("generate_sbom")
 
 
-def test_native_components_all_have_required_fields():
-    for item in generate_sbom._NATIVE_COMPONENTS:
-        assert item["name"]
-        assert item["version"]
-        assert item["license"]
-        assert item["source"].startswith("http")
-        assert item["purl"]
+def _staged_ffmpeg(tmp_path, target):
+    import json
+    stage = generate_sbom.stage_ffmpeg
+    extension = ".exe" if target == "windows-x64" else ""
+    evidence = {"target": target, "binaries": {}}
+    if target == "windows-x64":
+        pin = stage.load_windows_pin()
+        evidence["input"] = pin
+        version = pin["version"]
+        configuration = "--enable-version3 --disable-gpl"
+    else:
+        pins = stage.macos.load_pins()
+        evidence["sources"] = pins["sources"]
+        evidence["source_manifest_sha256"] = stage.macos.sha256(stage.macos.PINS)
+        evidence["build_recipe_sha256"] = stage.macos.sha256(Path(stage.macos.__file__))
+        version = next(s["version"] for s in pins["sources"] if s["name"] == "ffmpeg")
+        configuration = "--disable-gpl --disable-nonfree"
+    for name in ("ffmpeg", "ffprobe"):
+        path = tmp_path / f"{name}{extension}"
+        path.write_bytes(name.encode())
+        evidence["binaries"][name] = {
+            "sha256": stage.macos.sha256(path),
+            "version": f"{name} version {version}\nconfiguration: {configuration}",
+            "license": "GNU Lesser General Public License",
+        }
+    (tmp_path / "ffmpeg-build.json").write_text(json.dumps(evidence), encoding="utf-8")
+    return evidence
 
 
-def test_ffmpeg_and_deno_native_components_carry_sha256_hashes():
-    """Everything actually downloaded and verified by a workflow must show
-    the same checksum here, so the SBOM cannot silently drift from what a
-    release build downloads and verifies."""
-    named = {item["name"]: item for item in generate_sbom._NATIVE_COMPONENTS}
-    for name in (
-        "FFmpeg (Windows, LGPL)", "FFmpeg (macOS, LGPL)",
-        "ffprobe (macOS, LGPL)", "Deno",
-    ):
-        assert name in named, f"missing native component: {name}"
-        digest = named[name]["hashes"]["SHA-256"]
-        assert len(digest) == 64
-        int(digest, 16)  # must be valid hex
+def test_windows_inventory_uses_manifest_and_actual_binary_hashes(tmp_path):
+    _staged_ffmpeg(tmp_path, "windows-x64")
+    components = generate_sbom._native_bom_components("windows-x64", tmp_path)
+    names = {item["name"] for item in components}
+    assert not any("macOS" in name or "macos-arm64" in name for name in names)
+    binaries = [c for c in components if c["name"] in {"ffmpeg (windows-x64, LGPL)", "ffprobe (windows-x64, LGPL)"}]
+    assert len(binaries) == 2
+    for binary in binaries:
+        tool = binary["name"].split()[0]
+        assert binary["hashes"][0]["content"] == generate_sbom.stage_ffmpeg.macos.sha256(tmp_path / f"{tool}.exe")
+        assert binary["licenses"] == [{"license": {"name": "LGPL-3.0-or-later"}}]
+        assert "before packaging/signing" in binary["properties"][0]["value"]
+    archive = next(c for c in components if c["name"] == "FFmpeg Windows upstream archive")
+    pin = generate_sbom.stage_ffmpeg.load_windows_pin()
+    assert archive["version"] == pin["version"]
+    assert archive["hashes"][0]["content"] == pin["sha256"]
+    assert archive["externalReferences"][0]["url"] == pin["url"]
 
 
-def test_pinned_hashes_match_the_windows_release_workflow():
-    """The SBOM's pinned FFmpeg checksum must match the one the Windows
-    release workflow actually verifies before extracting the archive —
-    two independently maintained copies of the same value are exactly how
-    a pin quietly goes stale."""
-    workflow_text = (REPO_ROOT / ".github" / "workflows" / "release-windows.yml").read_text(
-        encoding="utf-8",
-    )
-    named = {item["name"]: item for item in generate_sbom._NATIVE_COMPONENTS}
-    ffmpeg_win = named["FFmpeg (Windows, LGPL)"]
-    assert ffmpeg_win["hashes"]["SHA-256"] in workflow_text
-    # The version string alone (e.g. a stale build tag) would otherwise
-    # pass every other assertion here while silently pointing at the
-    # wrong FFmpeg build.
-    assert ffmpeg_win["version"] in workflow_text
+def test_explicit_no_ffmpeg_does_not_inventory_stale_staged_binaries(tmp_path, monkeypatch):
+    _staged_ffmpeg(tmp_path, "macos-arm64")
+    monkeypatch.setenv("BANANAFLOW_BUNDLE_FFMPEG", "0")
+    components = generate_sbom._native_bom_components("macos-arm64", tmp_path)
+    assert not any("ffmpeg" in c["name"].lower() or "ffprobe" in c["name"].lower() for c in components)
+    spec = (REPO_ROOT / "packaging/bananaflow.spec").read_text(encoding="utf-8")
+    assert 'os.environ.get("BANANAFLOW_BUNDLE_FFMPEG") != "0"' in spec
 
 
-def test_pinned_hashes_match_the_macos_release_workflow():
-    workflow_text = (REPO_ROOT / ".github" / "workflows" / "release-macos.yml").read_text(
-        encoding="utf-8",
-    )
-    named = {item["name"]: item for item in generate_sbom._NATIVE_COMPONENTS}
-    ffmpeg_mac = named["FFmpeg (macOS, LGPL)"]
-    ffprobe_mac = named["ffprobe (macOS, LGPL)"]
-    assert ffmpeg_mac["hashes"]["SHA-256"] in workflow_text
-    assert ffprobe_mac["hashes"]["SHA-256"] in workflow_text
-    assert ffmpeg_mac["version"] in workflow_text
-    assert ffprobe_mac["version"] in workflow_text
+def test_macos_inventory_includes_exact_source_dependencies_not_intel_assets(tmp_path):
+    _staged_ffmpeg(tmp_path, "macos-arm64")
+    components = generate_sbom._native_bom_components("macos-arm64", tmp_path)
+    names = {c["name"] for c in components}
+    for source in generate_sbom.stage_ffmpeg.macos.load_pins()["sources"]:
+        component = next(c for c in components if c["name"] == source["name"] + " (macOS source)")
+        assert component["version"] == source["version"]
+        assert component["hashes"][0]["content"] == source["sha256"]
+        assert component["externalReferences"][0]["url"] == source["url"]
+    assert "Deno" not in names
+    assert "bgutil-ytdlp-pot-provider" not in names
+    assert "ffmpeg (macos-arm64, LGPL)" in names
+    assert "ffprobe (macos-arm64, LGPL)" in names
+    assert "evermeet" not in str(components)
+    assert "linking-exception" not in str(components)
 
 
-def test_deno_hash_matches_the_recorded_third_party_notices_value():
-    """Unlike the FFmpeg entries (hash of the downloaded .zip), Deno's SBOM
-    hash is of the extracted deno.exe — cross-checking it against the
-    independently maintained THIRD_PARTY_NOTICES.md evidence is the only
-    thing that would have caught it silently going stale or being copied
-    from the wrong source (the release .zip's own hash)."""
-    notices_text = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-    named = {item["name"]: item for item in generate_sbom._NATIVE_COMPONENTS}
-    deno = named["Deno"]
-    assert deno["hashes"]["SHA-256"] in notices_text
-    assert deno["version"] in notices_text
-    assert deno.get("hash_note"), (
-        "Deno's hash scope (extracted binary, not the release archive) "
-        "must stay documented so it is not mistaken for a .zip hash"
-    )
+def test_missing_staging_does_not_invent_native_ffmpeg(tmp_path):
+    for target in ("macos-arm64", "windows-x64", "linux"):
+        components = generate_sbom._native_bom_components(target, tmp_path)
+        assert not any("ffmpeg" in c["name"].lower() or "ffprobe" in c["name"].lower() for c in components)
+
+
+def test_staged_binary_without_evidence_is_refused(tmp_path):
+    (tmp_path / "ffmpeg").write_bytes(b"unverified")
+    with pytest.raises(OSError):
+        generate_sbom._native_bom_components("macos-arm64", tmp_path)
+
+
+def test_staged_binary_changed_after_verification_is_refused(tmp_path):
+    _staged_ffmpeg(tmp_path, "macos-arm64")
+    (tmp_path / "ffprobe").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="changed after"):
+        generate_sbom._native_bom_components("macos-arm64", tmp_path)
+
+
+def test_stale_staging_source_pin_is_refused(tmp_path):
+    import json
+    evidence = _staged_ffmpeg(tmp_path, "windows-x64")
+    evidence["input"]["sha256"] = "0" * 64
+    (tmp_path / "ffmpeg-build.json").write_text(json.dumps(evidence), encoding="utf-8")
+    with pytest.raises(ValueError, match="Windows release pin"):
+        generate_sbom._native_bom_components("windows-x64", tmp_path)
+
+
+def test_human_inventory_uses_the_supplied_platform_components(tmp_path):
+    _staged_ffmpeg(tmp_path, "macos-arm64")
+    native = generate_sbom._native_bom_components("macos-arm64", tmp_path)
+    path = tmp_path / "inventory.md"
+    generate_sbom.write_human_readable([], native, path)
+    text = path.read_text()
+    assert "ffmpeg (macos-arm64, LGPL)" in text
+    assert "verified source archive" in text
+    assert "before packaging/signing" in text
+    assert "Windows" not in text
+    assert "Deno" not in text
 
 
 def test_python_components_reflect_the_installed_environment():
@@ -134,7 +178,9 @@ def test_cli_writes_json_and_markdown_outputs(tmp_path):
     assert len(bom["components"]) > len(generate_sbom._NATIVE_COMPONENTS)
 
     inventory = md_path.read_text(encoding="utf-8")
-    assert "FFmpeg (Windows, LGPL)" in inventory
+    assert "Native / staged binaries" in inventory
+    if sys.platform not in {"win32", "darwin"}:
+        assert "FFmpeg (Windows" not in inventory
     assert "sbom.cyclonedx.json" in inventory
 
 

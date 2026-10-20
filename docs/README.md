@@ -34,6 +34,7 @@ This directory is the documentation entry point. It distinguishes **current norm
 - [`architecture/tag-editor-safety.md`](architecture/tag-editor-safety.md) — binding Tag Editor disk-safety invariants.
 - [`architecture/tag-editor-undo-rollback-guarantees.md`](architecture/tag-editor-undo-rollback-guarantees.md) — contributor-facing undo/restore summary.
 - [`architecture/tag-editor-persistence-migrations.md`](architecture/tag-editor-persistence-migrations.md) — persisted Tag Editor migrations.
+- [`architecture/application-updater.md`](architecture/application-updater.md) — explicit full-application download, install/restart and platform validation contract.
 - [`architecture/secure-component-updater.md`](architecture/secure-component-updater.md) — accepted security bar for any future independently downloaded component updater.
 - [`design/tag-editor/current-design.md`](design/tag-editor/current-design.md) — current Tag Editor design decisions and completed redesign record.
 

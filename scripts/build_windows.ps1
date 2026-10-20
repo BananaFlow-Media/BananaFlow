@@ -324,6 +324,13 @@ if (-not (Test-Path $DistDir)) {
     throw "Expected $DistDir to exist after PyInstaller run."
 }
 
+# It must be one-file and independent of the application's live Python/Qt
+# DLLs: the helper runs from user-data staging while replacing this folder.
+& python scripts\build_app_updater.py --destination $DistDir
+if ($LASTEXITCODE -ne 0) {
+    throw "Standalone application updater packaging failed."
+}
+
 if ($RequireBundledFfmpeg) {
     # PyInstaller 6.x's default one-folder layout collects bundled
     # binaries into an executable-adjacent "_internal" folder rather

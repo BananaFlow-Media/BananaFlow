@@ -58,6 +58,8 @@ Source environments can run an explicitly approved package upgrade. Packaged bui
 
 A scheduled workflow reports a newer non-yanked candidate as a warning and review checklist, without authoring a dependency change. Expected upstream drift is not a build failure; registry/metadata errors and a missing or fully yanked reviewed pin remain failures. Version comparison follows PEP 440, including development releases. A successful advisory check is not approval of the candidate. A human-reviewed pin merged to `main` automatically builds/publishes the component channel and triggers Windows/macOS Actions release candidates. Public application releases still require a version tag, draft verification and deliberate maintainer publication.
 
+The explicit full-application updater uses exact official-repository release assets and verified size/SHA-256, preserving installed/portable/macOS layout distinctions. It does not replace platform publisher signatures or independently verify attestations merely because the build published them. Its lifecycle and residual trust contract are documented in [`../architecture/application-updater.md`](../architecture/application-updater.md). PR package validation must remain separate from channel/release publication.
+
 ## Change rule
 
 Any change to a dependency source, pinning strategy, staging script, runtime component, build workflow, artifact format, checksum/SBOM/attestation behavior or signing strategy must review this document plus the release and third-party-notice documentation in the same PR.
