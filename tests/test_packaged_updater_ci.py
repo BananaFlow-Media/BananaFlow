@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 
 import pytest
@@ -219,6 +220,52 @@ def test_successful_sandbox_cleanup_failure_is_still_fatal(tmp_path, monkeypatch
         with run_packaged_update_smoke.disposable_sandbox():
             pass
     assert "cleanup failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("fail_insert", [False, True])
+def test_seed_profile_closes_real_sqlite_handle_without_garbage_collection(
+    tmp_path, monkeypatch, fail_insert,
+):
+    from contextlib import closing
+
+    path, _ = marked_request(tmp_path)
+    real_connect = sqlite3.connect
+    connections = []
+
+    class FixtureConnection(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            if fail_insert and statement.startswith("INSERT"):
+                raise sqlite3.OperationalError("seed insertion failed")
+            return super().execute(statement, *args, **kwargs)
+
+    def retain_connection(*args, **kwargs):
+        connection = real_connect(*args, factory=FixtureConnection, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(run_packaged_update_smoke.sqlite3, "connect", retain_connection)
+    try:
+        if fail_insert:
+            with pytest.raises(sqlite3.OperationalError, match="seed insertion failed"):
+                run_packaged_update_smoke.seed_profile(path.parent)
+        else:
+            run_packaged_update_smoke.seed_profile(path.parent)
+        assert len(connections) == 1
+        # Keep the real connection alive: only explicit close can satisfy this,
+        # not incidental collection between package installation and cleanup.
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connections[0].execute("SELECT 1")
+        database_path, = path.parent.rglob("downloads.db")
+        with closing(real_connect(database_path)) as database:
+            rows = database.execute("SELECT value FROM updater_canary").fetchall()
+        assert rows == ([] if fail_insert else [("keep-history",)])
+        # On Windows this also proves the native file handle was released.
+        renamed = database_path.with_name("closed-downloads.db")
+        database_path.rename(renamed)
+        renamed.unlink()
+    finally:
+        for connection in connections:
+            connection.close()
 
 
 def test_fixture_cleanup_clears_only_confirmed_readonly_attribute(tmp_path, monkeypatch):

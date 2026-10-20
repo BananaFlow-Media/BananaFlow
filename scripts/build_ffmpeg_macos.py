@@ -150,6 +150,14 @@ def extract_source(archive: Path, destination: Path, source: dict) -> Path:
                     shutil.copyfileobj(src, out)
                 # Strip set-id/sticky/group-write bits while preserving configure's executable bit.
                 target.chmod(0o755 if member.mode & 0o111 else 0o644)
+        # Generated Autotools files must retain their shipped ordering relative
+        # to Makefile.am/configure.ac. Extraction-time mtimes can spuriously
+        # trigger regeneration and require upstream-only maintainer tools.
+        # Apply timestamps after all writes so child creation cannot alter
+        # archived directory mtimes. Do not restore ownership or unsafe modes.
+        for member in reversed(members):
+            target = destination.joinpath(*PurePosixPath(member.name).parts)
+            os.utime(target, (member.mtime, member.mtime))
     return destination / root_name
 
 

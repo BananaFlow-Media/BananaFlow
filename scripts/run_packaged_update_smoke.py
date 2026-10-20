@@ -7,7 +7,7 @@ older public binaries do not contain an application updater.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
@@ -220,7 +220,9 @@ def seed_profile(case: Path) -> tuple[Path, dict]:
         "config_version": CURRENT_VERSION, "language": "he", "theme": "dark",
         "output_dir": str(downloads), "check_updates": False,
     })
-    with sqlite3.connect(profile / "downloads.db") as database:
+    # The connection context manages the transaction, not the native handle.
+    # Close it deterministically before any app launch or Windows cleanup.
+    with closing(sqlite3.connect(profile / "downloads.db")) as database, database:
         database.execute("CREATE TABLE updater_canary (value TEXT NOT NULL)")
         database.execute("INSERT INTO updater_canary VALUES ('keep-history')")
     (profile / "tag_backups").mkdir()

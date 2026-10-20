@@ -225,6 +225,40 @@ def test_source_extracts_regular_files_without_privileged_bits(tmp_path):
         assert stat.S_IMODE(mode) == 0o755
 
 
+@pytest.mark.parametrize("generated_first", [True, False])
+def test_source_extraction_preserves_generated_file_and_directory_mtimes(tmp_path, generated_first):
+    root = "libogg-1.3.6"
+    # libogg's release archive stores Makefile.in before its older Makefile.am.
+    # Archive order must never replace upstream's dependency timestamp order.
+    source_time, generated_time = 1750089732, 1750089746
+    entries = [
+        (f"{root}/Makefile.in", generated_time, b"generated Makefile"),
+        (f"{root}/Makefile.am", source_time, b"upstream build input"),
+    ]
+    if not generated_first:
+        entries.reverse()
+    directory_time = source_time - 60
+    archive = tmp_path / "libogg.tar"
+    with tarfile.open(archive, "w") as handle:
+        directory = tarfile.TarInfo(root)
+        directory.type = tarfile.DIRTYPE
+        directory.mtime = directory_time
+        handle.addfile(directory)
+        for name, mtime, payload in entries:
+            member = tarfile.TarInfo(name)
+            member.mtime = mtime
+            member.size = len(payload)
+            handle.addfile(member, io.BytesIO(payload))
+
+    extracted = mac.extract_source(archive, tmp_path / "out", {"name": "libogg", "version": "1.3.6"})
+    for name, mtime, payload in entries:
+        path = tmp_path / "out" / name
+        assert path.read_bytes() == payload
+        assert path.stat().st_mtime_ns == mtime * 1_000_000_000
+    assert extracted.stat().st_mtime_ns == directory_time * 1_000_000_000
+    assert (extracted / "Makefile.in").stat().st_mtime_ns > (extracted / "Makefile.am").stat().st_mtime_ns
+
+
 @pytest.mark.parametrize("name,kind", [
     ("ffmpeg-8.1.3/../../escape", "file"),
     ("/absolute", "file"),

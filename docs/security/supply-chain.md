@@ -35,6 +35,13 @@ Where upstream publishes checksums or a reviewed hash is available, staging veri
 
 A checksum fetched from the same compromised origin as an artifact is not an independent trust root; treat such cases as weaker evidence and prefer independently pinned/reviewed hashes when practical.
 
+Safe extraction of verified source archives preserves shipped file and
+directory modification times. Generated Autotools build files must remain newer
+than their source templates regardless of archive member order; replacing
+those times with extraction time can spuriously invoke maintainer-only tools.
+Path/link restrictions and sanitized permissions remain enforced, and normal
+upstream build and self-test targets are not disabled.
+
 The native macOS FFmpeg recipe applies one bounded libvorbis compatibility
 adjustment only after archive verification and safe extraction: it removes
 the three obsolete `-force_cpusubtype_ALL` flags from the reviewed generated
