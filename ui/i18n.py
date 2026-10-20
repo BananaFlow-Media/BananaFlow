@@ -401,8 +401,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "app_update_state_unavailable_msg": "BananaFlow could not verify whether an application update is running. Wait for any update to finish, then try opening it again. Technical details are in the log.",
         "component_install_running": "Updating components… this can take a minute.",
         "component_install_ok_msg": (
-            "Components updated successfully. Restart BananaFlow for the new "
-            "versions to take effect."
+            "Components updated successfully. Choose Restart now to activate "
+            "them without installing a saved application update."
         ),
         "component_install_failed_msg": (
             "The component update did not finish. BananaFlow stays open; you can "
@@ -1935,8 +1935,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "app_update_state_unavailable_msg": "BananaFlow לא הצליח לבדוק אם עדכון התוכנה מתבצע כעת. יש להמתין לסיום העדכון, ואז לנסות לפתוח שוב. פרטים טכניים זמינים ביומן.",
         "component_install_running": "מעדכן רכיבים… זה עשוי לקחת דקה.",
         "component_install_ok_msg": (
-            "הרכיבים עודכנו בהצלחה. הפעל מחדש את BananaFlow כדי שהגרסאות "
-            "החדשות ייכנסו לתוקף."
+            "הרכיבים עודכנו בהצלחה. בחירה ב״הפעל מחדש״ מפעילה אותם "
+            "בלי להתקין עדכון תוכנה שמור."
         ),
         "component_install_failed_msg": (
             "עדכון הרכיבים לא הושלם. BananaFlow נשאר פתוח; "

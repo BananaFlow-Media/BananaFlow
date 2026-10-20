@@ -41,6 +41,10 @@ recorded in `packaging/ffmpeg-windows.json` and upstream BtbN build sources.
 Do not substitute an unrelated current upstream revision for a release's
 corresponding source.
 
+The included macOS recipe reproduces the bounded libvorbis Darwin configure
+adjustment needed by current Apple linkers. Original upstream archives remain
+unchanged; `ffmpeg-build.json` records the adjusted file's before/after hashes.
+
 ## Requesting source
 
 If you received a BananaFlow binary and cannot obtain the corresponding

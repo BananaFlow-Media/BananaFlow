@@ -67,6 +67,10 @@ license-file checksums and real audio codec smoke results. Source archives,
 build recipe and license texts are retained in the corresponding-source bundle
 when producing release artifacts. The executable validation remains mandatory;
 a source pin alone is not proof of the resulting binary's license or behavior.
+The macOS build recipe removes three obsolete Darwin linker flags from
+libvorbis's generated configure script, records the adjustment hashes and
+runs the upstream library self-test. This build-only adjustment does not
+change the source archive pin or license; the conveyed recipe reproduces it.
 
 ### bgutil yt-dlp PO Token Provider stack
 

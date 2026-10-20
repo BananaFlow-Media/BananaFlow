@@ -187,9 +187,18 @@ class UpdatePromptDialog(StyledDialog):
             self._install_components_btn = make_button(t("update_components_btn"), "secondary")
             self._install_components_btn.clicked.connect(self._on_install_components)
             self._action_buttons.append(self._install_components_btn)
-            root.addWidget(make_footer(self._install_components_btn))
+            self._component_actions_row = make_footer(self._install_components_btn)
+            root.addWidget(self._component_actions_row)
+
+        # Component readiness must survive app download/restore/error messages.
+        self._component_ready_lbl = QLabel(t("component_install_ok_msg"))
+        self._component_ready_lbl.setWordWrap(True)
+        self._component_ready_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self._component_ready_lbl.hide()
+        root.addWidget(self._component_ready_lbl)
 
         self._restart_btn = make_button(t("restart_now_btn"), "primary")
+        self._restart_btn.setAccessibleDescription(t("component_install_ok_msg"))
         self._restart_btn.clicked.connect(lambda: self._request_restart(None))
         self._restart_btn.hide()
         self._later_btn = make_button(t("restart_later_btn"), "secondary")
@@ -267,12 +276,16 @@ class UpdatePromptDialog(StyledDialog):
         if success:
             self._components_ready = True
             self._show_components_ready()
+            if self._prepared_update is not None:
+                self._show_app_ready(self._prepared_update)
+            else:
+                self._status_lbl.hide()
             callback = getattr(self.parentWidget(), "_on_components_prepared", None)
             if callable(callback):
                 callback()
         else:
             self._status_lbl.setText(t("component_install_failed_msg").format(detail=output_tail[-400:]))
-        self._status_lbl.show()
+            self._status_lbl.show()
 
     def _ready_choices(self) -> None:
         self._skip_btn.hide()
@@ -280,13 +293,17 @@ class UpdatePromptDialog(StyledDialog):
         self._later_btn.show()
 
     def _show_components_ready(self) -> None:
-        self._status_lbl.setText(t("component_install_ok_msg"))
-        self._status_lbl.show()
+        self._component_ready_lbl.show()
+        # The old instructions name a now-hidden component-install button.
+        self._body_lbl.setText(build_update_prompt_text(
+            self._app_release, [], self._frozen,
+        ))
         self._ready_choices()
         self._restart_btn.show()
         button = getattr(self, "_install_components_btn", None)
         if button is not None:
             button.hide()
+            self._component_actions_row.hide()
 
     def _on_app_action(self) -> None:
         if self._installing:

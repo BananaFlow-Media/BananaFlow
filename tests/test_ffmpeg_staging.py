@@ -22,6 +22,14 @@ stage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stage)
 mac = stage.macos
 
+VORBIS_DARWIN_CONFIGURE = (
+    b'#!/bin/sh\ncase $host in\n\t*-*-darwin*)\n'
+    b'\t\tDEBUG="-DDARWIN -fno-common -force_cpusubtype_ALL -Wall -g -O0 -fsigned-char"\n'
+    b'\t\tCFLAGS="-DDARWIN -fno-common -force_cpusubtype_ALL -Wall -g -O3 -ffast-math -fsigned-char"\n'
+    b'\t\tPROFILE="-DDARWIN -fno-common -force_cpusubtype_ALL -Wall -g -pg -O3 -ffast-math -fsigned-char";;\n'
+    b'esac\nCFLAGS="$CFLAGS $cflags_save"\n'
+)
+
 
 def _write_json(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -139,19 +147,66 @@ def test_download_honors_retry_after_but_does_not_retry_denials(tmp_path, monkey
     assert len(calls) == 1
 
 
-def _tar(path, members):
+def _tar(path, members, contents=None):
     with tarfile.open(path, "w") as archive:
         for name, kind in members:
             info = tarfile.TarInfo(name)
             info.mode = 0o4755
             if kind == "file":
-                info.size = 4
-                archive.addfile(info, io.BytesIO(b"data"))
+                payload = (contents or {}).get(name, b"data")
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
             else:
                 info.type = tarfile.SYMTYPE if kind == "symlink" else tarfile.LNKTYPE
                 info.linkname = "outside"
                 archive.addfile(info)
     return path
+
+
+def test_libvorbis_adjustment_removes_only_three_obsolete_flags(tmp_path):
+    directory = tmp_path / "libvorbis-1.3.7"
+    directory.mkdir()
+    configure = directory / "configure"
+    configure.write_bytes(VORBIS_DARWIN_CONFIGURE)
+    configure.chmod(0o755)
+    original_mode = configure.stat().st_mode
+    evidence = mac.patch_libvorbis_configure(directory)
+    patched = configure.read_bytes()
+    assert patched == VORBIS_DARWIN_CONFIGURE.replace(b" -force_cpusubtype_ALL", b"")
+    assert evidence["original_sha256"] == hashlib.sha256(VORBIS_DARWIN_CONFIGURE).hexdigest()
+    assert evidence["patched_sha256"] == hashlib.sha256(patched).hexdigest()
+    assert configure.stat().st_mode == original_mode
+    if os.name == "nt":
+        # Windows chmod preserves read/write attributes, not POSIX execute bits.
+        assert original_mode & stat.S_IREAD
+        assert original_mode & stat.S_IWRITE
+    else:
+        assert original_mode & 0o111
+    with pytest.raises(ValueError, match="Unexpected"):
+        mac.patch_libvorbis_configure(directory)
+    assert configure.read_bytes() == patched
+
+
+@pytest.mark.parametrize("contents", [
+    VORBIS_DARWIN_CONFIGURE.replace(b"-force_cpusubtype_ALL", b"-other", 1),
+    VORBIS_DARWIN_CONFIGURE + b"# -force_cpusubtype_ALL\n",
+    VORBIS_DARWIN_CONFIGURE.replace(b"-Wall -g -O0", b"-Wall -g -O1"),
+])
+def test_libvorbis_adjustment_refuses_unreviewed_contents_without_writing(tmp_path, contents):
+    directory = tmp_path / "libvorbis-1.3.7"
+    directory.mkdir()
+    configure = directory / "configure"
+    configure.write_bytes(contents)
+    with pytest.raises(ValueError, match="Unexpected"):
+        mac.patch_libvorbis_configure(directory)
+    assert configure.read_bytes() == contents
+
+
+def test_libvorbis_adjustment_requires_review_for_new_version(tmp_path):
+    directory = tmp_path / "libvorbis-1.3.8"
+    directory.mkdir()
+    with pytest.raises(ValueError, match="new source version"):
+        mac.patch_libvorbis_configure(directory)
 
 
 def test_source_extracts_regular_files_without_privileged_bits(tmp_path):
@@ -225,7 +280,7 @@ def test_source_bundle_and_cache_roundtrip_without_executing_native_code(tmp_pat
         root = f"{source['name']}-{source['version']}"
         archive = _tar(source_dir / source["archive"], [
             (f"{root}/{name}", "file") for name in ["configure"] + source["license_files"]
-        ])
+        ], contents={f"{root}/configure": VORBIS_DARWIN_CONFIGURE} if source["name"] == "libvorbis" else None)
         source["sha256"] = mac.sha256(archive)
     monkeypatch.setattr(mac, "load_pins", lambda: pins)
     monkeypatch.setattr(mac, "download_verified", lambda *a: pytest.fail("offline build attempted a download"))
@@ -250,6 +305,9 @@ def test_source_bundle_and_cache_roundtrip_without_executing_native_code(tmp_pat
     assert mac.cache_matches(destination, pins, bundle)
     evidence = json.loads((destination / "ffmpeg-build.json").read_text())
     assert evidence["source_bundle_sha256"] == mac.sha256(bundle)
+    assert evidence["source_adjustments"][0]["component"] == "libvorbis"
+    assert evidence["source_adjustments"][0]["original_sha256"] == hashlib.sha256(VORBIS_DARWIN_CONFIGURE).hexdigest()
+    assert ["make", "-C", "lib", "check"] in commands
     with tarfile.open(bundle) as archive:
         names = archive.getnames()
         assert "scripts/build_ffmpeg_macos.py" in names
@@ -257,6 +315,8 @@ def test_source_bundle_and_cache_roundtrip_without_executing_native_code(tmp_pat
         assert "README.txt" in names
         assert all(f"sources/{s['archive']}" in names for s in pins["sources"])
         assert b"--source-dir sources" in archive.extractfile("README.txt").read()
+        retained_source = archive.extractfile("sources/libvorbis-1.3.7.tar.xz").read()
+        assert hashlib.sha256(retained_source).hexdigest() == next(s["sha256"] for s in pins["sources"] if s["name"] == "libvorbis")
     compile_count = len(commands)
     mac.build(destination, source_dir=source_dir, source_bundle=bundle)
     assert len(commands) == compile_count

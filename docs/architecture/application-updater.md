@@ -27,6 +27,11 @@ must not be described as client-side verification unless the client actually
 verifies them. Platform signing status remains documented in `SECURITY.md` and
 the release notes. The updater never disables certificate validation, bypasses
 an operating-system security prompt, or strips quarantine to force execution.
+Windows preparation marks downloaded artifacts with Internet provenance.
+Portable extraction preserves the archive's exact existing `Zone.Identifier`
+on extracted files; it neither removes a mark nor invents one for a locally
+built, unmarked archive. Native launch failures retain the Windows return/error
+codes, executable existence/architecture and rollback outcome for diagnosis.
 
 ## Lifecycle and process boundaries
 

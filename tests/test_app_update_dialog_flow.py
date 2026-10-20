@@ -116,6 +116,12 @@ def test_component_success_waits_for_thread_then_offers_restart_later(setup):
     assert not dialog._restart_btn.isHidden()
     assert not dialog._later_btn.isHidden()
     assert dialog._install_components_btn.isHidden()
+    assert dialog._component_actions_row.isHidden()
+    assert not dialog._component_ready_lbl.isHidden()
+    assert dialog._component_ready_lbl.text() == t("component_install_ok_msg")
+    assert t("update_prompt_components_heading") not in dialog._body_lbl.text()
+    assert t("update_prompt_frozen_note") not in dialog._body_lbl.text()
+    assert dialog._status_lbl.isHidden()
     assert parent.restarts == []
     dialog._later_btn.click()
     assert parent.restarts == []
@@ -238,19 +244,81 @@ def test_helper_error_status_reaches_restore_banner_and_startup_badge(setup, tmp
     assert window._prepared_update_retry is True
 
 
-def test_reopened_both_ready_updates_keep_component_only_restart(setup, monkeypatch):
+@pytest.mark.parametrize("language", ["en", "he"])
+def test_reopened_both_ready_updates_keep_component_only_restart(setup, monkeypatch, qapp, language):
+    parent, store, release, component = setup
+    prepared = SimpleNamespace(version="9.9.9")
+    set_language(language)
+    qapp.setLayoutDirection(Qt.LayoutDirection.RightToLeft if language == "he" else Qt.LayoutDirection.LeftToRight)
+    try:
+        dialog = UpdatePromptDialog(
+            store, release, [component], parent=parent,
+            prepared_update=prepared, components_ready=True,
+        )
+        assert not dialog._restart_btn.isHidden()
+        assert not dialog._later_btn.isHidden()
+        assert dialog._install_components_btn.isHidden()
+        assert dialog._component_actions_row.isHidden()
+        assert not dialog._component_ready_lbl.isHidden()
+        assert dialog._component_ready_lbl.text() == t("component_install_ok_msg")
+        assert dialog._restart_btn.accessibleDescription() == t("component_install_ok_msg")
+        assert dialog._status_lbl.text() == t("app_update_ready_msg").format(version=prepared.version)
+        assert t("update_prompt_components_heading") not in dialog._body_lbl.text()
+        assert t("update_prompt_frozen_note") not in dialog._body_lbl.text()
+        assert dialog._app_action_btn.text() == t("app_update_install_restart_btn")
+        callbacks = []
+        monkeypatch.setattr("ui.dialogs.update_prompt_dialog.QTimer.singleShot", lambda _, callback: callbacks.append(callback))
+        dialog._restart_btn.click()
+        callbacks[0]()
+        assert parent.restarts == [None]  # components alone, not the saved app update
+    finally:
+        set_language("en")
+        qapp.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+
+
+@pytest.mark.parametrize("restore_result", ["ready", "retry", "failed", "empty"])
+def test_component_ready_explanation_survives_app_restore_and_error(setup, restore_result):
+    parent, store, release, component = setup
+    dialog = UpdatePromptDialog(
+        store, release, [component], parent=parent, components_ready=True,
+    )
+    assert not dialog._component_ready_lbl.isHidden()
+    worker = ControlledAppWorker.created[-1]
+    prepared = SimpleNamespace(version="9.9.9") if restore_result in ("ready", "retry") else None
+    error = "verification failed" if restore_result == "failed" else ""
+    if restore_result == "retry":
+        worker.update_status = {"status": "error"}
+    worker.completed.emit(prepared, error)
+    worker.finished.emit()
+
+    assert not dialog._component_ready_lbl.isHidden()
+    assert dialog._component_ready_lbl.text() == t("component_install_ok_msg")
+    assert not dialog._restart_btn.isHidden()
+    assert dialog._restart_btn.isEnabled()
+    assert dialog._component_actions_row.isHidden()
+    assert t("update_prompt_components_heading") not in dialog._body_lbl.text()
+    assert t("update_prompt_frozen_note") not in dialog._body_lbl.text()
+    if restore_result == "retry":
+        assert dialog._status_lbl.text() == t("app_update_retry_msg")
+    elif restore_result == "failed":
+        assert dialog._status_lbl.text() == t("app_update_failed_msg")
+    elif restore_result == "ready":
+        assert dialog._status_lbl.text() == t("app_update_ready_msg").format(version=prepared.version)
+    else:
+        assert dialog._status_lbl.isHidden()
+
+
+def test_component_success_keeps_already_prepared_app_explanation(setup):
     parent, store, release, component = setup
     prepared = SimpleNamespace(version="9.9.9")
     dialog = UpdatePromptDialog(
-        store, release, [component], parent=parent,
-        prepared_update=prepared, components_ready=True,
+        store, release, [component], parent=parent, prepared_update=prepared,
     )
-    assert not dialog._restart_btn.isHidden()
-    assert not dialog._later_btn.isHidden()
-    assert dialog._install_components_btn.isHidden()
-    assert dialog._app_action_btn.text() == t("app_update_install_restart_btn")
-    callbacks = []
-    monkeypatch.setattr("ui.dialogs.update_prompt_dialog.QTimer.singleShot", lambda _, callback: callbacks.append(callback))
-    dialog._restart_btn.click()
-    callbacks[0]()
-    assert parent.restarts == [None]  # components alone, not the saved app update
+    assert dialog._component_ready_lbl.isHidden()
+    dialog._on_install_components()
+    worker = dialog._install_worker
+    worker.completed.emit(True, "")
+    worker.finished.emit()
+    assert not dialog._component_ready_lbl.isHidden()
+    assert dialog._status_lbl.text() == t("app_update_ready_msg").format(version=prepared.version)
+    assert dialog._component_actions_row.isHidden()

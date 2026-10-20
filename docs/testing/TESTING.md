@@ -56,6 +56,8 @@ Updater changes require more than button or mocked subprocess tests. Cover both 
 
 The packaged updater gate must use real Windows installer/portable and macOS application artifacts, disposable installation/profile directories, a running old process, the packaged helper, actual replacement and a fresh process reporting the candidate version. Assert preserved user data and a real failure/recovery case. Configuration migration alone is not old-to-new application upgrade evidence. Record exact artifact hashes, versions and process outcomes. Test fixture releases must never be published or selected by real clients.
 
+On failure, the harness retains its synthetic sandbox until runner teardown: an error status can precede the helper's recovery relaunch, so deleting the tree immediately could interrupt recovery and mask the original failure. It never kills the helper or app. Successful runs still require complete cleanup; failed sandboxes are not uploaded as evidence.
+
 The macOS packaged-updater job and release job share the native Apple Silicon `macos-15` runner; changing this build host must retain explicit arm64 checks.
 
 PR jobs must have no release/channel publication path, and must not bypass platform warnings. A build blocked on staging, signing, OS policy or installation is not a passing update test. Normal-network and representative-machine release checks below and in `docs/release/RELEASING.md` remain necessary for public release.

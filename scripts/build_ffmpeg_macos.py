@@ -153,6 +153,43 @@ def extract_source(archive: Path, destination: Path, source: dict) -> Path:
     return destination / root_name
 
 
+def patch_libvorbis_configure(source_dir: Path) -> dict:
+    """Remove one obsolete Darwin flag from the verified 1.3.7 build recipe.
+
+    Upstream configure.ac's Darwin branch generates these exact assignments
+    and then appends the caller's CFLAGS, so setting CFLAGS cannot remove the
+    flag. Current Apple ld rejects it when linking test_sharedbook. Do not
+    disable that test or replace the compiler/linker to conceal the failure.
+    The original archive stays unchanged in the corresponding-source bundle;
+    this bounded transformation is part of the included, hashed build recipe.
+    """
+    if source_dir.name != "libvorbis-1.3.7":
+        raise ValueError("Review the libvorbis Darwin configure adjustment for the new source version")
+    configure = source_dir / "configure"
+    original = configure.read_bytes()
+    assignments = (
+        b'\t\tDEBUG="-DDARWIN -fno-common -force_cpusubtype_ALL -Wall -g -O0 -fsigned-char"',
+        b'\t\tCFLAGS="-DDARWIN -fno-common -force_cpusubtype_ALL -Wall -g -O3 -ffast-math -fsigned-char"',
+        b'\t\tPROFILE="-DDARWIN -fno-common -force_cpusubtype_ALL -Wall -g -pg -O3 -ffast-math -fsigned-char";;',
+    )
+    if original.count(b"-force_cpusubtype_ALL") != 3 or any(
+        original.count(assignment + b"\n") != 1 for assignment in assignments
+    ):
+        raise ValueError("Unexpected libvorbis configure contents; refusing an unreviewed source adjustment")
+    patched = original
+    for assignment in assignments:
+        patched = patched.replace(assignment, assignment.replace(b" -force_cpusubtype_ALL", b""), 1)
+    configure.write_bytes(patched)
+    evidence = {
+        "component": "libvorbis", "version": "1.3.7", "file": "configure",
+        "adjustment": "remove three obsolete Darwin -force_cpusubtype_ALL flags",
+        "original_sha256": hashlib.sha256(original).hexdigest(),
+        "patched_sha256": hashlib.sha256(patched).hexdigest(),
+    }
+    print("Applied reviewed source adjustment: " + json.dumps(evidence), flush=True)
+    return evidence
+
+
 def run(args: list[str], *, cwd: Path | None = None, env: dict | None = None) -> str:
     print("+ " + " ".join(map(str, args)), flush=True)
     result = subprocess.run(args, cwd=cwd, env=env, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -289,6 +326,7 @@ def build(
             "PKG_CONFIG_PATH": "",
         })
         jobs = str(os.cpu_count() or 2)
+        source_adjustments = []
         for name in ("lame", "opus", "libogg", "libvorbis"):
             args = ["./configure", f"--prefix={prefix}", "--disable-shared", "--enable-static", "--disable-dependency-tracking"]
             if name == "lame":
@@ -297,8 +335,14 @@ def build(
                 args += ["--build=arm-apple-darwin", "--disable-frontend", "--disable-decoder", "--disable-nasm"]
             if name == "opus":
                 args += ["--disable-doc", "--disable-extra-programs"]
+            if name == "libvorbis":
+                source_adjustments.append(patch_libvorbis_configure(sources[name]))
             run(args, cwd=sources[name], env=env)
             run(["make", "-j", jobs], cwd=sources[name], env=env)
+            if name == "libvorbis":
+                # Keep and execute the upstream self-test whose normal build
+                # exposed the obsolete linker flag; do not skip that target.
+                run(["make", "-C", "lib", "check"], cwd=sources[name], env=env)
             run(["make", "install"], cwd=sources[name], env=env)
 
         configure = [
@@ -319,6 +363,7 @@ def build(
             "target": pins["target"], "sources": pins["sources"], "configure": configure,
             "source_manifest_sha256": sha256(PINS),
             "build_recipe_sha256": sha256(Path(__file__)),
+            "source_adjustments": source_adjustments,
             "binaries": inspect_macos_binaries(sources["ffmpeg"], version),
         }
         smoke = work / "smoke"
@@ -356,7 +401,11 @@ def build(
                     "python3 scripts/build_ffmpeg_macos.py --source-dir sources "
                     "--destination packaging/ffmpeg\n\n"
                     "Source archive hashes are checked before extraction. No "
-                    "source downloads occur with --source-dir. Compiler/SDK "
+                    "source downloads occur with --source-dir. The recipe "
+                    "removes three obsolete Darwin linker flags from the "
+                    "verified libvorbis configure script, then builds and runs "
+                    "its self-test; before/after hashes are in ffmpeg-build.json. "
+                    "Original source archives are preserved unchanged. Compiler/SDK "
                     "versions can affect binary hashes; this is a reproducible "
                     "recipe, not a bit-for-bit reproducibility claim.\n"
                 ).encode("utf-8")

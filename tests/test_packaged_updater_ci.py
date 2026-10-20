@@ -126,6 +126,44 @@ def test_result_wait_surfaces_helper_failure(tmp_path):
         run_packaged_update_smoke.wait_for_result(tmp_path / "absent.json", status)
 
 
+def test_failed_sandbox_preserves_primary_error_and_possible_recovery(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "bf-upd-fixture"
+    root.mkdir()
+    monkeypatch.setattr(run_packaged_update_smoke.tempfile, "mkdtemp", lambda **kw: str(root))
+    monkeypatch.setattr(run_packaged_update_smoke.shutil, "rmtree",
+                        lambda *a, **kw: pytest.fail("cleanup raced an active recovery"))
+    failure = RuntimeError("Windows did not launch the updated application")
+    with pytest.raises(RuntimeError) as raised:
+        with run_packaged_update_smoke.disposable_sandbox() as sandbox:
+            (sandbox / "recovery-needed.json").write_text("{}", encoding="utf-8")
+            raise failure
+    assert raised.value is failure
+    assert (root / "recovery-needed.json").is_file()
+    assert "Preserving failed updater sandbox" in capsys.readouterr().err
+
+
+def test_successful_sandbox_requires_complete_cleanup(tmp_path, monkeypatch):
+    root = tmp_path / "bf-upd-fixture"
+    root.mkdir()
+    monkeypatch.setattr(run_packaged_update_smoke.tempfile, "mkdtemp", lambda **kw: str(root))
+    with run_packaged_update_smoke.disposable_sandbox() as sandbox:
+        (sandbox / "finished.json").write_text("{}", encoding="utf-8")
+    assert not root.exists()
+
+
+def test_successful_sandbox_cleanup_failure_is_still_fatal(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "bf-upd-fixture"
+    root.mkdir()
+    monkeypatch.setattr(run_packaged_update_smoke.tempfile, "mkdtemp", lambda **kw: str(root))
+    def still_in_use(*args, **kwargs):
+        raise OSError("fixture still in use")
+    monkeypatch.setattr(run_packaged_update_smoke.shutil, "rmtree", still_in_use)
+    with pytest.raises(OSError, match="fixture still in use"):
+        with run_packaged_update_smoke.disposable_sandbox():
+            pass
+    assert "cleanup failed" in capsys.readouterr().err
+
+
 def test_packaged_update_requires_clean_exit_including_gui_teardown():
     source = (ROOT / "scripts/run_packaged_update_smoke.py").read_text(encoding="utf-8")
     assert "if old_gui_code != 0:" in source
@@ -171,6 +209,7 @@ def test_smoke_has_real_preservation_and_process_evidence():
         assert requirement in text
     assert "exercise_rejected_artifact" in text
     assert '"old_application_unchanged": True' in text
+    assert 'if completed and kind == "windows-installed"' in text
     assert text.index("code = process.wait(timeout=120)") < text.index(
         'result = wait_for_result(Path(request["result"]), status)')
     hook = (ROOT / "core/app_update_smoke.py").read_text(encoding="utf-8")

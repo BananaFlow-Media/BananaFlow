@@ -7,6 +7,7 @@ older public binaries do not contain an application updater.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -50,6 +51,35 @@ def digest(path: Path) -> str:
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@contextmanager
+def disposable_sandbox():
+    """Retain a failed fixture while its helper may still be recovering.
+
+    An error status precedes the helper's old-app recovery attempt. Deleting
+    its working tree then would race that recovery and could hide the primary
+    exception with a Windows directory-in-use error. These marked profiles
+    contain only synthetic test data and are discarded with the CI runner.
+    Successful runs still require complete cleanup.
+    """
+    root = Path(tempfile.mkdtemp(prefix="bf-upd-")).resolve()
+    try:
+        yield root
+    except BaseException:
+        print(
+            f"Preserving failed updater sandbox until runner teardown: {root}. "
+            "No helper or application process was terminated.",
+            file=sys.stderr, flush=True,
+        )
+        raise
+    else:
+        try:
+            shutil.rmtree(root)
+        except OSError:
+            print(f"Successful updater sandbox cleanup failed: {root}",
+                  file=sys.stderr, flush=True)
+            raise
 
 
 def run(args: list[str], *, env: dict | None = None, timeout: int = 600) -> str:
@@ -356,6 +386,7 @@ def exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) ->
         if handoff["parent_pid"] != process.pid:
             raise RuntimeError("The updater did not wait for the actual old application")
         status = Path(handoff["status_path"])
+    completed = False
     try:
         # Reap before waiting for the helper: on POSIX an unreaped child's PID
         # remains observable, so the helper correctly keeps waiting for it.
@@ -394,6 +425,7 @@ def exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) ->
             "integrity_failure_recovery": failure_evidence,
         }
         write_json(evidence / "summary.json", summary)
+        completed = True
         return summary
     finally:
         # Keep actionable status and smoke results even on a failure. Never
@@ -402,7 +434,9 @@ def exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) ->
                      case / "old-gui.json", status):
             if file.is_file():
                 shutil.copy2(file, evidence / file.name)
-        if kind == "windows-installed" and (target / "unins000.exe").is_file():
+        # A failed helper may still be recovering. Do not uninstall its target
+        # out from under it; the whole failed fixture survives until teardown.
+        if completed and kind == "windows-installed" and (target / "unins000.exe").is_file():
             run([str(target / "unins000.exe"), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
 
 
@@ -427,8 +461,7 @@ def main() -> None:
         from core.update_checker import _is_newer
         if not _is_newer(versions["new"], BASELINE_VERSION):
             raise RuntimeError("Published migration target must be newer than the public baseline")
-    with tempfile.TemporaryDirectory(prefix="bf-upd-") as directory:
-        root = Path(directory).resolve()
+    with disposable_sandbox() as root:
         (root / MARKER).write_text("disposable packaged updater test", encoding="utf-8")
         kinds = ("windows-portable", "windows-installed") if sys.platform == "win32" else ("macos-app",)
         results = []

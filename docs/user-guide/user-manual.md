@@ -183,6 +183,8 @@ When update checks are enabled, BananaFlow checks for a newer official applicati
 
 In a source environment the component button runs the documented pip upgrade in that environment. After successful preparation, choose **Restart now** to use the new components, or continue working and restart later. The running process keeps its current components until it exits. This path updates the downloader pair, not every bundled runtime; other bundled components arrive with a full application release.
 
+If both updates are ready, the component-ready explanation remains separate: **Restart now** activates the components without installing the saved application update. Choose **Install and restart** instead when you also want to apply that application update.
+
 ### Update the application
 
 Supported packaged installations can download and verify an application update inside BananaFlow. An older BananaFlow version that does not contain this updater must first be upgraded manually; it cannot acquire the new buttons remotely. Later upgrades can use the in-app path. When preparation succeeds, a separate install/restart action applies the update and launches the new application. Preparation alone does not close the app. Choosing Later retains the verified download for a later install/restart. If handing off to the installer fails, reopen BananaFlow to retry or use the website. Finish active downloads, conversions and file-changing operations before restarting; a busy application must not discard work just to update.

@@ -320,6 +320,86 @@ def test_archive_expansion_is_bounded(tmp_path, monkeypatch):
         helper.extract_portable(archive, tmp_path / "output")
 
 
+def test_portable_preserves_actual_windows_archive_origin(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    origin = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://github.com/BananaFlow-Media/BananaFlow\r\n"
+    Path(str(archive) + ":Zone.Identifier").write_bytes(origin)
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    destination = tmp_path / "output"
+    helper.extract_portable(archive, destination)
+    for name in ("bananaflow.exe", "_internal/runtime.dll"):
+        assert Path(str(destination / name) + ":Zone.Identifier").read_bytes() == origin
+    assert Path(str(archive) + ":Zone.Identifier").read_bytes() == origin
+
+
+def test_production_windows_download_is_marked_before_extraction(tmp_path, monkeypatch):
+    archive = tmp_path / "download.zip"
+    archive.write_bytes(_zip())
+    monkeypatch.setattr(sys, "platform", "win32")
+    updates._quarantine(archive)
+    marker = Path(str(archive) + ":Zone.Identifier").read_text(encoding="utf-8")
+    assert "ZoneId=3" in marker
+    assert "https://github.com/BananaFlow-Media/BananaFlow" in marker
+
+
+def test_portable_does_not_invent_origin_for_local_archive(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    destination = tmp_path / "output"
+    helper.extract_portable(archive, destination)
+    assert not Path(str(destination / "bananaflow.exe") + ":Zone.Identifier").exists()
+    assert not Path(str(archive) + ":Zone.Identifier").exists()
+
+
+def test_portable_archive_origin_is_bounded_before_extraction(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    Path(str(archive) + ":Zone.Identifier").write_bytes(b"x" * 9)
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    monkeypatch.setattr(helper, "MAX_ZONE_IDENTIFIER_BYTES", 8)
+    destination = tmp_path / "output"
+    with pytest.raises(helper.AppUpdateError, match="origin metadata"):
+        helper.extract_portable(archive, destination)
+    assert not destination.exists()
+
+
+def test_windows_shell_launch_error_preserves_diagnostics(tmp_path, monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "bananaflow.exe").write_bytes(b"exe")
+    calls = []
+    class ShellExecute:
+        def __call__(self, *args):
+            calls.append(args)
+            return 5
+    shell = SimpleNamespace(ShellExecuteW=ShellExecute())
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: shell, raising=False)
+    monkeypatch.setattr(ctypes, "set_last_error", lambda _: None, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    with pytest.raises(helper.AppUpdateError) as failure:
+        helper._relaunch({"kind": "windows-portable", "target": str(target), "executable": "bananaflow.exe"})
+    assert "ShellExecute=5, WinError=5" in str(failure.value)
+    assert "executable_exists=True, target_exists=True" in str(failure.value)
+    assert "executable_pe_machine=invalid" in str(failure.value)
+    assert str(target) not in str(failure.value)
+    assert calls[0][1] == "open"  # No direct-process or security-bypass fallback.
+
+
+@pytest.mark.parametrize("code,name", [(0x8664, "x64"), (0x14C, "x86"), (0xAA64, "arm64")])
+def test_pe_machine_diagnostics_read_only_header(tmp_path, code, name):
+    path = tmp_path / "app.exe"
+    dos = bytearray(64)
+    dos[:2] = b"MZ"
+    dos[60:64] = (64).to_bytes(4, "little")
+    path.write_bytes(dos + b"PE\x00\x00" + code.to_bytes(2, "little"))
+    assert helper._pe_machine(path) == name
+
+
 def _plan(tmp_path, *, kind="windows-portable"):
     work = tmp_path / "appdata" / "app-updates" / ("a" * 32)
     work.mkdir(parents=True)
@@ -410,6 +490,31 @@ def test_relaunch_failure_rolls_back_portable(tmp_path, helper_runtime, monkeypa
     target, _, backup = helper._paths(plan)
     assert (target / "bananaflow.exe").read_bytes() == b"old"
     assert not backup.exists()
+    status = helper.read_json(path.parent / "status.json")
+    assert status["rollback"] == "restored_previous"
+    assert status["launch_error"] == "fixture launch declined"
+
+
+def test_rollback_preserves_previous_application_origin(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    target, _, _ = helper._paths(plan)
+    old_origin = b"[ZoneTransfer]\r\nZoneId=1\r\n"
+    downloaded_origin = b"[ZoneTransfer]\r\nZoneId=3\r\n"
+    Path(str(target / "bananaflow.exe") + ":Zone.Identifier").write_bytes(old_origin)
+    Path(plan["artifact"] + ":Zone.Identifier").write_bytes(downloaded_origin)
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    calls = []
+    def launch(attempt):
+        calls.append(attempt)
+        if len(calls) == 1:
+            assert Path(str(target / "bananaflow.exe") + ":Zone.Identifier").read_bytes() == downloaded_origin
+            raise helper.AppUpdateError("ShellExecute=5, WinError=5")
+    monkeypatch.setattr(helper, "_relaunch", launch)
+    assert helper.apply_update_plan(path) == 1
+    assert len(calls) == 2  # Candidate rejected, then previous app reopened.
+    assert (target / "bananaflow.exe").read_bytes() == b"old"
+    assert Path(str(target / "bananaflow.exe") + ":Zone.Identifier").read_bytes() == old_origin
+    assert Path(plan["artifact"] + ":Zone.Identifier").read_bytes() == downloaded_origin
 
 
 def test_relaunch_failure_cannot_rollback_under_newly_opened_app(tmp_path, helper_runtime, monkeypatch):
@@ -425,6 +530,10 @@ def test_relaunch_failure_cannot_rollback_under_newly_opened_app(tmp_path, helpe
     assert (target / "bananaflow.exe").read_bytes() == b"new application"
     assert (backup / "bananaflow.exe").read_bytes() == b"old"
     assert not helper.update_lock_is_held(path.parent.parent / "apply.lock")
+    status = helper.read_json(path.parent / "status.json")
+    assert status["rollback"] == "not_completed"
+    assert status["launch_error"] == "OS launch rejected"
+    assert "new app was opened independently" in status["message"]
 
 
 def test_interrupted_first_rename_recovers_before_retry(tmp_path, helper_runtime):

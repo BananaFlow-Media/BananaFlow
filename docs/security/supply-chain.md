@@ -35,6 +35,15 @@ Where upstream publishes checksums or a reviewed hash is available, staging veri
 
 A checksum fetched from the same compromised origin as an artifact is not an independent trust root; treat such cases as weaker evidence and prefer independently pinned/reviewed hashes when practical.
 
+The native macOS FFmpeg recipe applies one bounded libvorbis compatibility
+adjustment only after archive verification and safe extraction: it removes
+the three obsolete `-force_cpusubtype_ALL` flags from the reviewed generated
+Darwin `configure` assignments. Unexpected version/content fails closed.
+Build evidence records the original and adjusted file hashes, and the source
+bundle retains unchanged upstream archives plus the exact adjustment recipe.
+The normal libvorbis build and its `lib` self-test remain mandatory, followed
+by FFmpeg architecture, linkage, license and audio-roundtrip gates.
+
 ### Licenses/source availability
 
 - `THIRD_PARTY_NOTICES.md` — dependency/component inventory and license handling.

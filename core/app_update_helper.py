@@ -30,6 +30,7 @@ MAX_ARTIFACT_BYTES = 4 * 1024**3
 MAX_EXPANDED_BYTES = 12 * 1024**3
 MAX_ARCHIVE_FILES = 100_000
 MAX_PLAN_BYTES = 64 * 1024
+MAX_ZONE_IDENTIFIER_BYTES = 64 * 1024
 KINDS = {"windows-installed", "windows-portable", "macos-app"}
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?")
 _IS_WINDOWS = os.name == "nt"
@@ -331,6 +332,7 @@ def ensure_no_other_app_processes() -> None:
 
 def extract_portable(artifact: Path, destination: Path) -> None:
     """Extract the release's flat ZIP with Windows-safe, bounded paths."""
+    zone_identifier = _read_windows_zone_identifier(artifact) if _IS_WINDOWS else None
     seen: set[str] = set()
     total = 0
     with zipfile.ZipFile(artifact) as archive:
@@ -380,11 +382,24 @@ def extract_portable(artifact: Path, destination: Path) -> None:
                     output.write(chunk)
                 if written != entry.file_size:
                     raise AppUpdateError("The expanded package file size is incorrect.")
-            if os.name == "nt":
-                # Propagate Internet origin to extracted files; do not
-                # inadvertently strip the ZIP's Mark of the Web.
-                with open(str(destination_path) + ":Zone.Identifier", "w", encoding="utf-8") as marker:
-                    marker.write("[ZoneTransfer]\nZoneId=3\n")
+            if zone_identifier is not None:
+                # Propagate the archive's actual origin, never erase a mark
+                # or invent Internet provenance for a locally built artifact.
+                # Production downloads are marked by app_updates._quarantine.
+                with open(str(destination_path) + ":Zone.Identifier", "wb") as marker:
+                    marker.write(zone_identifier)
+
+
+def _read_windows_zone_identifier(artifact: Path) -> bytes | None:
+    """Read the existing Mark of the Web without changing its trust meaning."""
+    try:
+        with open(str(artifact) + ":Zone.Identifier", "rb") as marker:
+            data = marker.read(MAX_ZONE_IDENTIFIER_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    if len(data) > MAX_ZONE_IDENTIFIER_BYTES:
+        raise AppUpdateError("The package origin metadata exceeds the safe limit.")
+    return data
 
 
 def _check_macos_tree(root: Path, version: str) -> None:
@@ -513,6 +528,26 @@ def install_windows(plan: dict) -> None:
         kernel.CloseHandle(execute.hProcess)
 
 
+def _pe_machine(path: Path) -> str:
+    """Bounded PE-header diagnostics, never execution or a trust decision."""
+    try:
+        with path.open("rb") as executable:
+            header = executable.read(64)
+            if len(header) != 64 or header[:2] != b"MZ":
+                return "invalid"
+            offset = int.from_bytes(header[60:64], "little")
+            if not 64 <= offset <= 1024 * 1024:
+                return "invalid"
+            executable.seek(offset)
+            pe = executable.read(6)
+        if len(pe) != 6 or pe[:4] != b"PE\x00\x00":
+            return "invalid"
+        machine = int.from_bytes(pe[4:6], "little")
+        return {0x8664: "x64", 0x14C: "x86", 0xAA64: "arm64"}.get(machine, f"0x{machine:04x}")
+    except OSError:
+        return "unreadable"
+
+
 def _relaunch(plan: dict) -> None:
     target = Path(plan["target"])
     arguments = plan.get("relaunch_args", [])
@@ -532,12 +567,24 @@ def _relaunch(plan: dict) -> None:
             wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int,
         ]
         shell.ShellExecuteW.restype = ctypes.c_void_p
+        ctypes.set_last_error(0)
+        executable = target / plan["executable"]
         result = shell.ShellExecuteW(
-            None, "open", str(target / plan["executable"]),
+            None, "open", str(executable),
             subprocess.list2cmdline(arguments), str(target), 1,
         )
         if not result or result <= 32:
-            raise AppUpdateError("Windows did not launch the updated application.")
+            error = ctypes.get_last_error()
+            # Capture numeric shell/native diagnostics and local existence,
+            # not command arguments, profile paths or origin metadata.
+            raise AppUpdateError(
+                "Windows did not launch the updated application "
+                f"(ShellExecute={result or 0}, WinError={error}, "
+                f"executable_exists={executable.is_file()}, "
+                f"target_exists={target.is_dir()}, "
+                f"executable_pe_machine={_pe_machine(executable)}, "
+                f"helper_pointer_bits={ctypes.sizeof(ctypes.c_void_p) * 8})."
+            )
 
 
 def apply_update_plan(plan_path: Path, *, wait_timeout: float = 300) -> int:
@@ -552,6 +599,8 @@ def apply_update_plan(plan_path: Path, *, wait_timeout: float = 300) -> int:
     lock_path = plan_path.parent.parent / "apply.lock"
     lock_handle = None
     owned_transaction = False
+    launch_error_message = ""
+    rollback = ""
     try:
         plan = validate_plan(plan_path)
         lock_handle = _acquire_lock(lock_path, plan["transaction"])
@@ -633,17 +682,27 @@ def apply_update_plan(plan_path: Path, *, wait_timeout: float = 300) -> int:
             lock_handle.close()
             lock_handle = None
             _relaunch(plan)
-        except Exception:
+        except Exception as launch_error:
+            launch_error_message = str(launch_error)[:1000]
             if plan["kind"] != "windows-installed" and backup.is_dir():
                 # Someone may have independently opened the completed new
                 # app after the lock release. Never roll back underneath it.
-                if lock_handle is None:
-                    lock_handle = _acquire_lock(lock_path, plan["transaction"])
-                others_closed = False
-                ensure_no_other_app_processes()
-                others_closed = True
-                os.replace(target, staging)
-                os.replace(backup, target)
+                try:
+                    if lock_handle is None:
+                        lock_handle = _acquire_lock(lock_path, plan["transaction"])
+                    others_closed = False
+                    ensure_no_other_app_processes()
+                    others_closed = True
+                    os.replace(target, staging)
+                    os.replace(backup, target)
+                    rollback = "restored_previous"
+                except Exception as recovery_error:
+                    rollback = "not_completed"
+                    raise AppUpdateError(
+                        f"{launch_error_message} Previous application recovery could not complete: {recovery_error}"
+                    ) from launch_error
+            else:
+                rollback = "not_available"
             raise
         atomic_json(status_path, {
             "status": "launched", "version": plan["version"],
@@ -658,6 +717,8 @@ def apply_update_plan(plan_path: Path, *, wait_timeout: float = 300) -> int:
                     "status": "error", "version": plan.get("version", "") if plan else "",
                     "transaction": plan.get("transaction", "") if plan else "",
                     "message": str(exc)[:1000],
+                    "launch_error": launch_error_message,
+                    "rollback": rollback,
                 })
             except OSError:
                 pass
