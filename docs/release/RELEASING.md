@@ -19,6 +19,13 @@ When cutting a version:
 
 Do not hard-code the new “latest version” into unrelated manuals/security policy. Those documents should point to release/version sources so they do not immediately drift.
 
+Finalize the version's change and upgrade notes before the tagged build.
+A prepared changelog entry may omit its publication date; GitHub release
+metadata records when publication actually occurs. Keep transient candidate
+status and acceptance evidence in the PR/draft release notes, not in text
+shipped inside the final artifacts. Completing acceptance must not require
+rebuilding or changing the verified artifacts.
+
 ## Release pre-flight
 
 ### Code/test gates

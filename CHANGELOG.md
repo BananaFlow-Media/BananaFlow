@@ -4,11 +4,29 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.2.1]
+
+The existing 1.2.0 release and its published artifacts are not replaced.
+
 ### Added
 
 - Explicit restart after a separately approved downloader-component update.
 - Verified in-app application update preparation and install/restart, with the official website download path retained.
 - Packaged updater validation for supported Windows and macOS application layouts.
+
+### Fixed
+
+- Preserve an existing read-only conversion output on POSIX as well as Windows.
+- Restore reproducible native macOS LGPL FFmpeg builds and the retained,
+  verified Windows FFmpeg staging input.
+
+### Upgrade notes
+
+- Existing releases without the application updater need one manual upgrade
+  from the official download page before subsequent in-app application updates.
+- Platform security warnings remain intact. Windows packages are not
+  Authenticode-signed; the macOS package is ad-hoc signed, not Developer ID
+  signed or notarized.
 
 ## [1.2.0] — 2026-09-08
 
