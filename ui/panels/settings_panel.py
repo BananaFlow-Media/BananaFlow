@@ -1038,9 +1038,14 @@ class SettingsPanel(QWidget):
         # A manual check is an explicit request — show the prompt even for
         # versions the user previously snoozed or skipped. Whatever they
         # choose now is recorded again the same way.
-        UpdatePromptDialog(
-            UpdateStateStore(), app_release, component_updates, parent=self.window(),
-        ).exec()
+        window = self.window()
+        show_prompt = getattr(window, "show_update_prompt", None)
+        if callable(show_prompt):
+            show_prompt(app_release, component_updates)
+        else:
+            UpdatePromptDialog(
+                UpdateStateStore(), app_release, component_updates, parent=window,
+            ).exec()
 
     def _show_update_infobar(self, kind: str, title: str, content: str) -> None:
         maker = InfoBar.success if kind == "success" else InfoBar.warning

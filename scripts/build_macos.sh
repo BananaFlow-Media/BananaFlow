@@ -12,7 +12,7 @@
 #   2. Run the unit tests (skip with --skip-tests).
 #   3. Install build deps + Playwright Chromium (bundled into the .app).
 #   4. Stage pinned, SHA-256-verified LGPL FFmpeg into packaging/ffmpeg/
-#      if not already present.
+#      from verified upstream sources (or revalidate a matching build cache).
 #   5. Build the .app with PyInstaller (packaging/bananaflow.spec).
 #   6. Ad-hoc codesign the bundle (no Apple Developer ID required).
 #   7. Wrap the .app in a DMG with an /Applications symlink.
@@ -38,6 +38,7 @@ for arg in "$@"; do
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+export BANANAFLOW_BUNDLE_FFMPEG="$BUNDLE_FFMPEG"
 
 # ── Resolve repo root (this script lives in scripts/) ──────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,56 +77,11 @@ $PY -m pip install --upgrade playwright >/dev/null
 $PY -m playwright install chromium
 
 # ── FFmpeg (LGPL) staging ──────────────────────────────────────────────────
-# These three values are duplicated in .github/workflows/release-macos.yml's
-# "Stage LGPL FFmpeg (arm64) for bundling" step, which is the authoritative
-# release path. They are cross-checked by
-# tests/test_supply_chain_pinning_phase4.py so the two can never drift.
-#
-# To move to a newer build: check
-# https://evermeet.cx/ffmpeg/info/ffmpeg/release (and .../ffprobe/release)
-# for the current version, download both zips, compute their SHA-256, and
-# update the version + both hashes here *and* in the workflow together.
-FFMPEG_VERSION="8.1.2"
-FFMPEG_SHA256="e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69"
-FFPROBE_SHA256="399b93f0b9862f69767afa343e90c2f48d7e7958cadbb6deb76a012d0e3b7ce3"
-
-FFMPEG_DIR="$ROOT/packaging/ffmpeg"
+# Use the same pinned source build and verification as release/PR CI. A
+# previously generated cache is reusable only with matching source/recipe and
+# executable hashes, native architecture, LGPL license and codec smoke gates.
 if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
-  if [[ -x "$FFMPEG_DIR/ffmpeg" && -x "$FFMPEG_DIR/ffprobe" ]]; then
-    echo "==> Using already-staged FFmpeg in packaging/ffmpeg/"
-  else
-    echo "==> Staging LGPL FFmpeg $FFMPEG_VERSION for arm64 into packaging/ffmpeg/"
-    mkdir -p "$FFMPEG_DIR"
-    TMP="$(mktemp -d)"
-    # evermeet.cx publishes signed static arm64 builds of ffmpeg/ffprobe.
-    # Pinned to an exact version, never the mutable "getrelease" alias, and
-    # verified against a SHA-256 before use — an unverified media binary
-    # would otherwise be baked straight into a shipped .app.
-    #
-    # No associative arrays: macOS ships bash 3.2 (Apple froze it at the
-    # last GPLv2 release), so a plain `case` keeps this portable.
-    for tool in ffmpeg ffprobe; do
-      case "$tool" in
-        ffmpeg)  expected="$FFMPEG_SHA256" ;;
-        ffprobe) expected="$FFPROBE_SHA256" ;;
-      esac
-      echo "    Downloading $tool $FFMPEG_VERSION…"
-      curl -fsSL "https://evermeet.cx/ffmpeg/$tool-$FFMPEG_VERSION.zip" -o "$TMP/$tool.zip"
-      actual="$(shasum -a 256 "$TMP/$tool.zip" | awk '{print $1}')"
-      if [[ "$actual" != "$expected" ]]; then
-        rm -rf "$TMP"
-        echo "ERROR: FFmpeg checksum mismatch for $tool-$FFMPEG_VERSION.zip" >&2
-        echo "       Expected: $expected" >&2
-        echo "       Actual:   $actual" >&2
-        exit 1
-      fi
-      echo "    $tool checksum verified: $actual"
-      unzip -oq "$TMP/$tool.zip" -d "$TMP"
-      mv "$TMP/$tool" "$FFMPEG_DIR/$tool"
-      chmod +x "$FFMPEG_DIR/$tool"
-    done
-    rm -rf "$TMP"
-  fi
+  $PY scripts/stage_ffmpeg.py --platform macos-arm64
 else
   echo "==> --no-ffmpeg: building without bundled FFmpeg"
   echo "    Users will need ffmpeg on PATH (e.g. 'brew install ffmpeg')."
@@ -147,9 +103,35 @@ rm -rf build dist
 echo "==> Running PyInstaller"
 $PY -m PyInstaller --noconfirm --clean packaging/bananaflow.spec
 
+# Exact corresponding sources and recipe for the statically linked LGPL
+# FFmpeg payload accompany the package, not just a pointer to upstream HEAD.
+if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
+  cp packaging/ffmpeg-source-bundle.tar.xz dist/ffmpeg-source-bundle.tar.xz
+fi
+
 APP="$ROOT/dist/BananaFlow.app"
 if [[ ! -d "$APP" ]]; then
   echo "ERROR: expected $APP to exist after PyInstaller." >&2
+  exit 1
+fi
+
+$PY scripts/build_app_updater.py --destination "$APP/Contents/MacOS"
+$PY scripts/generate_sbom.py --out-dir dist
+
+# The spec deliberately excludes nested Chromium .apps from binary analysis.
+# Keep local/PR builds identical to the release workflow's post-build copy.
+CACHE="$HOME/Library/Caches/ms-playwright"
+mkdir -p "$APP/Contents/Resources/ms-playwright"
+for dir in "$CACHE"/chromium-* "$CACHE"/chromium_headless_shell-*; do
+  [[ -d "$dir" ]] || continue
+  cp -R "$dir" "$APP/Contents/Resources/ms-playwright/$(basename "$dir")"
+done
+if ls "$APP/Contents/Resources/ms-playwright/" | grep -q '^ffmpeg-'; then
+  echo "ERROR: Playwright's unused recording FFmpeg was bundled." >&2
+  exit 1
+fi
+if ! ls "$APP/Contents/Resources/ms-playwright/" | grep -q '^chromium-'; then
+  echo "ERROR: bundled Chromium is missing." >&2
   exit 1
 fi
 
@@ -177,10 +159,10 @@ done
 # still warns on first launch. If you later get a Developer ID, replace
 # the identity below and add a notarization step.
 echo "==> Ad-hoc codesigning the bundle"
-codesign --force --deep --sign - "$APP"
-codesign --verify --deep --strict --verbose=2 "$APP" || {
-  echo "WARNING: codesign verification reported issues (non-fatal for ad-hoc)." >&2
-}
+for executable in bananaflow bananaflow-cli bananaflow-updater; do
+  codesign --force --sign - "$APP/Contents/MacOS/$executable"
+  codesign --verify --strict --verbose=2 "$APP/Contents/MacOS/$executable"
+done
 
 # ── DMG ────────────────────────────────────────────────────────────────────
 DMG_NAME="BananaFlow-v$APP_VERSION-macos-$ARCH.dmg"
@@ -201,11 +183,15 @@ hdiutil create \
   -srcfolder "$STAGING" \
   -ov -format UDZO \
   "$DMG_PATH"
+hdiutil verify "$DMG_PATH"
 rm -rf "$STAGING"
 
 # ── Checksums ──────────────────────────────────────────────────────────────
 echo "==> Writing SHA-256 checksum"
 ( cd "$ROOT/dist" && shasum -a 256 "$DMG_NAME" > SHA256SUMS.txt )
+if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
+  ( cd "$ROOT/dist" && shasum -a 256 ffmpeg-source-bundle.tar.xz >> SHA256SUMS.txt )
+fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
 APP_SIZE="$(du -sh "$APP" | cut -f1)"

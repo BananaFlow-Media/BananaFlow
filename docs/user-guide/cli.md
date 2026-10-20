@@ -43,6 +43,8 @@ The CLI's `--help` output is authoritative for the exact option set and accepted
 
 List-mode output is designed to remain useful for piping. Progress/diagnostic output should not silently corrupt machine-consumed standard output. Use `--quiet` for reduced progress output and `--debug` when collecting troubleshooting evidence.
 
+During application replacement, normal CLI operations exit with status `2` and a localized retry message before starting network or component work. The same safeguard applies if the update lock cannot be checked safely. Retry after installation finishes; `--help` and `--version` remain available.
+
 Filename numbering uses the source's original collection position, never the CLI processing order. Albums and EPs always receive their original track-number prefix. Direct songs and compilations stay unnumbered and use `Artist - Title` when an artist is known. Playlist positions are enabled by default; pass `--no-number-playlists` to omit them or `--number-playlists` to enable them explicitly. The CLI uses the same folder policy as the GUI: direct collections use their collection title, artist imports use Artist/Category/Collection, and multi-disc releases add a Disc folder.
 
 ## Authentication

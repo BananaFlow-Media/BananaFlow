@@ -38,7 +38,7 @@ Usage
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -96,6 +96,10 @@ class ReleaseInfo:
     release_notes: str
     published_at:  str
     asset_url:     str = ""
+    # These are discovery metadata only. The installer independently fetches
+    # the exact official tag and authenticates its asset size/digest again.
+    tag_name:      str = ""
+    assets:        tuple[dict, ...] = field(default_factory=tuple)
 
     def short_notes(self, max_chars: int = 400) -> str:
         """
@@ -176,7 +180,26 @@ def _is_newer(remote_version: str, local_version: str) -> bool:
     >>> _is_newer("0.9.9", "1.0.0")
     False
     """
-    return _parse_semver(remote_version) > _parse_semver(local_version)
+    def key(value: str):
+        match = re.fullmatch(
+            r"[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?"
+            r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?"
+            r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?",
+            value.strip(),
+        )
+        if match is None:
+            return None
+        core = tuple(int(part or 0) for part in match.group(1, 2, 3))
+        prerelease = match.group(4)
+        identifiers = tuple(
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in prerelease.split(".")
+        ) if prerelease else ()
+        # Stable outranks prerelease at the same core; numeric prerelease
+        # identifiers sort numerically and below nonnumeric identifiers.
+        return (*core, 1 if prerelease is None else 0, identifiers)
+    remote, local = key(remote_version), key(local_version)
+    return remote is not None and local is not None and remote > local
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -316,6 +339,8 @@ class UpdateChecker:
             release_notes=release.get("body", "") or "",
             published_at=release.get("published_at", ""),
             asset_url=asset_url,
+            tag_name=tag,
+            assets=tuple(dict(asset) for asset in assets if isinstance(asset, dict)),
         )
 
     def _fetch_latest_release(self) -> Optional[dict]:

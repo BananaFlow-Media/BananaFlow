@@ -309,3 +309,12 @@ def test_staged_binary_folders_are_gitignored_except_readmes():
         "packaging/pot-provider-backend/README.md",
         "packaging/yt-dlp-plugins/README.md",
     }
+
+
+def test_ffmpeg_notices_distinguish_current_windows_and_macos_licenses():
+    notices = _read("THIRD_PARTY_NOTICES.md")
+    source_offer = _read("SOURCE_OFFER.md")
+    for text in (notices, source_offer):
+        assert "Windows input LGPL-3.0-or-later" in text or "Windows archive carries LGPL-3.0-or-later" in text
+        assert "macOS recipe LGPL-2.1-or-later" in text or "macOS recipe targets LGPL-2.1-or-later" in text
+    assert "historical runtime inspection does not certify a restaged build" in notices

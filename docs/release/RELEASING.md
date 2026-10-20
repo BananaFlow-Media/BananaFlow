@@ -53,7 +53,16 @@ Then explicitly verify:
 - Review staged FFmpeg, Deno, PO-provider, browser/runtime and Python dependency versions against release documentation.
 - Ensure no generated/staged binary was accidentally committed.
 - Verify required license/source bundle files are packaged.
+- Stage Windows FFmpeg from the exact retained pin in `packaging/ffmpeg-windows.json`; inspect architecture/license/codecs after extraction. Preserve its LGPLv3 notice rather than labeling it with the native macOS recipe's LGPLv2.1 license.
+- Build macOS arm64 FFmpeg from `packaging/ffmpeg-macos-sources.json` with `scripts/build_ffmpeg_macos.py`; retain the verified source bundle, configure/license/architecture evidence and codec smoke outputs. Do not reuse the former Intel/GPL evermeet binary as native LGPL input.
 - Generate/verify SBOM and checksum assets.
+
+The macOS release and packaged-updater jobs use the native Apple Silicon
+`macos-15` runner. Keep their targets aligned. GitHub
+[retires the former macos-14 runner on November 2, 2026](https://github.com/actions/runner-images/issues/13518),
+with earlier brownouts; do not retain that expiring label for a new acceptance
+gate. Runner selection does not replace the package's deployment-target or
+architecture validation.
 
 ## Tag and CI build
 
@@ -77,6 +86,16 @@ After a human-reviewed pin change is merged to `main`:
 2. The Windows and macOS release workflows run automatically and retain full release-candidate artifacts in Actions. A branch-triggered build creates no GitHub application release.
 3. Only a matching version tag creates/updates the normal draft application release, and publication remains the manual procedure below.
 
+## In-app updater validation
+
+Full-app updater changes require packaged Windows installed/portable and macOS replacement/relaunch evidence in addition to the source suite. PR validation builds are read-only with respect to releases: they upload Actions evidence but cannot publish application releases or component channels. Record artifact hashes, old/new versions, preserved profile data, old-process exit, helper completion and the fresh application version. Do not label a configuration-only migration smoke as a full application upgrade. A staging/build failure leaves platform upgrade validation incomplete.
+
+Older public packages without the updater require one manual upgrade to an updater-enabled build. Testing an old public installation with the candidate helper validates layout/data migration, not an in-app feature that the old binary never contained. The two updater-enabled package test separately covers old-process-to-new-process handoff.
+
+Automated Windows installation tests cover the current-user path, not interactive all-users UAC approval. Locally built macOS ad-hoc candidates lack Internet quarantine, so automated replacement/relaunch does not certify Developer ID/notarization or first-launch Gatekeeper behavior. Preserve those manual acceptance checks and never clear quarantine to make them pass.
+
+The current GitHub API/digest trust model is documented in `docs/architecture/application-updater.md`; it does not confer publisher signing identity. Signing/notarization provisioning is separate from updater code, and OS security prompts must not be bypassed in tests or production.
+
 ## Manual acceptance — blocking
 
 Download the **CI-produced draft artifacts** onto clean/representative machines and verify at minimum:
@@ -92,6 +111,10 @@ Download the **CI-produced draft artifacts** onto clean/representative machines 
 - a Tag Editor Apply + Undo Applied Batch cycle succeeds on disposable fixtures;
 - when component-overlay code changes, an approved overlay activates only with a current authenticated control record and a revoked test bundle cannot activate;
 - when component-overlay health-check startup changes, the frozen health-check validates its staged `site-packages` without normal startup deleting that staging directory;
+- an independently approved component update offers Restart now/Later and uses new components only in the fresh process;
+- a full in-app update preserves installed/portable/macOS layout and per-user data, waits for explicit restart, refuses unsafe active-work interruption, and opens the new version after replacement;
+- cancellation, denied installation permission, failed verification and replacement failure preserve a usable recovery/manual path;
+- the website download action still works;
 - expected product/version/publisher metadata appears in the executable/package;
 - app data is created only in documented per-user locations;
 - critical Hebrew/English UI and the YouTube Doctor/manual QA surfaces render correctly when changed by the release.

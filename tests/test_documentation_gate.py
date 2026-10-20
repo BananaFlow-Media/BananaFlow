@@ -415,3 +415,18 @@ def test_required_any_document_must_actually_change(monkeypatch):
 
     _set_pr(monkeypatch, ["pyproject.toml", "docs/release/RELEASING.md"], body)
     assert mod.check_pr_impact("base", "head") == []
+
+
+def test_application_updater_and_conversion_paths_require_domain_documentation():
+    cases = {
+        "core/app_updates.py": "updaters/components",
+        "core/app_update_helper.py": "updaters/components",
+        "core/app_update_smoke.py": "updaters/components",
+        "scripts/run_packaged_update_smoke.py": "updaters/components",
+        ".github/workflows/packaged-updater.yml": "platform/package support",
+        "core/converter_service.py": "conversion/output preservation",
+    }
+    for path, name in cases.items():
+        rule = next(rule for rule in mod.IMPACT_RULES if rule.name == name)
+        assert any(re.search(pattern, path) for pattern in rule.path_patterns), path
+        assert rule.allow_no_impact is False

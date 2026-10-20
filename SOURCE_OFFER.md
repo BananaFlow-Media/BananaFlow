@@ -26,10 +26,24 @@ their own licenses and their own source obligations:
 
 | Component | License | Source availability |
 |---|---|---|
-| FFmpeg / ffprobe | LGPL-2.1-or-later (build-dependent) | Upstream: https://ffmpeg.org — the exact build bundled with a release is recorded in `THIRD_PARTY_NOTICES.md` for that release |
+| FFmpeg / ffprobe | Build-dependent: reviewed Windows input LGPL-3.0-or-later; native macOS recipe LGPL-2.1-or-later | Upstream: https://ffmpeg.org — the exact build bundled with a release is recorded in `THIRD_PARTY_NOTICES.md` for that release |
 | PO Token Provider (bgutil-ytdlp-pot-provider) | GPL-3.0 | Upstream: https://github.com/Brainicism/bgutil-ytdlp-pot-provider — the exact version staged into a release is pinned by content hash in `packaging/stage_pot_provider.py` and recorded in `THIRD_PARTY_NOTICES.md` |
 | Deno JavaScript runtime | MIT | Upstream: https://deno.land — version recorded in `THIRD_PARTY_NOTICES.md` |
 | Python dependencies (yt-dlp, PySide6, mutagen, httpx, Playwright, …) | Various (see notices) | Pinned in `requirements.txt` / `constraints-windows-py312.txt`; the per-release SBOM (`sbom.cyclonedx.json`, attached to each release) records the exact set |
+
+The macOS native FFmpeg build's exact upstream source archives and checksums
+are declared in `packaging/ffmpeg-macos-sources.json`. Its build recipe is
+`scripts/build_ffmpeg_macos.py`, including the pinned LAME, Opus, libogg and
+libvorbis inputs. Release assembly retains the verified archives, build recipe
+and license texts in a corresponding-source bundle; distribute that bundle
+alongside the affected binary release. The Windows build/source identity is
+recorded in `packaging/ffmpeg-windows.json` and upstream BtbN build sources.
+Do not substitute an unrelated current upstream revision for a release's
+corresponding source.
+
+The included macOS recipe reproduces the bounded libvorbis Darwin configure
+adjustment needed by current Apple linkers. Original upstream archives remain
+unchanged; `ffmpeg-build.json` records the adjusted file's before/after hashes.
 
 ## Requesting source
 

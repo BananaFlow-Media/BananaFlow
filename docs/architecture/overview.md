@@ -120,6 +120,8 @@ Credentials/cookies cross a stricter trust boundary than ordinary URLs/search te
 
 Packaged builds may include third-party executables/browser/runtime/plugin components. They are staged at build time, not committed as binaries. Versions, licenses, sources and release verification are tracked by `THIRD_PARTY_NOTICES.md`, `SOURCE_OFFER.md`, packaging README files, SBOM generation and the release checklist. The independently updateable `yt-dlp` / `yt-dlp-ejs` overlay is prepared in versioned app data and selected before the first downloader import; its trust, integrity, compatibility, atomicity and rollback contract is defined in [`secure-component-updater.md`](secure-component-updater.md). See also [`../security/supply-chain.md`](../security/supply-chain.md).
 
+The full-application updater has a separate explicit preparation and install/restart lifecycle. A standalone replacement helper runs outside the target installation; the GUI retains ownership of safe shutdown and user consent. Its trust and platform contract is in [`application-updater.md`](application-updater.md).
+
 ## Architecture change rule
 
 A change that alters a layer boundary, trust boundary, persistence format, external service, threading model or safety invariant must update this overview and/or the relevant focused architecture document in the same PR.

@@ -24,8 +24,6 @@ Public API:
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from typing import Dict, Optional, Set
 
 _current: str = "en"
@@ -327,10 +325,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Recommended: updating BananaFlow is the main update path — each "
             "release includes the tested downloader components"
         ),
-        "check_component_updates_title": "Check for Component Updates (Advanced)",
+        "check_component_updates_title": "Check for Component Updates",
         "check_component_updates_desc": (
-            "For advanced users and source installs. Normal users get these "
-            "components (yt-dlp, yt-dlp-ejs) automatically with BananaFlow updates"
+            "Update downloader components (yt-dlp, yt-dlp-ejs) without downloading "
+            "a new BananaFlow version"
         ),
         "update_check_failed_title": "Update check failed",
         "update_check_failed_msg": (
@@ -345,9 +343,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_prompt_subtitle": "Nothing is installed without your approval.",
         "update_prompt_app_line": "A new version of BananaFlow is available: {new}  (you have v{cur}).",
         "update_prompt_app_note": (
-            "Choosing “Open Download Page” opens BananaFlow's official download page in your "
-            "browser, where you can download and install the new version. BananaFlow "
-            "does not update itself automatically."
+            "On supported installed builds, download and verify the update here, then "
+            "choose Install and restart. Or choose Open Download Page to download and "
+            "install it yourself from BananaFlow's official website."
         ),
         "update_prompt_app_includes_components": (
             "This update also includes updated downloader components "
@@ -380,14 +378,35 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_remind_3_days": "In 3 days",
         "update_remind_7_days": "In a week",
         "update_skip_btn": "Skip This Version",
+        'update_available_btn': 'Update available',
+        'update_ready_btn': 'Update ready',
+        'app_update_download_btn': 'Download update',
+        'app_update_install_restart_btn': 'Install and restart',
+        'app_update_manual_only': 'For this build, install the new version from the official download page. Component updates are separate.',
+        'app_update_progress_label': 'Application update download progress',
+        'app_update_checking_saved': 'Checking for a previously downloaded update…',
+        'app_update_downloading': 'Downloading and verifying the application update…',
+        'app_update_download_progress': 'Downloading update: {done} / {total} MB. Verification follows.',
+        'app_update_ready_msg': 'Version {version} is downloaded and verified. Choose Install and restart when you are ready, or Later to keep working. The saved update remains available.',
+        'app_update_retry_msg': 'The previous update could not be completed. The saved update is available to retry with Install and restart. You can also use the official download page.',
+        'app_update_failed_msg': 'The application update could not be prepared. Your installed application has not been replaced. Try again or use the official download page. Technical details are in the log.',
+        'restart_busy_downloads': 'Downloads are still running. Finish or pause them first, then choose Restart now again. The update remains ready.',
+        'restart_busy_conversion': 'A conversion is still running. Let it finish or cancel it safely, then try again. The application will stay open.',
+        'restart_busy_metadata': 'The Tag Editor is still working. Let it finish or cancel it safely, then choose Restart now again. The update remains ready.',
+        'restart_unavailable_msg': 'Close and reopen BananaFlow to activate the updated components.',
+        'restart_failed_title': 'Restart could not start',
+        'restart_failed_msg': 'BananaFlow closed safely, but the restart or update helper could not start. Reopen BananaFlow and try again. A prepared application update is still saved; you can also use the official download page.',
+        "app_update_running_title": "Application update in progress",
+        "app_update_running_msg": "An application update is running. Wait for it to finish before opening BananaFlow.",
+        "app_update_state_unavailable_msg": "BananaFlow could not verify whether an application update is running. Wait for any update to finish, then try opening it again. Technical details are in the log.",
         "component_install_running": "Updating components… this can take a minute.",
         "component_install_ok_msg": (
-            "Components updated successfully. Restart BananaFlow for the new "
-            "versions to take effect."
+            "Components updated successfully. Choose Restart now to activate "
+            "them without installing a saved application update."
         ),
         "component_install_failed_msg": (
-            "Component update failed safely and the current components were left "
-            "unchanged. You can try again.\n\nDetails: {detail}"
+            "The component update did not finish. BananaFlow stays open; you can "
+            "try again.\n\nDetails: {detail}"
         ),
 
         # ── Browser cookies ─────────────────────────────────────────────────────
@@ -1842,10 +1861,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "מומלץ: עדכון BananaFlow הוא מסלול העדכון הראשי — כל גרסה כוללת "
             "את רכיבי ההורדה הבדוקים"
         ),
-        "check_component_updates_title": "בדוק עדכוני רכיבים (מתקדם)",
+        "check_component_updates_title": "בדוק עדכוני רכיבים",
         "check_component_updates_desc": (
-            "למשתמשים מתקדמים ולהתקנות מקוד מקור. משתמשים רגילים מקבלים את "
-            "הרכיבים האלה (yt-dlp, yt-dlp-ejs) אוטומטית עם עדכוני BananaFlow"
+            "עדכון רכיבי ההורדה (yt-dlp, yt-dlp-ejs) בלי להוריד "
+            "גרסה חדשה של BananaFlow"
         ),
         "update_check_failed_title": "בדיקת העדכון נכשלה",
         "update_check_failed_msg": (
@@ -1859,8 +1878,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_prompt_subtitle": "שום דבר לא מותקן ללא אישורך.",
         "update_prompt_app_line": "גרסה חדשה של BananaFlow זמינה: {new}  (ברשותך v{cur}).",
         "update_prompt_app_note": (
-            "בחירה ב“פתח עמוד הורדה” תפתח את עמוד ההורדה באתר הרשמי של BananaFlow, שם "
-            "תוכל להוריד ולהתקין את הגרסה החדשה. BananaFlow אינו מתעדכן אוטומטית."
+            "בגרסאות מותקנות נתמכות אפשר להוריד ולאמת כאן את העדכון, ואז לבחור "
+            "בהתקנה ובהפעלה מחדש. אפשר גם לבחור בפתיחת עמוד ההורדה כדי להוריד "
+            "ולהתקין בעצמך מהאתר הרשמי של BananaFlow."
         ),
         "update_prompt_app_includes_components": (
             "עדכון זה כולל גם רכיבי הורדה מעודכנים ({names}) — עדכון BananaFlow "
@@ -1892,13 +1912,34 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_remind_3_days": "בעוד 3 ימים",
         "update_remind_7_days": "בעוד שבוע",
         "update_skip_btn": "דלג על גרסה זו",
+        'update_available_btn': 'עדכון זמין',
+        'update_ready_btn': 'העדכון מוכן',
+        'app_update_download_btn': 'הורד עדכון',
+        'app_update_install_restart_btn': 'התקן והפעל מחדש',
+        'app_update_manual_only': 'בגרסה זו יש להתקין את הגרסה החדשה מעמוד ההורדה הרשמי. עדכוני רכיבים זמינים בנפרד.',
+        'app_update_progress_label': 'התקדמות הורדת עדכון התוכנה',
+        'app_update_checking_saved': 'בודק אם קיים עדכון שכבר הורד…',
+        'app_update_downloading': 'מוריד ומאמת את עדכון התוכנה…',
+        'app_update_download_progress': 'מוריד עדכון: {done} מתוך {total} מגה־בייט. לאחר ההורדה יתבצע אימות.',
+        'app_update_ready_msg': 'גרסה {version} הורדה ואומתה. אפשר לבחור בהתקנה ובהפעלה מחדש כשנוח לך, או במאוחר יותר כדי להמשיך לעבוד. העדכון נשאר שמור.',
+        'app_update_retry_msg': 'לא ניתן היה להשלים את העדכון הקודם. העדכון השמור זמין לניסיון חוזר באמצעות התקנה והפעלה מחדש. אפשר גם להשתמש בעמוד ההורדה הרשמי.',
+        'app_update_failed_msg': 'לא ניתן היה להכין את עדכון התוכנה. התוכנה המותקנת לא הוחלפה. אפשר לנסות שוב או להשתמש בעמוד ההורדה הרשמי. פרטים טכניים זמינים ביומן.',
+        'restart_busy_downloads': 'עדיין מתבצעות הורדות. יש לסיים או להשהות אותן, ואז לבחור שוב בהפעלה מחדש. העדכון נשאר מוכן.',
+        'restart_busy_conversion': 'עדיין מתבצעת המרה. יש להמתין לסיומה או לבטל אותה בבטחה, ואז לנסות שוב. התוכנה תישאר פתוחה.',
+        'restart_busy_metadata': 'עורך התגיות עדיין עובד. יש להמתין לסיום או לבטל בבטחה, ואז לבחור שוב בהפעלה מחדש. העדכון נשאר מוכן.',
+        'restart_unavailable_msg': 'יש לסגור ולפתוח מחדש את BananaFlow כדי להפעיל את הרכיבים המעודכנים.',
+        'restart_failed_title': 'לא ניתן להתחיל הפעלה מחדש',
+        'restart_failed_msg': 'BananaFlow נסגר בבטחה, אך לא ניתן היה להתחיל את ההפעלה מחדש או את עוזר העדכון. יש לפתוח שוב את BananaFlow ולנסות מחדש. עדכון תוכנה שהוכן נשאר שמור; אפשר גם להשתמש בעמוד ההורדה הרשמי.',
+        "app_update_running_title": "עדכון התוכנה מתבצע",
+        "app_update_running_msg": "עדכון התוכנה מתבצע כעת. יש להמתין לסיומו לפני פתיחת BananaFlow.",
+        "app_update_state_unavailable_msg": "BananaFlow לא הצליח לבדוק אם עדכון התוכנה מתבצע כעת. יש להמתין לסיום העדכון, ואז לנסות לפתוח שוב. פרטים טכניים זמינים ביומן.",
         "component_install_running": "מעדכן רכיבים… זה עשוי לקחת דקה.",
         "component_install_ok_msg": (
-            "הרכיבים עודכנו בהצלחה. הפעל מחדש את BananaFlow כדי שהגרסאות "
-            "החדשות ייכנסו לתוקף."
+            "הרכיבים עודכנו בהצלחה. בחירה ב״הפעל מחדש״ מפעילה אותם "
+            "בלי להתקין עדכון תוכנה שמור."
         ),
         "component_install_failed_msg": (
-            "עדכון הרכיבים נכשל בבטחה, והרכיבים הנוכחיים לא השתנו. "
+            "עדכון הרכיבים לא הושלם. BananaFlow נשאר פתוח; "
             "אפשר לנסות שוב.\n\nפרטים: {detail}"
         ),
 
@@ -4570,21 +4611,14 @@ def localized_folder_name(category: str) -> str:
     return t(key) if key else category
 
 
-def request_language_restart(app, lang: str) -> None:
-    """Persist ``lang`` to in-memory state then restart the app process.
+def request_language_restart(app, lang: str) -> bool:
+    """Request the normal safe-close restart after the caller persists language.
 
-    The new process re-reads ``cfg.language`` at startup and renders the
-    entire UI cleanly in the new language with the correct RTL direction
-    from frame one — no partial-refresh edge cases.
+    A veto or active operation leaves the current GUI and process untouched.
+    Never launch a second process before its window accepts shutdown.
     """
-    apply_language(app, lang)
-    from PySide6.QtCore import QProcess
-
-    program = sys.executable
-    # Re-launch with the same argv. When frozen (PyInstaller), sys.argv[0]
-    # is the bundled executable; sys.executable points to the same binary,
-    # so passing sys.argv[1:] as arguments preserves any user-supplied flags.
-    arguments = sys.argv[1:] if getattr(sys, "frozen", False) else list(sys.argv)
-    workdir = os.getcwd()
-    QProcess.startDetached(program, arguments, workdir)
-    app.quit()
+    for window in app.topLevelWidgets():
+        request = getattr(window, "request_restart", None)
+        if callable(request):
+            return bool(request())
+    return False

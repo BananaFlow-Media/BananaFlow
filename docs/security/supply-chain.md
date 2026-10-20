@@ -35,6 +35,27 @@ Where upstream publishes checksums or a reviewed hash is available, staging veri
 
 A checksum fetched from the same compromised origin as an artifact is not an independent trust root; treat such cases as weaker evidence and prefer independently pinned/reviewed hashes when practical.
 
+Safe extraction of verified source archives preserves shipped file and
+directory modification times. Generated Autotools build files must remain newer
+than their source templates regardless of archive member order; replacing
+those times with extraction time can spuriously invoke maintainer-only tools.
+Path/link restrictions and sanitized permissions remain enforced, and normal
+upstream build and self-test targets are not disabled.
+
+The native macOS FFmpeg recipe applies one bounded libvorbis compatibility
+adjustment only after archive verification and safe extraction: it removes
+the three obsolete `-force_cpusubtype_ALL` flags from the reviewed generated
+Darwin `configure` assignments. Unexpected version/content fails closed.
+Build evidence records the original and adjusted file hashes, and the source
+bundle retains unchanged upstream archives plus the exact adjustment recipe.
+The normal libvorbis build and its `lib` self-test remain mandatory, followed
+by FFmpeg architecture, linkage, license and audio-roundtrip gates.
+
+The shared FFmpeg license gate requires the complete GNU Lesser General Public
+License name while allowing upstream's whitespace/line wrapping. Abbreviations,
+partial names and GPL-only/nonfree notices do not satisfy it; enabled GPL or
+nonfree build flags remain independently forbidden.
+
 ### Licenses/source availability
 
 - `THIRD_PARTY_NOTICES.md` — dependency/component inventory and license handling.
@@ -57,6 +78,8 @@ The blocking release checklist in `docs/release/RELEASING.md` verifies that the 
 Source environments can run an explicitly approved package upgrade. Packaged builds can install the reviewed `yt-dlp` / `yt-dlp-ejs` pair from the official GitHub component channel into a per-user versioned overlay. GitHub's official release-asset size/SHA-256 metadata authenticates the manifest and bundle provenance; the client independently enforces manifest/bundle hash agreement, compatibility, a periodically refreshed authenticated disabled/revoked-bundle control record, download/expanded-size bounds, safe archive paths, an isolated health check, atomic next-launch selection and last-known-good fallback. The Windows installer also removes only the previous packaged downloader module/metadata trees before copying a new full build, preventing obsolete one-folder PyInstaller files from surviving an in-place upgrade. See `docs/architecture/secure-component-updater.md`.
 
 A scheduled workflow reports a newer non-yanked candidate as a warning and review checklist, without authoring a dependency change. Expected upstream drift is not a build failure; registry/metadata errors and a missing or fully yanked reviewed pin remain failures. Version comparison follows PEP 440, including development releases. A successful advisory check is not approval of the candidate. A human-reviewed pin merged to `main` automatically builds/publishes the component channel and triggers Windows/macOS Actions release candidates. Public application releases still require a version tag, draft verification and deliberate maintainer publication.
+
+The explicit full-application updater uses exact official-repository release assets and verified size/SHA-256, preserving installed/portable/macOS layout distinctions. It does not replace platform publisher signatures or independently verify attestations merely because the build published them. Its lifecycle and residual trust contract are documented in [`../architecture/application-updater.md`](../architecture/application-updater.md). PR package validation must remain separate from channel/release publication.
 
 ## Change rule
 

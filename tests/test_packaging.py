@@ -220,6 +220,7 @@ def test_spec_excludes_the_unused_qt_multimedia_duplicate_ffmpeg():
 _PLAYWRIGHT_BUNDLING_SITES = {
     "packaging/bananaflow.spec": "p_dir.name.startswith('ffmpeg-')",
     ".github/workflows/release-macos.yml": 'grep -q \'^ffmpeg-\'',
+    "scripts/build_macos.sh": 'grep -q \'^ffmpeg-\'',
 }
 
 # Files that merely name the cache directory (resolve a path, install into it)

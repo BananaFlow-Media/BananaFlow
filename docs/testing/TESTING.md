@@ -21,7 +21,7 @@ Run a focused file or test while iterating:
 QT_QPA_PLATFORM=offscreen pytest tests/test_example.py -q
 ```
 
-On PowerShell, set the environment variable using PowerShell syntax when needed. GUI tests must run offscreen unless the test is explicitly a manual visual check.
+On PowerShell, set the environment variable using PowerShell syntax when needed. Ordinary widget tests run offscreen. The real full-window updater smoke is a narrow native-platform exception on macOS: its source subprocess and disposable packaged fixture use `QT_QPA_PLATFORM=cocoa`. The macOS frameless-window adapter dereferences Qt window IDs as Cocoa `NSView` objects; offscreen synthetic IDs are not valid native handles and cannot exercise that path safely. This smoke must create `QApplication` before importing `AppWindow`, report the actual Qt platform, open the real window/navigation and pass accepted safe shutdown. A missing native graphical session or a native crash is a failure, not a reason to skip or weaken acceptance. Windows and Linux source smoke continue to use offscreen Qt; manual visual checks remain separate.
 
 ## Supported full gate
 
@@ -49,6 +49,26 @@ Startup-loading regression tests also verify in fresh interpreter processes that
 Startup-preflight shutdown tests must cover cooperative cancellation before the Playwright probe, joining the worker before interpreter teardown, and a Playwright 1.62 availability probe that exits without pending asyncio task/future errors. A passing functional preflight is insufficient if process exit emits cleanup diagnostics.
 
 Immediate-close coverage must also verify that the startup update worker honours interruption between app and component checks and never emits results after cancellation; Qt must not destroy a running child `QThread`.
+
+## Application updater acceptance
+
+Updater changes require more than button or mocked subprocess tests. Cover both independently prepared downloader components and full application updates, including a successful explicit restart, Later/close without restarting, active-work vetoes, thread ownership and failures before replacement. Retain English/Hebrew UI coverage.
+
+The packaged updater gate must use real Windows installer/portable and macOS application artifacts, disposable installation/profile directories, a running old process, the packaged helper, actual replacement and a fresh process reporting the candidate version. Assert preserved user data and a real failure/recovery case. Configuration migration alone is not old-to-new application upgrade evidence. Record exact artifact hashes, versions and process outcomes. Test fixture releases must never be published or selected by real clients.
+
+On failure, the harness retains its synthetic sandbox until runner teardown: an error status can precede the helper's recovery relaunch, so deleting the tree immediately could interrupt recovery and mask the original failure. It never kills the helper or app. Successful runs still require complete cleanup; failed sandboxes are not uploaded as evidence.
+
+Fixture seeding must commit its SQLite canary transaction and explicitly close the owned connection before launching an application. The regression retains a real connection to rule out garbage-collection-dependent cleanup, covers insertion failure and verifies immediate database rename/removal on native Windows.
+
+Completed Windows fixture cleanup may remove only a confirmed read-only file-attribute bit from an entry within the marked sandbox, retaining all other attributes and never changing ACLs or ownership. Reparse-point paths are refused for attribute changes; other access failures remain fatal. A native Windows filesystem regression checks this path before packaging.
+
+Hidden packaged smoke failures write bounded fixture diagnostics and exit nonzero rather than leaving an unhandled windowed-runtime error dialog. Installation detection, preparation, real GUI restart and helper-handoff progress are collected even when failure occurs before the helper starts. These diagnostics do not waive any lifecycle or timeout gate.
+
+The macOS packaged-updater job and release job share the native Apple Silicon `macos-15` runner; changing this build host must retain explicit arm64 checks.
+
+PR jobs must have no release/channel publication path, and must not bypass platform warnings. A build blocked on staging, signing, OS policy or installation is not a passing update test. Normal-network and representative-machine release checks below and in `docs/release/RELEASING.md` remain necessary for public release.
+
+Converter tests must preserve existing read-only destinations on all platforms, including POSIX where writable parent directories otherwise permit atomic replacement. Deterministic coverage checks both an initially read-only file and one made read-only during conversion; real-FFmpeg integration must retain the same guarantee.
 
 ## Real-network tests
 
@@ -100,6 +120,7 @@ The gate validates internal Markdown references, canonical documentation structu
   clocks and sub-second waits; never exercise a real provider limit.
 - Filesystem-destructive tests use disposable temporary directories/files only.
 - New Qt work must cover teardown/cancellation ownership when threads/timers/callbacks are involved.
+- Local HTTP-server fixtures must stop their accept loop, close the server, and join active request handlers before interpreter teardown. Expected client disconnects during cancellation must not leak tracebacks after the test summary.
 - New user-facing strings must preserve i18n coverage.
 - New persisted state needs migration/failure-path tests.
 

@@ -127,38 +127,11 @@ jobs:
           retention-days: 30
 
       - name: Download FFmpeg (LGPL) for bundling
-        # Pinned to an exact, immutable BtbN release tag and asset — never
-        # the mutable "latest" tag/alias, which can silently change what a
-        # release build bundles between runs with no way to audit what
-        # shipped. The SHA-256 below was computed once from this exact
-        # asset and is verified before extraction; any mismatch (a changed
-        # asset, a compromised mirror, a transfer error) fails the build
-        # closed rather than bundling an unverified binary.
-        #
-        # To move to a newer build: pick a new tag from
-        # https://github.com/BtbN/FFmpeg-Builds/releases (not "latest"),
-        # download the matching *-win64-lgpl.zip asset, compute its
-        # SHA-256, and update all three values together.
+        # One shared stager owns the retained month-end BtbN pin, verifies the
+        # archive before extraction, checks actual x64/license/version and
+        # roundtrips every supported audio format before packaging it.
         shell: pwsh
-        run: |
-          $tag = "autobuild-2026-09-07-15-39"
-          $asset = "ffmpeg-N-126455-gecc7eb519e-win64-lgpl.zip"
-          $expectedSha256 = "95e1817d8717f2b0c34b1c1422f3840cebd5afc533bb5dd1050e093657d42326"
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag/$asset"
-
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg-lgpl.zip
-          $actualSha256 = (Get-FileHash -Path ffmpeg-lgpl.zip -Algorithm SHA256).Hash.ToLower()
-          if ($actualSha256 -ne $expectedSha256) {
-            Remove-Item -Force ffmpeg-lgpl.zip -ErrorAction SilentlyContinue
-            throw "FFmpeg checksum mismatch for $asset`nExpected: $expectedSha256`nActual:   $actualSha256"
-          }
-          Write-Host "FFmpeg checksum verified: $actualSha256"
-
-          Expand-Archive -Path ffmpeg-lgpl.zip -DestinationPath ffmpeg-tmp
-          New-Item -ItemType Directory -Force -Path packaging\ffmpeg | Out-Null
-          Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffmpeg.exe"  | Select-Object -First 1 | Copy-Item -Destination packaging\ffmpeg\ffmpeg.exe
-          Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffprobe.exe" | Select-Object -First 1 | Copy-Item -Destination packaging\ffmpeg\ffprobe.exe
-          Remove-Item -Recurse -Force ffmpeg-tmp, ffmpeg-lgpl.zip
+        run: python scripts/stage_ffmpeg.py --platform windows-x64
 
       - name: Stage Deno runtime (pinned, SHA-256 verified)
         shell: pwsh

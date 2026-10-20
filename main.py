@@ -21,6 +21,16 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+# LaunchServices need not inherit a terminal's HOME. The explicitly requested
+# packaged-test relaunch restores only a validated disposable profile, before
+# even logging can touch the runner's ordinary profile.
+if "--app-update-smoke-result" in sys.argv:
+    from core.app_update_smoke import configure_smoke_environment
+    _smoke_index = sys.argv.index("--app-update-smoke-result")
+    if _smoke_index + 1 >= len(sys.argv):
+        raise SystemExit(2)
+    configure_smoke_environment(Path(sys.argv[_smoke_index + 1]))
+
 # On Windows, the Playwright browser is bundled inside the EXE folder.
 # On macOS, Chromium is bundled as loose files (chrome-mac directory) inside
 # the .app to avoid nested .app re-signing issues. Point Playwright there.
@@ -137,6 +147,27 @@ def _activate_selected_component_overlay():
         return None
 
 
+def _allow_startup_during_app_update() -> bool:
+    """Refuse a new GUI while a live helper owns the installation transaction.
+
+    A stale lock file alone does not block startup. Check the OS-held lock,
+    before loading component overlays, opening services or building the window.
+    """
+    from core.app_update_helper import update_lock_is_held
+    from utils.paths import get_app_data_dir
+    from ui.i18n import t
+    try:
+        if not update_lock_is_held(get_app_data_dir() / "app-updates" / "apply.lock"):
+            return True
+        message = t("app_update_running_msg")
+    except Exception:
+        logger.exception("Could not verify the active application updater lock")
+        message = t("app_update_state_unavailable_msg")
+    from PySide6.QtWidgets import QMessageBox
+    QMessageBox.information(None, t("app_update_running_title"), message)
+    return False
+
+
 def main() -> int:
     startup_started = time.perf_counter()
     logger.info("Starting BananaFlow (debug=%s)", _debug_mode)
@@ -172,6 +203,8 @@ def main() -> int:
     cfg = AppConfig()
     from ui.i18n import apply_language, t
     apply_language(app, cfg.language)
+    if not _allow_startup_during_app_update():
+        return 0
     splash = _create_startup_splash(
         app, PRODUCT_NAME, t("startup_loading_interface"),
     )
@@ -285,6 +318,16 @@ def main() -> int:
     # AppWindow.closeEvent handles most cleanup; svc.close() is a safety net
     # for abnormal exits.
     svc.close()
+    # Only an explicit restart with an accepted close may launch anything.
+    # This is deliberately after startup-worker join and service cleanup.
+    try:
+        from ui.services.restart import launch_after_shutdown
+        launch_after_shutdown(window)
+    except Exception:
+        logger.exception("Restart/update handoff failed; prepared update retained")
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(None, t("restart_failed_title"), t("restart_failed_msg"))
+        exit_code = 1
     logger.info("Application exiting with code %d", exit_code)
     return exit_code
 
@@ -308,6 +351,9 @@ def _run_internal_smoke_test(argv: list[str]) -> int:
     if target == "release-candidate":
         from core.release_candidate_smoke import run_release_candidate_smoke
         return run_release_candidate_smoke()
+    if target == "app-update":
+        from core.app_update_smoke import run_update_smoke
+        return run_update_smoke()
     print(f'{{"ok": false, "error": "unknown smoke target {target!r}"}}')
     return 2
 
@@ -331,6 +377,9 @@ if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
 
+    if "--app-update-smoke-result" in sys.argv:
+        from core.app_update_smoke import report_relaunch
+        sys.exit(report_relaunch(Path(sys.argv[sys.argv.index("--app-update-smoke-result") + 1])))
     if "--component-healthcheck" in sys.argv:
         sys.exit(_run_component_healthcheck(sys.argv))
     if "--internal-smoke-test" in sys.argv:

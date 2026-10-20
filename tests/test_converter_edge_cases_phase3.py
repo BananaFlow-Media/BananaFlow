@@ -130,7 +130,8 @@ class TestReadOnlyInputsAndOutputs:
 
     def test_overwrite_onto_a_read_only_destination_fails_and_preserves_it(self, tmp_path):
         """The dangerous case: an explicit OVERWRITE whose atomic replace
-        cannot succeed. The existing file must survive byte-for-byte and no
+        must be refused, including POSIX where directory permissions alone
+        would otherwise permit replacement. The existing file must survive byte-for-byte and no
         .part temp may be left behind."""
         src = _make_wav(tmp_path / "song.wav")
         dest = tmp_path / "song.mp3"
@@ -173,6 +174,43 @@ class TestReadOnlyInputsAndOutputs:
             assert result.error_kind is ConversionErrorKind.PERMISSION_DENIED
         finally:
             os.chmod(out, stat.S_IRWXU)
+
+
+@pytest.mark.parametrize("lock_during_conversion", [False, True])
+def test_read_only_overwrite_is_preserved_without_ffmpeg(tmp_path, monkeypatch, lock_during_conversion):
+    """Exercise the real filesystem guard even without installed media tools."""
+    src = tmp_path / "song.wav"
+    src.write_bytes(b"source must survive")
+    dest = tmp_path / "song.mp3"
+    dest.write_bytes(b"protected existing destination")
+    service = ConverterService(ffmpeg_path="FF", ffprobe_path="FP")
+    monkeypatch.setattr(service, "probe", lambda *a, **k: {
+        "format": {"duration": "1", "format_name": "wav"},
+        "streams": [{"codec_type": "audio", "codec_name": "pcm_s16le"}],
+    })
+    calls = []
+    def convert(request, source, temp, *args):
+        calls.append(temp)
+        temp.write_bytes(b"new converted bytes")
+        os.chmod(dest, stat.S_IREAD)
+        return None
+    monkeypatch.setattr(service, "_run_ffmpeg", convert)
+    monkeypatch.setattr(service, "_verify_output", lambda *a: None)
+    if not lock_during_conversion:
+        os.chmod(dest, stat.S_IREAD)
+    try:
+        result = service.convert_file(ConversionRequest(
+            source=src, output_format="mp3", collision_policy=CollisionPolicy.OVERWRITE,
+            preserve_artwork=False,
+        ))
+        assert result.outcome is FileOutcome.FAILED
+        assert result.error_kind is ConversionErrorKind.PERMISSION_DENIED
+        assert dest.read_bytes() == b"protected existing destination"
+        assert src.read_bytes() == b"source must survive"
+        assert not list(tmp_path.glob("*.part.*"))
+        assert bool(calls) is lock_during_conversion
+    finally:
+        _make_writable(dest)
 
 
 class TestUnwritableDestinationClassification:

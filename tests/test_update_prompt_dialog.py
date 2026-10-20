@@ -103,22 +103,16 @@ class TestBuildUpdatePromptText:
         assert "Fixed things" in text
         assert "##" not in text
 
-    def test_combined_prompt_shows_one_recommendation_app_update(self):
-        """App update is the primary path: when both an app release and
-        outdated components exist, components are folded into the app
-        update message — no component version table, no pip note, no
-        second competing recommendation."""
+    def test_combined_prompt_keeps_independent_component_details(self):
         text = build_update_prompt_text(_release("9.9.9"), [_component()], frozen=False)
         assert "v9.9.9" in text
-        assert t("update_prompt_app_includes_components").format(names="yt-dlp") in text
-        assert t("update_prompt_components_heading") not in text
-        assert t("update_prompt_component_note") not in text
-        assert t("update_prompt_frozen_note") not in text
+        assert t("update_prompt_components_heading") in text
+        assert t("update_prompt_component_note") in text
+        assert "2026.8.1" in text
 
-    def test_combined_prompt_folds_components_in_frozen_mode_too(self):
+    def test_combined_prompt_explains_independent_packaged_overlay(self):
         text = build_update_prompt_text(_release("9.9.9"), [_component()], frozen=True)
-        assert t("update_prompt_app_includes_components").format(names="yt-dlp") in text
-        assert t("update_prompt_frozen_note") not in text
+        assert t("update_prompt_frozen_note") in text
 
 
 class TestI18nKeysComplete:
@@ -242,23 +236,14 @@ class TestUpdatePromptDialogWidget:
         finally:
             dlg.deleteLater()
 
-    def test_app_update_suppresses_component_button_even_in_source_mode(self, tmp_path, monkeypatch):
-        """One main recommendation: with an app release on offer, the pip
-        button must not appear as a competing action — not even for a
-        source checkout where the pip path would technically work."""
-        try:
-            _make_qapp(tmp_path, monkeypatch)
-            import ui.dialogs.update_prompt_dialog as upd
-        except ImportError:
-            pytest.skip("PySide6 / qfluentwidgets not available")
-            return
-
+    def test_app_update_does_not_hide_independent_component_button(self, tmp_path, monkeypatch):
+        _make_qapp(tmp_path, monkeypatch)
+        import ui.dialogs.update_prompt_dialog as upd
         monkeypatch.setattr(upd, "can_update_in_place", lambda: True)
         dlg = upd.UpdatePromptDialog(_store(tmp_path), _release("9.9.9"), [_component()])
         try:
-            assert not hasattr(dlg, "_install_components_btn")
-            assert t("update_prompt_app_includes_components").format(names="yt-dlp") \
-                in dlg._body_lbl.text()
+            assert hasattr(dlg, "_install_components_btn")
+            assert t("update_prompt_component_note") in dlg._body_lbl.text()
         finally:
             dlg.deleteLater()
 

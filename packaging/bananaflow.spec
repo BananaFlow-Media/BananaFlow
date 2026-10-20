@@ -156,13 +156,21 @@ for pkg in ('yt-dlp', 'yt-dlp-ejs', 'mutagen', 'ytmusicapi', 'PySide6'):
 FFMPEG_DIR = HERE / 'ffmpeg'
 _ffmpeg_names = ('ffmpeg.exe', 'ffprobe.exe') if IS_WIN else ('ffmpeg', 'ffprobe')
 binaries: list[tuple[str, str]] = []
-if FFMPEG_DIR.exists():
+if FFMPEG_DIR.exists() and os.environ.get("BANANAFLOW_BUNDLE_FFMPEG") != "0":
     for name in _ffmpeg_names:
         src = FFMPEG_DIR / name
         if src.exists():
             # Place the binaries inside the app folder so the runtime
             # can locate them next to the executable.
             binaries.append((str(src), '.'))
+    # Native macOS LGPL source builds carry exact build/license evidence.
+    if (FFMPEG_DIR / "licenses").is_dir():
+        datas += [
+            (str(path), "ffmpeg-licenses")
+            for path in (FFMPEG_DIR / "licenses").iterdir() if path.is_file()
+        ]
+    if (FFMPEG_DIR / "ffmpeg-build.json").is_file():
+        datas.append((str(FFMPEG_DIR / "ffmpeg-build.json"), "."))
 
 # ── Bundled downloader components (opt-in, staged like FFmpeg) ─────────────
 # BananaFlow can ship the important YouTube-reliability components *inside*

@@ -1,0 +1,976 @@
+"""Deterministic trust, preparation, platform and helper failure contracts."""
+from __future__ import annotations
+
+from dataclasses import replace
+from contextlib import nullcontext
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import stat
+import subprocess
+import sys
+from types import SimpleNamespace
+import zipfile
+
+import httpx
+import pytest
+
+from core import app_updates as updates
+from core import app_update_helper as helper
+from core.update_checker import ReleaseInfo, UpdateChecker, _is_newer
+
+
+def _zip(files=None):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        for name, content in (files or {
+            "bananaflow.exe": b"new application",
+            "_internal/runtime.dll": b"new runtime",
+        }).items():
+            # ZipInfo normally normalizes Windows separators / NULs even
+            # before writing. Preserve the requested raw name so hostile
+            # fixtures test the archive bytes, not a sanitized substitute.
+            entry = zipfile.ZipInfo(name)
+            entry.filename = name
+            entry.orig_filename = name
+            archive.writestr(entry, content)
+    return stream.getvalue()
+
+
+@pytest.fixture
+def support(tmp_path, monkeypatch):
+    target = tmp_path / "Portable app & spaces"
+    target.mkdir()
+    (target / "bananaflow.exe").write_bytes(b"old application")
+    (target / "bananaflow-updater.exe").write_bytes(b"helper fixture")
+    info = updates.AppUpdateSupport(
+        True, "", "windows-portable", target, "bananaflow.exe",
+        target / "bananaflow-updater.exe", "x64", "",
+    )
+    monkeypatch.setattr(updates, "app_update_support", lambda: info)
+    monkeypatch.setattr(updates, "_update_root", lambda: tmp_path / "appdata" / "app-updates")
+    monkeypatch.setattr(updates, "_quarantine", lambda _: None)
+    return info
+
+
+def _release(support, payload, **overrides):
+    data = {
+        "tag_name": "v99.0.0", "draft": False,
+        "assets": [{
+            "name": updates._asset_name("99.0.0", support),
+            "url": updates.ASSET_API_PREFIX + "123",
+            "state": "uploaded", "size": len(payload),
+            "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+            "browser_download_url": "https://untrusted.invalid/not-used",
+        }],
+    }
+    data.update(overrides)
+    return data
+
+
+def _transport(monkeypatch, metadata, payload, *, handler=None):
+    requests = []
+    def respond(request):
+        requests.append(request)
+        if handler:
+            answer = handler(request)
+            if answer is not None:
+                return answer
+        if "/releases/tags/" in request.url.path:
+            return httpx.Response(200, json=metadata)
+        return httpx.Response(200, content=payload)
+    original = httpx.Client
+    monkeypatch.setattr(
+        updates.httpx, "Client",
+        lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    return requests
+
+
+def _info(version="99.0.0"):
+    return ReleaseInfo(version, "", "", "", asset_url="https://evil.invalid/ignored")
+
+
+def test_exact_platform_asset_not_first_release_asset(support):
+    payload = _zip()
+    release = _release(support, payload)
+    release["assets"].insert(0, {"name": "SHA256SUMS.txt"})
+    assert updates.select_release_asset(release, "99.0.0", support).name.endswith("-portable.zip")
+    assert updates._asset_name("99.0.0", replace(support, kind="windows-installed")).endswith("-setup.exe")
+    assert updates._asset_name("99.0.0", replace(support, kind="macos-app")).endswith("-macos-arm64.dmg")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("digest", None), ("digest", "sha512:" + "a" * 64),
+    ("digest", "sha256:" + "g" * 64),
+    ("size", -1), ("size", True), ("size", "100"),
+    ("size", helper.MAX_ARTIFACT_BYTES + 1), ("state", "new"),
+    ("url", "http://api.github.com/repos/BananaFlow-Media/BananaFlow/releases/assets/123"),
+    ("url", updates.ASSET_API_PREFIX + "123/../evil"),
+    ("url", updates.ASSET_API_PREFIX + "123?redirect=https://evil.invalid"),
+    ("url", "https://api.github.com/repos/other/BananaFlow/releases/assets/123"),
+])
+def test_asset_metadata_fails_closed(support, field, value):
+    release = _release(support, b"asset")
+    release["assets"][0][field] = value
+    with pytest.raises(helper.AppUpdateError):
+        updates.select_release_asset(release, "99.0.0", support)
+
+
+@pytest.mark.parametrize("changes", [
+    {"tag_name": "v98.0.0"}, {"draft": True}, {"draft": None}, {"assets": None},
+])
+def test_release_identity_fails_closed(support, changes):
+    with pytest.raises(helper.AppUpdateError):
+        updates.select_release_asset(_release(support, b"asset", **changes), "99.0.0", support)
+
+
+def test_duplicate_named_assets_rejected(support):
+    release = _release(support, b"asset")
+    release["assets"].append(dict(release["assets"][0]))
+    with pytest.raises(helper.AppUpdateError):
+        updates.select_release_asset(release, "99.0.0", support)
+
+
+def test_prepare_requeries_official_tag_and_persists_verified_download(support, monkeypatch):
+    payload = _zip()
+    requests = _transport(monkeypatch, _release(support, payload), payload)
+    progress = []
+    prepared = updates.prepare_app_update(_info(), progress=lambda a, b: progress.append((a, b)))
+    assert str(requests[0].url) == updates.API_ROOT + "/releases/tags/v99.0.0"
+    assert str(requests[1].url) == updates.ASSET_API_PREFIX + "123"
+    assert prepared.artifact_path.read_bytes() == payload
+    assert progress[-1] == (len(payload), len(payload))
+    assert (support.target / "bananaflow.exe").read_bytes() == b"old application"
+    assert updates.get_prepared_app_update() == prepared
+    assert prepared.helper_path.read_bytes() == b"helper fixture"
+    assert not (prepared.state_path.parent / "plan.json").exists()
+
+
+@pytest.mark.parametrize("payload", [b"short", b"bad" * 1000])
+def test_failed_download_keeps_existing_prepared_pointer(support, monkeypatch, payload):
+    good = _zip()
+    _transport(monkeypatch, _release(support, good), good)
+    prepared = updates.prepare_app_update(_info())
+    # Replace the transport without wrapping the monkeypatched constructor.
+    monkeypatch.undo()
+    monkeypatch.setattr(updates, "app_update_support", lambda: support)
+    monkeypatch.setattr(updates, "_update_root", lambda: prepared.state_path.parent.parent)
+    monkeypatch.setattr(updates, "_quarantine", lambda _: None)
+    _transport(monkeypatch, _release(support, good), payload)
+    with pytest.raises(helper.AppUpdateError):
+        updates.prepare_app_update(_info())
+    assert updates.get_prepared_app_update() == prepared
+    assert len(list(prepared.state_path.parent.parent.iterdir())) == 2
+
+
+def test_cancelled_download_never_selects_update(support, monkeypatch):
+    payload = _zip()
+    _transport(monkeypatch, _release(support, payload), payload)
+    with pytest.raises(helper.AppUpdateError, match="cancelled"):
+        updates.prepare_app_update(_info(), cancelled=lambda: True)
+    assert updates.get_prepared_app_update() is None
+
+
+def test_cached_package_tampering_fails_revalidation(support, monkeypatch):
+    payload = _zip()
+    _transport(monkeypatch, _release(support, payload), payload)
+    prepared = updates.prepare_app_update(_info())
+    changed = bytearray(payload)
+    changed[10] ^= 1
+    prepared.artifact_path.write_bytes(changed)
+    assert updates.get_prepared_app_update() is None
+
+
+@pytest.mark.parametrize("destination", [
+    "http://release-assets.githubusercontent.com/asset",
+    "https://evil.invalid/asset",
+    "https://api.github.com.evil.invalid/asset",
+    "https://user:password@api.github.com/asset",
+    "https://api.github.com:8443/asset",
+])
+def test_untrusted_redirect_never_contacted(support, monkeypatch, destination):
+    payload = _zip()
+    requests = _transport(
+        monkeypatch, _release(support, payload), payload,
+        handler=lambda request: httpx.Response(302, headers={"location": destination})
+        if "/releases/assets/" in request.url.path else None,
+    )
+    with pytest.raises(helper.AppUpdateError):
+        updates.prepare_app_update(_info())
+    assert len(requests) == 2
+
+
+def test_github_asset_redirect_verified(support, monkeypatch):
+    payload = _zip()
+    requests = _transport(
+        monkeypatch, _release(support, payload), payload,
+        handler=lambda request: httpx.Response(302, headers={
+            "location": "https://release-assets.githubusercontent.com/asset?token=fixture"
+        }) if "/releases/assets/" in request.url.path else None,
+    )
+    assert updates.prepare_app_update(_info()).artifact_path.read_bytes() == payload
+    assert len(requests) == 3
+
+
+def test_source_mode_has_no_self_update(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert updates.app_update_support().reason == "source"
+
+
+def test_frozen_linux_has_no_self_update(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert updates.app_update_support().reason == "platform"
+
+
+def test_platform_support_preserves_installed_scope(tmp_path, monkeypatch):
+    target = tmp_path / "Installed"
+    target.mkdir()
+    executable = target / "bananaflow.exe"
+    executable.write_bytes(b"exe")
+    (target / "bananaflow-updater.exe").write_bytes(b"helper")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(updates.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(updates, "_windows_install_mode", lambda _: "allusers")
+    info = updates.app_update_support()
+    assert info.supported and info.kind == "windows-installed" and info.install_mode == "allusers"
+    monkeypatch.setattr(updates, "_windows_install_mode", lambda _: "")
+    (target / "unins000.exe").write_bytes(b"unknown installer")
+    assert updates.app_update_support().reason == "unknown-installation"
+
+
+def test_windows_registry_identity_matches_actual_inno_app_id():
+    installer = Path(__file__).resolve().parents[1] / "packaging" / "bananaflow.iss"
+    app_id = re.search(r'^#define\s+AppId\s+"([^"]+)"', installer.read_text(), re.M)
+    assert app_id is not None
+    # Inno escapes "{{" only: closing braces are literal, not paired escapes.
+    identity = app_id.group(1).replace("{{", "{")
+    assert identity == "{225AE960-D765-430C-BD88-5DED07F420E4}}"
+    assert updates.WINDOWS_UNINSTALL_KEY == (
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + identity + "_is1"
+    )
+
+
+@pytest.mark.parametrize("hive,mode", [("HKCU", "currentuser"), ("HKLM", "allusers")])
+@pytest.mark.parametrize("matching_path", [True, False])
+@pytest.mark.parametrize("historical_identity", [True, False])
+def test_windows_installed_support_requires_exact_identity_and_path(
+    tmp_path, monkeypatch, hive, mode, matching_path, historical_identity,
+):
+    target = tmp_path / "Installed"
+    target.mkdir()
+    executable = target / "bananaflow.exe"
+    executable.write_bytes(b"exe")
+    (target / "bananaflow-updater.exe").write_bytes(b"helper")
+    (target / "unins000.exe").write_bytes(b"Inno uninstaller")
+    registered_key = (
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        r"\{225AE960-D765-430C-BD88-5DED07F420E4}}_is1"
+    )
+    if not historical_identity:
+        registered_key = registered_key.replace("}}_is1", "}_is1")
+    location = target if matching_path else tmp_path / "Different installed copy"
+    calls = []
+
+    def open_key(requested_hive, key, reserved, access):
+        calls.append((requested_hive, key))
+        assert reserved == 0 and access == 0x201
+        if requested_hive != hive or key != registered_key:
+            raise FileNotFoundError("No matching installation")
+        return nullcontext("installation")
+
+    def query_value(handle, name):
+        assert handle == "installation" and name == "InstallLocation"
+        return str(location), 1
+
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
+        HKEY_CURRENT_USER="HKCU", HKEY_LOCAL_MACHINE="HKLM",
+        KEY_READ=1, KEY_WOW64_64KEY=0x200,
+        OpenKey=open_key, QueryValueEx=query_value,
+    ))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(updates.platform, "machine", lambda: "AMD64")
+    info = updates.app_update_support()
+    if matching_path and historical_identity:
+        assert info.supported
+        assert info.kind == "windows-installed" and info.install_mode == mode
+        assert info.target == target
+    else:
+        assert not info.supported and info.reason == "unknown-installation"
+    assert all(key == updates.WINDOWS_UNINSTALL_KEY for _, key in calls)
+
+
+def test_checker_preserves_assets_for_discovery():
+    checker = UpdateChecker()
+    release = {
+        "tag_name": "v99.0.0", "draft": False,
+        "assets": [{"name": "fixture", "url": "https://api.github.com/fixture"}],
+    }
+    info = checker._release_to_info(release, False)
+    assert info.tag_name == "v99.0.0"
+    assert info.assets == tuple(release["assets"])
+
+
+@pytest.mark.parametrize("name", [
+    "../escape", "/absolute", "C:/escape", "nested\\escape", "a/../escape",
+    "CON", "aux.txt", "folder/NUL.log", "file:stream", "trailing.", "trailing ",
+    "safe-prefix\x00hidden-suffix",
+])
+def test_portable_archive_paths_cannot_escape(tmp_path, name):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip({
+        "bananaflow.exe": b"new", "_internal/a": b"runtime", name: b"bad",
+    }))
+    with zipfile.ZipFile(archive) as raw_archive:
+        assert name in [entry.orig_filename for entry in raw_archive.infolist()]
+    destination = tmp_path / "staged"
+    destination.mkdir()
+    with pytest.raises(helper.AppUpdateError):
+        helper.extract_portable(archive, destination)
+    assert list(destination.iterdir()) == []
+
+
+def test_portable_guard_uses_original_name_after_windows_normalization(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    name = "nested\\escape"
+    archive.write_bytes(_zip({
+        "bananaflow.exe": b"new", "_internal/a": b"runtime", name: b"bad",
+    }))
+    destination = tmp_path / "staged"
+    destination.mkdir()
+    # Exercise Windows ZipInfo normalization even on the Linux unit runner.
+    # Context-scoped os separators leave pytest and pathlib unaffected after
+    # this explicit read/validation operation.
+    with monkeypatch.context() as windows_paths:
+        windows_paths.setattr(zipfile.os, "sep", "\\")
+        windows_paths.setattr(zipfile.os, "altsep", "/")
+        with zipfile.ZipFile(archive) as raw_archive:
+            entry = raw_archive.infolist()[-1]
+            assert entry.orig_filename == name
+            assert entry.filename == "nested/escape"
+        with pytest.raises(helper.AppUpdateError, match="unsafe path"):
+            helper.extract_portable(archive, destination)
+    assert list(destination.iterdir()) == []
+
+
+def test_portable_symlinks_and_case_collisions_rejected(tmp_path):
+    archive = tmp_path / "asset.zip"
+    for symlink in (True, False):
+        with zipfile.ZipFile(archive, "w") as out:
+            out.writestr("bananaflow.exe", b"new")
+            out.writestr("_internal/runtime", b"runtime")
+            if symlink:
+                entry = zipfile.ZipInfo("link")
+                entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+                out.writestr(entry, "../../escape")
+            else:
+                out.writestr("BANANAFLOW.EXE", b"duplicate")
+        with pytest.raises(helper.AppUpdateError):
+            helper.extract_portable(archive, tmp_path / "output")
+
+
+def test_archive_expansion_is_bounded(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    monkeypatch.setattr(helper, "MAX_EXPANDED_BYTES", 1)
+    with pytest.raises(helper.AppUpdateError, match="safe limit"):
+        helper.extract_portable(archive, tmp_path / "output")
+
+
+def test_portable_preserves_actual_windows_archive_origin(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    origin = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://github.com/BananaFlow-Media/BananaFlow\r\n"
+    Path(str(archive) + ":Zone.Identifier").write_bytes(origin)
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    destination = tmp_path / "output"
+    helper.extract_portable(archive, destination)
+    for name in ("bananaflow.exe", "_internal/runtime.dll"):
+        assert Path(str(destination / name) + ":Zone.Identifier").read_bytes() == origin
+    assert Path(str(archive) + ":Zone.Identifier").read_bytes() == origin
+
+
+def test_production_windows_download_is_marked_before_extraction(tmp_path, monkeypatch):
+    archive = tmp_path / "download.zip"
+    archive.write_bytes(_zip())
+    monkeypatch.setattr(sys, "platform", "win32")
+    updates._quarantine(archive)
+    marker = Path(str(archive) + ":Zone.Identifier").read_text(encoding="utf-8")
+    assert "ZoneId=3" in marker
+    assert "https://github.com/BananaFlow-Media/BananaFlow" in marker
+
+
+def test_portable_does_not_invent_origin_for_local_archive(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    destination = tmp_path / "output"
+    helper.extract_portable(archive, destination)
+    assert not Path(str(destination / "bananaflow.exe") + ":Zone.Identifier").exists()
+    assert not Path(str(archive) + ":Zone.Identifier").exists()
+
+
+def test_portable_archive_origin_is_bounded_before_extraction(tmp_path, monkeypatch):
+    archive = tmp_path / "asset.zip"
+    archive.write_bytes(_zip())
+    Path(str(archive) + ":Zone.Identifier").write_bytes(b"x" * 9)
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    monkeypatch.setattr(helper, "MAX_ZONE_IDENTIFIER_BYTES", 8)
+    destination = tmp_path / "output"
+    with pytest.raises(helper.AppUpdateError, match="origin metadata"):
+        helper.extract_portable(archive, destination)
+    assert not destination.exists()
+
+
+def test_windows_shell_launch_error_preserves_diagnostics(tmp_path, monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "bananaflow.exe").write_bytes(b"exe")
+    calls = []
+    class ShellExecute:
+        def __call__(self, *args):
+            calls.append(args)
+            return 5
+    shell = SimpleNamespace(ShellExecuteW=ShellExecute())
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: shell, raising=False)
+    monkeypatch.setattr(ctypes, "set_last_error", lambda _: None, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    with pytest.raises(helper.AppUpdateError) as failure:
+        helper._relaunch({"kind": "windows-portable", "target": str(target), "executable": "bananaflow.exe"})
+    assert "ShellExecute=5, WinError=5" in str(failure.value)
+    assert "executable_exists=True, target_exists=True" in str(failure.value)
+    assert "executable_pe_machine=invalid" in str(failure.value)
+    assert str(target) not in str(failure.value)
+    assert calls[0][1] == "open"  # No direct-process or security-bypass fallback.
+
+
+@pytest.mark.parametrize("code,name", [(0x8664, "x64"), (0x14C, "x86"), (0xAA64, "arm64")])
+def test_pe_machine_diagnostics_read_only_header(tmp_path, code, name):
+    path = tmp_path / "app.exe"
+    dos = bytearray(64)
+    dos[:2] = b"MZ"
+    dos[60:64] = (64).to_bytes(4, "little")
+    path.write_bytes(dos + b"PE\x00\x00" + code.to_bytes(2, "little"))
+    assert helper._pe_machine(path) == name
+
+
+def _plan(tmp_path, *, kind="windows-portable"):
+    work = tmp_path / "appdata" / "app-updates" / ("a" * 32)
+    work.mkdir(parents=True)
+    target = tmp_path / "Application with spaces"
+    target.mkdir()
+    (target / "bananaflow.exe").write_bytes(b"old")
+    (target / "old-only.txt").write_bytes(b"retained in backup")
+    artifact = work / "asset.zip"
+    payload = _zip()
+    artifact.write_bytes(payload)
+    plan = {
+        "schema": 1, "version": "99.0.0", "kind": kind,
+        "target": str(target), "artifact": str(artifact),
+        "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+        "executable": "bananaflow.exe", "parent_pid": 123456,
+        "transaction": "b" * 32, "relaunch_args": [], "install_mode": "currentuser",
+    }
+    plan_path = work / "plan.json"
+    helper.atomic_json(plan_path, plan)
+    return plan_path, plan
+
+
+@pytest.fixture
+def helper_runtime(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(helper, "wait_for_parent", lambda *args: None)
+    monkeypatch.setattr(helper, "ensure_no_other_app_processes", lambda: None)
+    calls = []
+    def relaunch(plan):
+        assert not helper.update_lock_is_held(Path(plan["artifact"]).parent.parent / "apply.lock")
+        calls.append(plan)
+    monkeypatch.setattr(helper, "_relaunch", relaunch)
+    return calls
+
+
+def test_real_portable_apply_swaps_tree_and_retains_recovery(tmp_path, helper_runtime):
+    path, plan = _plan(tmp_path)
+    assert helper.apply_update_plan(path) == 0
+    target, staging, backup = helper._paths(plan)
+    assert (target / "bananaflow.exe").read_bytes() == b"new application"
+    assert (backup / "bananaflow.exe").read_bytes() == b"old"
+    assert (backup / "old-only.txt").exists()
+    assert not staging.exists()
+    assert helper_runtime[-1]["target"] == str(target)
+    assert helper.read_json(path.parent / "status.json")["status"] == "launched"
+    assert not helper.update_lock_is_held(path.parent.parent / "apply.lock")
+
+
+def test_corruption_never_replaces_original(tmp_path, helper_runtime):
+    path, plan = _plan(tmp_path)
+    Path(plan["artifact"]).write_bytes(b"corruption")
+    assert helper.apply_update_plan(path) == 1
+    assert (Path(plan["target"]) / "bananaflow.exe").read_bytes() == b"old"
+    assert helper.read_json(path.parent / "status.json")["status"] == "error"
+    assert len(helper_runtime) == 1  # Reopen original after parent exited.
+
+
+def test_parent_timeout_never_touches_install_or_relaunches(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    def timeout(*_):
+        raise helper.AppUpdateError("parent still active")
+    monkeypatch.setattr(helper, "wait_for_parent", timeout)
+    assert helper.apply_update_plan(path) == 1
+    assert (Path(plan["target"]) / "bananaflow.exe").read_bytes() == b"old"
+    assert not helper_runtime
+
+
+def test_swap_failure_restores_original(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    target, staging, backup = helper._paths(plan)
+    original = os.replace
+    def replace_fail(source, destination):
+        if Path(source) == staging and Path(destination) == target:
+            raise OSError("fixture replacement failure")
+        return original(source, destination)
+    monkeypatch.setattr(helper.os, "replace", replace_fail)
+    assert helper.apply_update_plan(path) == 1
+    assert (target / "bananaflow.exe").read_bytes() == b"old"
+    assert not backup.exists()
+
+
+def test_relaunch_failure_rolls_back_portable(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    def no_launch(_):
+        raise OSError("fixture launch declined")
+    monkeypatch.setattr(helper, "_relaunch", no_launch)
+    assert helper.apply_update_plan(path) == 1
+    target, _, backup = helper._paths(plan)
+    assert (target / "bananaflow.exe").read_bytes() == b"old"
+    assert not backup.exists()
+    status = helper.read_json(path.parent / "status.json")
+    assert status["rollback"] == "restored_previous"
+    assert status["launch_error"] == "fixture launch declined"
+
+
+def test_rollback_preserves_previous_application_origin(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    target, _, _ = helper._paths(plan)
+    old_origin = b"[ZoneTransfer]\r\nZoneId=1\r\n"
+    downloaded_origin = b"[ZoneTransfer]\r\nZoneId=3\r\n"
+    Path(str(target / "bananaflow.exe") + ":Zone.Identifier").write_bytes(old_origin)
+    Path(plan["artifact"] + ":Zone.Identifier").write_bytes(downloaded_origin)
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    calls = []
+    def launch(attempt):
+        calls.append(attempt)
+        if len(calls) == 1:
+            assert Path(str(target / "bananaflow.exe") + ":Zone.Identifier").read_bytes() == downloaded_origin
+            raise helper.AppUpdateError("ShellExecute=5, WinError=5")
+    monkeypatch.setattr(helper, "_relaunch", launch)
+    assert helper.apply_update_plan(path) == 1
+    assert len(calls) == 2  # Candidate rejected, then previous app reopened.
+    assert (target / "bananaflow.exe").read_bytes() == b"old"
+    assert Path(str(target / "bananaflow.exe") + ":Zone.Identifier").read_bytes() == old_origin
+    assert Path(plan["artifact"] + ":Zone.Identifier").read_bytes() == downloaded_origin
+
+
+def test_relaunch_failure_cannot_rollback_under_newly_opened_app(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    def busy():
+        raise helper.AppUpdateError("new app was opened independently")
+    def failed_launch(_):
+        monkeypatch.setattr(helper, "ensure_no_other_app_processes", busy)
+        raise OSError("OS launch rejected")
+    monkeypatch.setattr(helper, "_relaunch", failed_launch)
+    assert helper.apply_update_plan(path) == 1
+    target, _, backup = helper._paths(plan)
+    assert (target / "bananaflow.exe").read_bytes() == b"new application"
+    assert (backup / "bananaflow.exe").read_bytes() == b"old"
+    assert not helper.update_lock_is_held(path.parent.parent / "apply.lock")
+    status = helper.read_json(path.parent / "status.json")
+    assert status["rollback"] == "not_completed"
+    assert status["launch_error"] == "OS launch rejected"
+    assert "new app was opened independently" in status["message"]
+
+
+def test_interrupted_first_rename_recovers_before_retry(tmp_path, helper_runtime):
+    path, plan = _plan(tmp_path)
+    target, _, backup = helper._paths(plan)
+    os.replace(target, backup)
+    assert helper.apply_update_plan(path) == 0
+    assert (target / "bananaflow.exe").read_bytes() == b"new application"
+    assert (backup / "bananaflow.exe").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_interrupted_swap_restores_old_app_even_when_package_lost(tmp_path, helper_runtime, missing):
+    path, plan = _plan(tmp_path)
+    target, _, backup = helper._paths(plan)
+    os.replace(target, backup)
+    if missing:
+        Path(plan["artifact"]).unlink()
+    else:
+        Path(plan["artifact"]).write_bytes(b"corrupt")
+    assert helper.apply_update_plan(path) == 1
+    assert (target / "bananaflow.exe").read_bytes() == b"old"
+    assert not backup.exists()
+    assert helper_runtime[-1]["target"] == str(target)
+    assert helper.read_json(path.parent / "status.json")["status"] == "error"
+
+
+def test_concurrent_helper_rejected_without_touching_target(tmp_path, helper_runtime):
+    path, plan = _plan(tmp_path)
+    with helper._acquire_lock(path.parent.parent / "apply.lock", "c" * 32):
+        assert helper.apply_update_plan(path) == 1
+        assert (Path(plan["target"]) / "bananaflow.exe").read_bytes() == b"old"
+        assert not helper_runtime
+    assert helper.read_json(path.parent.parent / "apply.lock")["pid"] == os.getpid()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("executable", "../other.exe"), ("transaction", "../escape"),
+    ("parent_pid", 0), ("parent_pid", True), ("relaunch_args", ["--execute", "bad"]),
+    ("target", "/"), ("kind", "other"), ("install_mode", "untrusted"),
+])
+def test_invalid_plan_rejected(tmp_path, field, value):
+    path, plan = _plan(tmp_path, kind="windows-installed")
+    plan[field] = value
+    helper.atomic_json(path, plan)
+    with pytest.raises(helper.AppUpdateError):
+        helper.validate_plan(path)
+
+
+def test_installed_failure_does_not_claim_success_or_launch(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path, kind="windows-installed")
+    def failed(_):
+        raise helper.AppUpdateError("installer cancelled")
+    monkeypatch.setattr(helper, "install_windows", failed)
+    assert helper.apply_update_plan(path) == 1
+    assert helper.read_json(path.parent / "status.json")["status"] == "error"
+    assert not helper_runtime
+
+
+def test_macos_bundle_identity_and_symlink_boundary(tmp_path):
+    app = tmp_path / "BananaFlow.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "MacOS" / "bananaflow").write_bytes(b"exe")
+    with (app / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump({
+            "CFBundleIdentifier": "media.bananaflow.app",
+            "CFBundleShortVersionString": "99.0.0",
+        }, handle)
+    helper._check_macos_tree(app, "99.0.0")
+    with pytest.raises(helper.AppUpdateError):
+        helper._check_macos_tree(app, "98.0.0")
+    (app / "escape").symlink_to(tmp_path)
+    with pytest.raises(helper.AppUpdateError, match="escaping"):
+        helper._check_macos_tree(app, "99.0.0")
+
+
+@pytest.fixture
+def macos_xattr_api(monkeypatch):
+    import ctypes
+    state = {"values": {}, "read_errno": 0, "write_errno": 0, "reads": []}
+
+    def getxattr(path, name, buffer, size, position, options):
+        assert name == b"com.apple.quarantine" and position == 0 and options == 1
+        state["reads"].append(size)
+        error = state["read_errno"]
+        if not error and path not in state["values"]:
+            error = 93
+        if error:
+            ctypes.set_errno(error)
+            return -1
+        value = state["values"][path]
+        assert len(value) <= size
+        ctypes.memmove(buffer, value, len(value))
+        return len(value)
+
+    def setxattr(path, name, buffer, size, position, options):
+        assert name == b"com.apple.quarantine" and position == 0 and options == 1
+        if state["write_errno"]:
+            ctypes.set_errno(state["write_errno"])
+            return -1
+        state["values"][path] = ctypes.string_at(buffer, size)
+        return 0
+
+    library = SimpleNamespace(getxattr=getxattr, setxattr=setxattr)
+    def load_library(path, **kwargs):
+        assert path == "/usr/lib/libSystem.B.dylib" and kwargs == {"use_errno": True}
+        return library
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(ctypes, "CDLL", load_library)
+    # Python's os APIs are not provided on macOS, even though Linux has them.
+    monkeypatch.delattr(os, "getxattr", raising=False)
+    monkeypatch.delattr(os, "setxattr", raising=False)
+    state["library"] = library
+    return state
+
+
+@pytest.mark.parametrize("value", [b"", b"0081;01234567;BananaFlow;", b"\x00\xff\x80text\x00"])
+def test_macos_quarantine_uses_exact_darwin_abi_and_binary_bytes(tmp_path, macos_xattr_api, value):
+    import ctypes
+    path = tmp_path / "Hebrew-עברית image.dmg"
+    assert helper.read_macos_quarantine(path) is None
+    helper.write_macos_quarantine(path, value)
+    assert helper.read_macos_quarantine(path) == value
+    library = macos_xattr_api["library"]
+    assert library.getxattr.argtypes == [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+        ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int,
+    ]
+    assert library.getxattr.restype is ctypes.c_ssize_t
+    assert library.setxattr.restype is ctypes.c_int
+    assert macos_xattr_api["reads"] == [helper.MAX_QUARANTINE_BYTES + 1] * 2
+
+
+@pytest.mark.parametrize("error", [2, 5, 13, 34, 45, 96])
+def test_macos_quarantine_read_errors_are_not_absent(tmp_path, macos_xattr_api, error):
+    # Missing file, IO, permissions, ERANGE, unsupported FS, and Darwin ENODATA.
+    macos_xattr_api["read_errno"] = error
+    with pytest.raises(helper.AppUpdateError, match=f"errno={error}"):
+        helper.read_macos_quarantine(tmp_path / "artifact")
+
+
+def test_macos_quarantine_bounds_and_write_errors(tmp_path, macos_xattr_api):
+    path = tmp_path / "artifact"
+    macos_xattr_api["values"][os.fsencode(path)] = b"x" * (helper.MAX_QUARANTINE_BYTES + 1)
+    with pytest.raises(helper.AppUpdateError, match="safe limit"):
+        helper.read_macos_quarantine(path)
+    with pytest.raises(helper.AppUpdateError, match="too large"):
+        helper.write_macos_quarantine(path, b"x" * (helper.MAX_QUARANTINE_BYTES + 1))
+    macos_xattr_api["write_errno"] = 13
+    with pytest.raises(helper.AppUpdateError, match="errno=13"):
+        helper.write_macos_quarantine(path, b"0081;01234567;BananaFlow;")
+
+
+def test_macos_quarantine_missing_native_api_fails_closed(tmp_path, monkeypatch):
+    import ctypes
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **kw: SimpleNamespace())
+    with pytest.raises(helper.AppUpdateError, match="unavailable"):
+        helper.read_macos_quarantine(tmp_path / "artifact")
+
+
+def test_production_macos_download_is_marked_without_overwriting_origin(tmp_path, macos_xattr_api):
+    path = tmp_path / "download.dmg"
+    updates._quarantine(path)
+    value = helper.read_macos_quarantine(path)
+    assert re.fullmatch(rb"0081;[0-9a-f]+;BananaFlow;", value)
+    existing = b"0083;12345678;Original Browser;\x00\xff"
+    helper.write_macos_quarantine(path, existing)
+    updates._quarantine(path)
+    assert helper.read_macos_quarantine(path) == existing
+
+
+@pytest.mark.parametrize("origin", [None, b"0081;01234567;BananaFlow;\x00\xff"])
+def test_macos_staging_preserves_quarantine_exactly(tmp_path, monkeypatch, macos_xattr_api, origin):
+    import shutil
+    artifact = tmp_path / "download.dmg"
+    artifact.write_bytes(b"fixture")
+    staging = tmp_path / "staged.app"
+    work = tmp_path / "work"
+    work.mkdir()
+    if origin is not None:
+        helper.write_macos_quarantine(artifact, origin)
+
+    def run(command, **kwargs):
+        assert kwargs.get("check") is True
+        source = work / "mount" / "BananaFlow.app"
+        if command[:2] == ["/usr/bin/hdiutil", "attach"]:
+            (source / "Contents" / "MacOS").mkdir(parents=True)
+            (source / "Contents" / "MacOS" / "bananaflow").write_bytes(b"exe")
+            with (source / "Contents" / "Info.plist").open("wb") as file:
+                plistlib.dump({
+                    "CFBundleIdentifier": "media.bananaflow.app",
+                    "CFBundleShortVersionString": "99.0.0",
+                }, file)
+        elif command[0] == "/usr/bin/ditto":
+            shutil.copytree(source, staging)
+        else:
+            assert command[:2] == ["/usr/bin/hdiutil", "detach"]
+            shutil.rmtree(source)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(helper.subprocess, "run", run)
+    helper.stage_macos(artifact, staging, "99.0.0", work)
+    assert helper.read_macos_quarantine(staging) == origin
+    assert helper.read_macos_quarantine(artifact) == origin
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires actual Darwin xattr ABI and filesystem")
+def test_native_macos_quarantine_roundtrip_and_production_marking(tmp_path, monkeypatch):
+    # Use an ordinary disposable file, never an executable; no warnings are
+    # cleared, security settings changed, or marked programs launched here.
+    monkeypatch.delattr(os, "getxattr", raising=False)
+    monkeypatch.delattr(os, "setxattr", raising=False)
+    path = tmp_path / "native-quarantine-fixture.dmg"
+    path.write_bytes(b"not an executable or actual disk image")
+    assert helper.read_macos_quarantine(path) is None
+    updates._quarantine(path)
+    assert re.fullmatch(rb"0081;[0-9a-f]+;BananaFlow;", helper.read_macos_quarantine(path))
+    value = b"0081;01234567;BananaFlow fixture;\x00\xff"
+    helper.write_macos_quarantine(path, value)
+    assert helper.read_macos_quarantine(path) == value
+    # Independent native utility verifies the ABI did not merely agree with
+    # itself on an incorrect buffer length or truncate at the embedded NUL.
+    output = subprocess.check_output(["/usr/bin/xattr", "-px", "com.apple.quarantine", str(path)])
+    assert bytes.fromhex(output.decode("ascii")) == value
+    with pytest.raises(helper.AppUpdateError, match="errno=2"):
+        helper.read_macos_quarantine(tmp_path / "missing-file")
+
+
+def test_launch_uses_ready_handshake_reset_environment_and_no_shell(support, monkeypatch):
+    payload = _zip()
+    _transport(monkeypatch, _release(support, payload), payload)
+    prepared = updates.prepare_app_update(_info())
+    calls = []
+    class Process:
+        def poll(self):
+            return None
+    def spawn(command, **kwargs):
+        calls.append((command, kwargs))
+        plan = helper.read_json(Path(command[2]))
+        helper.atomic_json(Path(command[2]).parent / "status.json", {
+            "status": "waiting", "transaction": plan["transaction"],
+        })
+        return Process()
+    monkeypatch.setattr(updates.subprocess, "Popen", spawn)
+    process = updates.launch_prepared_app_update(prepared)
+    assert process.poll() is None
+    command, kwargs = calls[0]
+    assert command[:2] == [str(prepared.helper_path), "--apply"]
+    assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert not kwargs.get("shell", False)
+    assert helper.read_json(Path(command[2]))["relaunch_args"] == []
+
+
+def test_launch_failure_is_not_success(support, monkeypatch):
+    payload = _zip()
+    _transport(monkeypatch, _release(support, payload), payload)
+    prepared = updates.prepare_app_update(_info())
+    class DeadProcess:
+        def poll(self):
+            return 1
+    monkeypatch.setattr(updates.subprocess, "Popen", lambda *a, **k: DeadProcess())
+    with pytest.raises(helper.AppUpdateError, match="exited"):
+        updates.launch_prepared_app_update(prepared)
+    assert updates.get_prepared_app_update() == prepared
+
+
+@pytest.mark.parametrize("new,old,expected", [
+    ("1.2.0", "1.2.0-beta.1", True), ("1.2.0-beta.1", "1.2.0", False),
+    ("1.2.0-rc.10", "1.2.0-rc.9", True), ("1.2.0-beta.2", "1.2.0-beta.11", False),
+    ("1.2.0+build.2", "1.2.0+build.1", False), ("1.10.0", "1.9.9", True),
+    ("release-99.0.0", "1.2.0", False), ("1.2", "1.2.0", False),
+])
+def test_app_version_comparison_handles_stable_and_prerelease(new, old, expected):
+    assert _is_newer(new, old) is expected
+
+
+def test_another_application_instance_defers_without_relaunch(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    def busy():
+        raise helper.AppUpdateError("another application is active")
+    monkeypatch.setattr(helper, "ensure_no_other_app_processes", busy)
+    ticks = iter((0, 11))
+    monkeypatch.setattr(helper.time, "monotonic", lambda: next(ticks))
+    assert helper.apply_update_plan(path) == 1
+    assert not helper_runtime
+    assert (Path(plan["target"]) / "bananaflow.exe").read_bytes() == b"old"
+
+
+def test_instance_opened_during_extraction_prevents_swap(tmp_path, helper_runtime, monkeypatch):
+    path, plan = _plan(tmp_path)
+    checks = []
+    def check():
+        checks.append(1)
+        if len(checks) > 1:
+            raise helper.AppUpdateError("another window opened during extraction")
+    monkeypatch.setattr(helper, "ensure_no_other_app_processes", check)
+    assert helper.apply_update_plan(path) == 1
+    target, _, backup = helper._paths(plan)
+    assert (target / "bananaflow.exe").read_bytes() == b"old"
+    assert not backup.exists() and not helper_runtime
+
+
+def test_mac_process_check_fails_closed(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, b"123\n", b"")
+    monkeypatch.setattr(helper.subprocess, "run", run)
+    with pytest.raises(helper.AppUpdateError, match="Another"):
+        helper.ensure_no_other_app_processes()
+    assert commands[0] == ["/usr/bin/pgrep", "-x", "bananaflow|bananaflow-cli"]
+
+
+def test_stale_lock_file_is_reused_without_unlink_race(tmp_path):
+    lock = tmp_path / "apply.lock"
+    helper.atomic_json(lock, {"pid": os.getpid(), "transaction": "old"})
+    inode = lock.stat().st_ino
+    with helper._acquire_lock(lock, "new"):
+        assert helper.update_lock_is_held(lock)
+    assert lock.stat().st_ino == inode
+    assert not helper.update_lock_is_held(lock)
+    assert helper.read_json(lock)["transaction"] == "new"
+
+
+def test_broken_symlink_lock_is_not_treated_as_inactive(tmp_path):
+    lock = tmp_path / "apply.lock"
+    lock.symlink_to(tmp_path / "absent")
+    with pytest.raises(helper.AppUpdateError, match="unsafe"):
+        helper.update_lock_is_held(lock)
+
+
+def test_launch_timeout_cancels_before_installation(support, monkeypatch):
+    payload = _zip()
+    _transport(monkeypatch, _release(support, payload), payload)
+    prepared = updates.prepare_app_update(_info())
+    class UnreadyProcess:
+        def poll(self):
+            return None
+    monkeypatch.setattr(updates.subprocess, "Popen", lambda *a, **k: UnreadyProcess())
+    ticks = iter((0, 31))
+    monkeypatch.setattr(updates.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(helper.AppUpdateError, match="cancelled"):
+        updates.launch_prepared_app_update(prepared)
+    assert len(list(prepared.state_path.parent.glob("plan-*.cancel"))) == 1
+
+
+def test_cancelled_plan_never_replaces_app(tmp_path, helper_runtime):
+    path, plan = _plan(tmp_path)
+    path.with_suffix(".cancel").touch()
+    assert helper.apply_update_plan(path) == 1
+    assert (Path(plan["target"]) / "bananaflow.exe").read_bytes() == b"old"
+    assert not helper_runtime
+
+
+def test_standalone_helper_console_flags_match_windows_contract(monkeypatch):
+    class StartupInfo:
+        dwFlags = 0
+        wShowWindow = 1
+    monkeypatch.setattr(helper, "_IS_WINDOWS", True)
+    monkeypatch.setattr(helper.subprocess, "STARTUPINFO", StartupInfo, raising=False)
+    monkeypatch.setattr(helper.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(helper.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr(helper.subprocess, "SW_HIDE", 0, raising=False)
+    kwargs = helper._console_process_kwargs()
+    assert kwargs["creationflags"] == 0x08000000
+    assert kwargs["startupinfo"].dwFlags & 1
+    assert kwargs["startupinfo"].wShowWindow == 0
+
+
+def test_standalone_helper_does_not_change_macos_tool_launch_flags(monkeypatch):
+    monkeypatch.setattr(helper, "_IS_WINDOWS", False)
+    assert helper._console_process_kwargs() == {}

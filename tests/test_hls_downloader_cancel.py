@@ -26,7 +26,9 @@ file server is the accurate stand-in for a real remote stream.
 from __future__ import annotations
 
 import http.server
+import io
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -85,11 +87,24 @@ class _ThrottledHandler(http.server.SimpleHTTPRequestHandler):
             chunk = source.read(self.CHUNK_SIZE)
             if not chunk:
                 break
-            outputfile.write(chunk)
+            try:
+                outputfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                # Cancellation intentionally closes FFmpeg's HTTP connection.
+                return
             time.sleep(self.CHUNK_DELAY_S)
 
     def log_message(self, format, *args) -> None:  # noqa: A002 - stdlib signature
         pass  # keep test output quiet
+
+
+class _JoinedHTTPServer(http.server.ThreadingHTTPServer):
+    """Keep request handlers owned until server_close() has joined them."""
+
+    # ThreadingHTTPServer defaults to daemon handlers, which server_close()
+    # does not join. A cancelled transfer can otherwise still be writing its
+    # disconnect traceback while the interpreter finalizes stderr.
+    daemon_threads = False
 
 
 @pytest.fixture(scope="module")
@@ -103,13 +118,71 @@ def http_server(tmp_path_factory):
     handler = lambda *a, **k: _ThrottledHandler(
         *a, directory=str(directory), **k
     )
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server = _JoinedHTTPServer(("127.0.0.1", 0), handler)
     server.cookie_headers = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield server, directory
-    server.shutdown()
-    thread.join(5.0)
+    try:
+        yield server, directory
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5.0)
+        assert not thread.is_alive(), "HTTP server did not stop"
+
+
+@pytest.mark.parametrize("disconnect", [BrokenPipeError, ConnectionResetError])
+def test_expected_client_disconnect_does_not_raise(disconnect):
+    class DisconnectedWriter:
+        def write(self, chunk):
+            raise disconnect("client cancelled")
+
+    handler = object.__new__(_ThrottledHandler)
+    handler.copyfile(io.BytesIO(b"audio"), DisconnectedWriter())
+
+
+def test_server_close_joins_inflight_request_handler():
+    """Shutdown must not leave a handler writing stderr during Python exit."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    close_started = threading.Event()
+    close_completed = threading.Event()
+
+    class BlockingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            request_started.set()
+            assert release_request.wait(5.0), "request was not released"
+
+    server = _JoinedHTTPServer(("127.0.0.1", 0), BlockingHandler)
+    serve_thread = threading.Thread(target=server.serve_forever)
+    serve_thread.start()
+
+    def close_server():
+        server.shutdown()
+        close_started.set()
+        server.server_close()
+        close_completed.set()
+
+    close_thread = threading.Thread(target=close_server)
+    try:
+        with socket.create_connection(server.server_address, timeout=5.0) as client:
+            client.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            assert request_started.wait(5.0), "request handler did not start"
+            close_thread.start()
+            assert close_started.wait(5.0), "server shutdown did not start"
+            assert not close_completed.wait(0.1), "request handler was left alive"
+            release_request.set()
+            close_thread.join(5.0)
+            assert close_completed.is_set(), "request handler was not joined"
+    finally:
+        release_request.set()
+        if close_thread.ident is not None:
+            close_thread.join(5.0)
+        server.shutdown()
+        server.server_close()
+        serve_thread.join(5.0)
+        assert not close_thread.is_alive()
+        assert not serve_thread.is_alive()
 
 
 @pytest.fixture(scope="module")

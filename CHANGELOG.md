@@ -4,6 +4,12 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Explicit restart after a separately approved downloader-component update.
+- Verified in-app application update preparation and install/restart, with the official website download path retained.
+- Packaged updater validation for supported Windows and macOS application layouts.
+
 ## [1.2.0] — 2026-09-08
 
 This release was reissued on 2026-09-08 with rebuilt artifacts from the

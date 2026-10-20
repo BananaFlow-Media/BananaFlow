@@ -65,7 +65,7 @@ The authenticated control plane can disable the whole channel or revoke individu
 - `.github/workflows/component-channel.yml` detects upstream drift on a schedule but does not create an unreviewed/bot-authored dependency change.
 - When an exact component pin is reviewed and merged to `main`, CI builds the overlay from the installed distributions, runs updater tests, produces provenance evidence and publishes the bundle before replacing the channel manifest.
 - The Windows and macOS release workflows also build full Actions release candidates for a reviewed pin change. They do not create or publish an application release without the existing tag/human release process.
-- Installation remains an explicit user action. A successful update requires a restart.
+- Installation remains an explicit user action. A successful update requires a restart. The success UI offers an explicit restart or later choice, and component updates remain independently accessible when a full application release is also available. Restart must respect active work and shutdown ownership; it must not bypass the normal safety checks.
 
 ## Change rule
 

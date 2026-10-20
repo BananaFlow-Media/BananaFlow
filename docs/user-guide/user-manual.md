@@ -119,7 +119,7 @@ Deleting a history record does not automatically delete the media file unless yo
 
 The Converter works with local files. Add the files, choose the target format/quality/output location and start the conversion.
 
-BananaFlow checks the produced output before reporting success. Use copies when experimenting with unusual or unsupported media.
+BananaFlow checks the produced output before reporting success. Existing read-only destination files are preserved even when you choose overwrite; choose another output name or location instead. Use copies when experimenting with unusual or unsupported media.
 
 ## 10. Tag Editor
 
@@ -175,15 +175,25 @@ You normally do not need to understand the implementation behind those checks â€
 
 ## 13. Updates
 
-When update checks are enabled, BananaFlow checks for a newer official application release and for newer critical downloader components.
+When update checks are enabled, BananaFlow checks for a newer official application release and for newer critical downloader components. Checking does not install anything.
 
-- An **application update** opens BananaFlow's official website download page (not GitHub directly) and remains a normal full installation. BananaFlow does not download and run a new application installer automatically: the currently unsigned Windows package requires the user to choose and launch the full installer explicitly.
-- In an **installed packaged build**, **Update Components** downloads the reviewed `yt-dlp` / `yt-dlp-ejs` bundle from BananaFlow's official GitHub component channel, verifies its exact size and SHA-256, checks compatibility, safely prepares it in per-user app data and health-checks it in a separate process. It becomes active only after BananaFlow restarts; the installed application is not rewritten and the previous valid bundle remains available for fallback. After you approve such an update, BananaFlow refreshes its small public safety record at most once per day before reusing it; if it reports the bundle is no longer safe, BananaFlow uses its built-in downloader instead.
-- In a **source environment**, the same button runs the documented pip upgrade in that environment.
+### Update downloader components without reinstalling BananaFlow
 
-Neither path installs silently: checking and installing are separate, and the update button is the approval gate.
+**Update Components** is available independently of a full application update. In a packaged build it downloads the reviewed `yt-dlp` / `yt-dlp-ejs` pair from BananaFlow's official GitHub component channel, verifies its size, SHA-256 and compatibility, and health-checks it in a separate process. It prepares a per-user overlay without rewriting the installed application. The previous valid bundle remains available for fallback. After approval, a small public safety record is refreshed at most daily before reusing the overlay; an unsafe bundle is not activated.
 
-When upgrading with the Windows installer, the new version replaces the existing BananaFlow installation. The installer cleans obsolete bundled downloader files and version metadata before copying the new package. For a Portable download, extract it to a new folder instead of merging it into an older Portable folder.
+In a source environment the component button runs the documented pip upgrade in that environment. After successful preparation, choose **Restart now** to use the new components, or continue working and restart later. The running process keeps its current components until it exits. This path updates the downloader pair, not every bundled runtime; other bundled components arrive with a full application release.
+
+If both updates are ready, the component-ready explanation remains separate: **Restart now** activates the components without installing the saved application update. Choose **Install and restart** instead when you also want to apply that application update.
+
+### Update the application
+
+Supported packaged installations can download and verify an application update inside BananaFlow. An older BananaFlow version that does not contain this updater must first be upgraded manually; it cannot acquire the new buttons remotely. Later upgrades can use the in-app path. When preparation succeeds, a separate install/restart action applies the update and launches the new application. Preparation alone does not close the app. Choosing Later retains the verified download for a later install/restart. If handing off to the installer fails, reopen BananaFlow to retry or use the website. Finish active downloads, conversions and file-changing operations before restarting; a busy application must not discard work just to update.
+
+Windows installed and Portable builds keep their installation type. macOS updates target the current application bundle. Settings, history and downloaded media are not replaced with the program files. A failed preparation is not installed; an installation failure is reported rather than shown as success.
+
+**Open Download Page** still opens the official website (not GitHub directly), so you can download and install manually at any time. Source installations and unsupported package layouts use this manual application-upgrade path. For a manual Portable upgrade, extract into a new folder instead of merging two application versions.
+
+The packages' current signing limitations still apply. Windows or macOS may ask for permission or show a security warning; BananaFlow does not bypass those checks. Hash verification confirms the selected official GitHub artifact, but is not a substitute for publisher code signing. Neither update path installs silently or makes an automatic restart decision for you.
 
 ## 14. Common problems
 
