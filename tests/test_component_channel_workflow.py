@@ -40,6 +40,11 @@ def test_builder_contains_only_the_two_reviewed_distributions():
     assert "ZipInfo" in text and "sha256" in text
 
 
+def test_channel_publication_keeps_compatibility_with_existing_app_releases():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "build_component_channel.py --min-app-version 1.2.1 --output" in text
+
+
 def test_builder_runs_when_invoked_by_path_outside_the_repository(tmp_path):
     output = tmp_path / "channel"
     result = subprocess.run(

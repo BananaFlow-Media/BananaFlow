@@ -54,7 +54,7 @@ from ui.direction import force_ltr_input
 from ui.i18n import t
 from ui.theme_manager import ACCENT_PALETTE, ThemeManager
 from utils.cookie_validator import check_cookies_valid, merge_cookies_file
-from utils.paths import get_app_cookies_path
+from utils.paths import get_app_cookies_path, is_frozen
 from utils.security import delete_stored_auth_data
 from utils.website import site_url
 
@@ -559,11 +559,12 @@ class SettingsPanel(QWidget):
         self._check_app_updates_card.clicked.connect(self._on_check_app_updates)
         updates_grp.addSettingCard(self._check_app_updates_card)
 
+        packaged = is_frozen()
         self._check_component_updates_card = PushSettingCard(
             text=t("update_check_btn"),
             icon=FluentIcon.SYNC,
-            title=t("check_component_updates_title"),
-            content=t("check_component_updates_desc"),
+            title=t("check_all_updates_title" if packaged else "check_component_updates_title"),
+            content=t("check_all_updates_desc" if packaged else "check_component_updates_desc"),
             parent=updates_grp,
         )
         self._check_component_updates_card.clicked.connect(
@@ -981,7 +982,7 @@ class SettingsPanel(QWidget):
 
     def _on_check_component_updates(self) -> None:
         self._start_update_check(
-            check_app=False, check_components=True,
+            check_app=is_frozen(), check_components=True,
             card=self._check_component_updates_card,
         )
 
@@ -1003,12 +1004,9 @@ class SettingsPanel(QWidget):
         card.button.setEnabled(True)
 
         app_release = None
+        check_failed = False
         if results.app is not None:
-            if results.app.status == "error":
-                self._show_update_infobar(
-                    "warning", t("update_check_failed_title"), t("update_check_failed_msg"),
-                )
-                return
+            check_failed = results.app.status == "error"
             if results.app.update_available:
                 app_release = results.app.release
 
@@ -1016,15 +1014,20 @@ class SettingsPanel(QWidget):
         if results.components is not None:
             report = results.components
             component_updates = report.updates
-            if not component_updates and not report.all_checks_ok:
-                self._show_update_infobar(
-                    "warning", t("update_check_failed_title"), t("update_check_failed_msg"),
-                )
-                return
+            check_failed = check_failed or not report.all_checks_ok
+
+        if check_failed:
+            self._show_update_infobar(
+                "warning", t("update_check_failed_title"), t("update_check_failed_msg"),
+            )
 
         if app_release is None and not component_updates:
+            if check_failed:
+                return
             # Everything the user asked about is current.
-            if results.app is not None:
+            if results.app is not None and results.components is not None:
+                msg = t("all_updates_current_msg").format(version=CURRENT_VERSION)
+            elif results.app is not None:
                 msg = t("app_up_to_date_msg").format(version=CURRENT_VERSION)
             else:
                 versions = ",  ".join(

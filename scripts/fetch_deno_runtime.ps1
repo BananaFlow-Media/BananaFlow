@@ -40,7 +40,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = '2.9.1',
+    [string]$Version = '2.9.8',
 
     # Verify and stage an already-downloaded archive instead of fetching one.
     # Same pin, same fail-closed check — this only replaces where the bytes
@@ -64,6 +64,7 @@ $ErrorActionPreference = 'Stop'
 # checksum for an unpinned version.
 $PinnedHashes = @{
     '2.9.1' = 'ab310b4232cca207d40ffa41867e93aaf9f893802bc76756e74f486a6b21b371'
+    '2.9.8' = 'cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf'
 }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

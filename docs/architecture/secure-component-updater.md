@@ -28,9 +28,17 @@ The control plane is the `component-channel-v1` pre-release in the official `Ban
 
 Manifest metadata declares compatible BananaFlow versions/component combinations. The compatibility range is stored with each prepared bundle and is checked again before every activation, so an application upgrade cannot activate an old incompatible overlay.
 
+Component publication explicitly retains the reviewed minimum application
+version in the channel build command. Tagging a newer app does not advance
+that floor. Change it when component compatibility requires a newer app.
+
+The packaged update check uses the same authenticated manifest, eligibility rules and official bundle-asset metadata as installation. It compares the eligible package versions with the components loaded in the current process. Checking reads only release metadata and the manifest. Only approved installation downloads the ZIP. An older channel downloader cannot be offered as an EJS-only update.
+
 ### App-data overlay, not live in-place mutation
 
 Downloaded components install under `components/downloader/bundles/<bundle-id>/site-packages` in BananaFlow's per-user app-data directory. Activation changes only `active.json`, and startup prepends the selected valid overlay before the first `yt_dlp` import. A separately authenticated, cached `control.json` records the channel's disabled/revoked-bundle state; it is refreshed from the official channel at most once per 24 hours after a component update has been approved.
+
+When the packaged downloader is newer than the selected verified overlay, startup uses the packaged pair. It compares metadata within the two specific package locations before importing either downloader.
 
 Every activation still recomputes the exact stored tree digest before any overlay code can be imported. To avoid serial per-file antivirus latency on packages containing thousands of small files, bytes are read with a bounded worker pool and fed into the existing SHA-256 calculation in the same deterministic path order. This is a performance implementation detail only: the expected digest, covered names/bytes and fail-closed decision are unchanged.
 

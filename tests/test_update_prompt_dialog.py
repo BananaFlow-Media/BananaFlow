@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.component_updates import ComponentStatus
-from core.update_checker import CURRENT_VERSION, ReleaseInfo
+from core.component_updates import ComponentStatus, ComponentUpdateReport
+from core.update_checker import CURRENT_VERSION, ReleaseInfo, UpdateCheckOutcome
 from core.update_state import UpdateStateStore
 from ui.dialogs.update_prompt_dialog import (
     REMIND_CHOICES,
@@ -308,7 +308,8 @@ class TestHebrewRtlRendering:
 
 class TestSettingsPanelUpdateCards:
 
-    def test_cards_exist_and_start_the_right_check(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("packaged", [False, True])
+    def test_cards_exist_and_start_the_right_check(self, tmp_path, monkeypatch, packaged):
         try:
             _make_qapp(tmp_path, monkeypatch)
             from config import AppConfig
@@ -334,6 +335,7 @@ class TestSettingsPanelUpdateCards:
                 started.append((self.check_app, self.check_components))
 
         monkeypatch.setattr("ui.panels.settings_panel.UpdateWorker", FakeWorker)
+        monkeypatch.setattr("ui.panels.settings_panel.is_frozen", lambda: packaged)
 
         cfg = AppConfig()
         panel = SettingsPanel(config=cfg, theme=ThemeManager(cfg))
@@ -343,6 +345,35 @@ class TestSettingsPanelUpdateCards:
 
             panel._check_app_updates_card.clicked.emit()
             panel._check_component_updates_card.clicked.emit()
-            assert started == [(True, False), (False, True)]
+            assert started == [(True, False), (packaged, True)]
         finally:
             panel.deleteLater()
+
+    @pytest.mark.parametrize("app_failed", [False, True])
+    def test_combined_check_keeps_updates_found_by_the_other_channel(self, app_failed):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from ui.panels.settings_panel import SettingsPanel
+        from ui.workers.update_worker import UpdateCheckResults
+
+        release = _release()
+        component = _component()
+        card = SimpleNamespace(button=Mock())
+        show_prompt = Mock()
+        panel = SimpleNamespace(
+            _show_update_infobar=Mock(),
+            window=lambda: SimpleNamespace(show_update_prompt=show_prompt),
+        )
+        results = UpdateCheckResults(
+            app=UpdateCheckOutcome("error") if app_failed else UpdateCheckOutcome("update_available", release),
+            components=ComponentUpdateReport([component] if app_failed else []),
+        )
+
+        SettingsPanel._on_manual_check_done(panel, results, card)
+
+        panel._show_update_infobar.assert_called_once()
+        if app_failed:
+            show_prompt.assert_called_once_with(None, [component])
+        else:
+            show_prompt.assert_called_once_with(release, [])

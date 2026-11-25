@@ -4,6 +4,24 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.2.3]
+
+### Fixed
+
+- Restore YouTube downloads affected by a player script change with the reviewed
+  yt-dlp fix. Python 3.10 source installs use the compatible TV player script.
+- Check packaged component updates against the same verified channel used to
+  install them. A newer bundled downloader takes precedence over an older
+  per-user overlay.
+
+### Changed
+
+- In packaged builds, Settings can check for both full releases and separately
+  installable downloader updates in one action. A failure in one check no
+  longer hides an available update found by the other check.
+- Refreshed FFmpeg, bundled Windows Deno and the PO Token Provider. The release
+  builds now record a Python dependency freshness report alongside the SBOM.
+
 ## [1.2.2]
 
 ### Changed

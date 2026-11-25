@@ -5,14 +5,14 @@
 # pyproject.toml's safe >=2026.8.19 compatibility floor instead.
 # The [default] extra installs yt-dlp's matching EJS dependency, so do not list
 # yt-dlp-ejs independently.
-yt-dlp[default]==2026.10.10.233141.dev0
+yt-dlp[default]==2026.11.23
 
 # PO Token Provider plugin: not a source-tree runtime requirement, but
 # the public Windows build pins and stages bgutil-ytdlp-pot-provider
 # plus its upstream Deno script backend via packaging/stage_pot_provider.py.
 # The provider is GPL v3-compatible with BananaFlow's GPL-3.0-or-later release.
 # Source/venv developers can still opt in with:
-#     pip install "bgutil-ytdlp-pot-provider==1.3.2"
+#     pip install "bgutil-ytdlp-pot-provider==2.0.2"
 # BananaFlow passes yt-dlp the provider's official server_home argument when
 # the bundled backend is present; it never generates, stores, or injects
 # PO Tokens itself. See THIRD_PARTY_NOTICES.md for license notices.

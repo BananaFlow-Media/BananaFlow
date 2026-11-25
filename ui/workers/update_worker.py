@@ -5,7 +5,7 @@ One background thread that can run either or both of the app's two
 update checks and hand the combined result back to the UI thread:
 
   * App releases   — core.update_checker (GitHub Releases API)
-  * Components     — core.component_updates (PyPI JSON API, yt-dlp & co.)
+  * Components     — core.component_updates (official GitHub channel or PyPI)
 
 Both underlying checkers are guaranteed never to raise — failures are
 expressed in their result objects — so run() needs no try/except and a
@@ -15,9 +15,9 @@ Used from two places:
   * AppWindow startup (check_app=True, check_components=True): results
     are filtered through core.update_state.UpdateStateStore and only
     non-dismissed, non-snoozed updates produce a notification.
-  * The Settings panel's "Check for app updates" / "Check for component
-    updates" buttons (one flag each): results are always reported,
-    including "up to date" and "check failed".
+  * Settings can check the app release alone or check both channels in a
+    packaged build. Source mode can check the PyPI components separately.
+    Results include "up to date" and "check failed".
 
 Signal summary
 --------------
@@ -54,7 +54,7 @@ class UpdateWorker(QThread):
     repo_name           : Repository name on GitHub.
     include_prereleases : When True, pre-release versions are also considered.
     check_app           : Query GitHub Releases for a newer BananaFlow build.
-    check_components    : Query PyPI for newer yt-dlp / yt-dlp-ejs releases.
+    check_components    : Check for installable yt-dlp / yt-dlp-ejs updates.
     parent              : Optional Qt parent object.
     """
 

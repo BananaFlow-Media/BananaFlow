@@ -74,7 +74,10 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip pyinstaller pytest pytest-mock
-          python -m pip install -r requirements.txt
+          python -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw "Release dependency resolution failed" }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "Release dependencies are incompatible" }
 
       - name: Install Playwright & download Chromium
         shell: pwsh
@@ -278,6 +281,14 @@ jobs:
             throw "The packaged smoke wrote into the install directory: $($outside.FullName -join ', ')"
           }
           Write-Host "Packaged Tag Editor smoke: all steps passed."
+
+      - name: Record packaged Python dependency freshness
+        shell: pwsh
+        run: |
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "Packaged dependencies are incompatible" }
+          python -m pip --isolated list --outdated --index-url https://pypi.org/simple --format=json > smoke-evidence/python-dependency-freshness.json
+          if ($LASTEXITCODE -ne 0) { throw "Could not audit packaged dependencies" }
 
       - name: Upload packaged smoke evidence
         if: always()

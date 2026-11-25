@@ -1,9 +1,8 @@
 """
 tests/test_component_updates.py  –  Runtime component update checker
 ========================================================================
-Everything runs offline: the PyPI fetcher and installed-version lookup
-are injected, so no test touches the network or depends on what happens
-to be installed in the environment running the suite.
+Fixtures supply the installed versions and the update source, so the
+checks are independent of the network and local package versions.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import sys
 from types import SimpleNamespace
 
 import core.component_updates as component_updates
+import core.component_overlay as component_overlay
 
 from core.component_updates import (
     MONITORED_COMPONENTS,
@@ -159,6 +159,34 @@ class TestComponentUpdateChecker:
             }
         }
         assert ComponentUpdateChecker._latest_non_yanked_release(data) == "2026.8.4.234419.dev0"
+
+
+def test_packaged_check_stops_offering_the_bundle_after_restart(monkeypatch):
+    monkeypatch.setattr(component_updates, "can_update_in_place", lambda: False)
+    installed = {"yt-dlp": "2026.8.19", "yt-dlp-ejs": "0.8.0"}
+    channel = {"yt-dlp": "2026.11.23", "yt-dlp-ejs": "0.8.0"}
+    monkeypatch.setattr(
+        component_overlay,
+        "fetch_installable_component_manifest",
+        lambda _timeout: SimpleNamespace(packages=tuple(channel.items())),
+    )
+    pypi_lookups = []
+    checker = ComponentUpdateChecker(
+        _fetch_latest=lambda name: pypi_lookups.append(name) or "2027.1.1",
+        _installed=installed.get,
+    )
+
+    assert [status.latest_version for status in checker.check().updates] == ["2026.11.23"]
+    installed.update(channel)  # Versions loaded by the next process.
+    report = checker.check()
+    assert report.all_checks_ok
+    assert not report.has_updates
+    assert pypi_lookups == []
+
+    # A newer bundled yt-dlp must not be downgraded for an EJS-only change.
+    installed["yt-dlp"] = "2026.12.1"
+    channel["yt-dlp-ejs"] = "0.9.0"
+    assert not checker.check().has_updates
 
 
 # ──────────────────────────────────────────────────────────────────────────────

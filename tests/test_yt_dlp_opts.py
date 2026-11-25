@@ -98,14 +98,14 @@ class TestBundledPotProviderArgs:
 
         opts = yt_dlp_opts.build_base_ydl_opts()
 
-        assert opts["extractor_args"] == expected
+        assert opts["extractor_args"]["youtubepot-bgutilscript"] == expected["youtubepot-bgutilscript"]
 
     def test_base_opts_omit_extractor_args_when_no_backend(self, monkeypatch):
         monkeypatch.setattr(yt_dlp_opts, "_detect_bundled_pot_provider_args", lambda: {})
 
         opts = yt_dlp_opts.build_base_ydl_opts()
 
-        assert "extractor_args" not in opts
+        assert "youtubepot-bgutilscript" not in opts.get("extractor_args", {})
 
     def test_metadata_search_can_explicitly_skip_the_provider(self, monkeypatch):
         monkeypatch.setattr(
@@ -116,7 +116,7 @@ class TestBundledPotProviderArgs:
 
         opts = yt_dlp_opts.build_base_ydl_opts(enable_po_token_provider=False)
 
-        assert "extractor_args" not in opts
+        assert "youtubepot-bgutilscript" not in opts.get("extractor_args", {})
 
 
 class TestPoTokenCircuitBreaker:
@@ -145,7 +145,7 @@ class TestPoTokenCircuitBreaker:
 
         opts = yt_dlp_opts.build_base_ydl_opts()
 
-        assert "extractor_args" not in opts
+        assert "youtubepot-bgutilscript" not in opts.get("extractor_args", {})
 
     def test_matcher_can_preserve_provider_after_download_circuit_opens(self, monkeypatch):
         expected = {"youtubepot-bgutilscript": {"server_home": ["C:/provider"]}}
@@ -156,7 +156,7 @@ class TestPoTokenCircuitBreaker:
 
         opts = yt_dlp_opts.build_base_ydl_opts(respect_po_token_circuit=False)
 
-        assert opts["extractor_args"] == expected
+        assert opts["extractor_args"]["youtubepot-bgutilscript"] == expected["youtubepot-bgutilscript"]
 
     def test_bgutil_stderr_is_captured_without_affecting_other_commands(self, monkeypatch):
         from yt_dlp.utils import Popen

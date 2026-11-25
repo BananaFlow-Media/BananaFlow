@@ -11,8 +11,8 @@ Responsibilities
 ----------------
 * Look up the installed version of each monitored component
   (importlib.metadata, with a yt_dlp module fallback for frozen builds).
-* Query PyPI's public JSON API for the latest published version. For yt-dlp,
-  inspect non-yanked release entries as well so nightly builds are visible.
+* Check the official component channel in packaged builds. Source environments
+  use PyPI's public JSON API, including non-yanked yt-dlp nightly releases.
 * Compare using numeric tuple ordering (handles yt-dlp's zero-padded
   CalVer like "2026.07.04" == "2026.7.4" as well as yt-dlp-ejs SemVer).
 * Never raise: any network/parsing failure is expressed per component as
@@ -87,7 +87,7 @@ class ComponentStatus:
     key:               str
     display_name:      str
     installed_version: str = ""     # "" when the package couldn't be found
-    latest_version:    str = ""     # "" when the PyPI lookup failed
+    latest_version:    str = ""     # "" when the remote lookup failed
     update_available:  bool = False
     check_ok:          bool = False  # False = lookup failed (network etc.)
 
@@ -175,7 +175,7 @@ def installed_component_version(pypi_name: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ComponentUpdateChecker:
-    """Query PyPI for the latest appropriate version of each component."""
+    """Check for newer components that the running build can install."""
 
     _USER_AGENT = f"BananaFlow/{_APP_VERSION} (component-update-checker; httpx)"
 
@@ -194,21 +194,43 @@ class ComponentUpdateChecker:
 
     def check(self) -> ComponentUpdateReport:
         """Check every monitored component. Never raises."""
-        report = ComponentUpdateReport()
-        for spec in MONITORED_COMPONENTS:
-            report.components.append(self._check_one(spec))
+        packaged = not can_update_in_place()
+        fetch_latest = self._fetch_latest
+        if packaged:
+            from core.component_overlay import fetch_installable_component_manifest
+
+            try:
+                versions = dict(fetch_installable_component_manifest(self._timeout).packages)
+            except Exception:
+                versions = {}
+            fetch_latest = versions.get
+
+        report = ComponentUpdateReport([
+            self._check_one(spec, fetch_latest) for spec in MONITORED_COMPONENTS
+        ])
+        if packaged:
+            downloader = report.components[0]
+            if not downloader.check_ok or is_newer_version(
+                downloader.installed_version, downloader.latest_version,
+            ):
+                # The channel installs both packages, so an EJS-only update
+                # cannot replace an already newer downloader.
+                for status in report.components:
+                    status.update_available = False
         return report
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    def _check_one(self, spec: ComponentSpec) -> ComponentStatus:
+    def _check_one(
+        self, spec: ComponentSpec, fetch_latest: Callable[[str], str | None],
+    ) -> ComponentStatus:
         status = ComponentStatus(key=spec.key, display_name=spec.display_name)
         try:
             status.installed_version = self._installed(spec.pypi_name) or ""
         except Exception:
             status.installed_version = ""
         try:
-            status.latest_version = self._fetch_latest(spec.pypi_name) or ""
+            status.latest_version = fetch_latest(spec.pypi_name) or ""
         except Exception:
             status.latest_version = ""
 

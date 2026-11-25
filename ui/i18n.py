@@ -212,8 +212,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "check_updates": "Check for Updates on Launch",
         "check_updates_desc": (
-            "Silently check GitHub Releases and PyPI at startup and show "
-            "a notification when the app or its components are outdated"
+            "Check on launch and notify you when an app or downloader "
+            "component update is available for this installation"
         ),
 
         "search_group": "Search",
@@ -322,8 +322,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_check_btn": "Check Now",
         "check_app_updates_title": "Check for App Updates",
         "check_app_updates_desc": (
-            "Recommended: updating BananaFlow is the main update path — each "
-            "release includes the tested downloader components"
+            "Recommended for updating BananaFlow and all its bundled libraries and runtimes"
+        ),
+        "check_all_updates_title": "Check for App and Component Updates",
+        "check_all_updates_desc": (
+            "Check for a full release and for downloader updates available separately"
         ),
         "check_component_updates_title": "Check for Component Updates",
         "check_component_updates_desc": (
@@ -332,11 +335,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "update_check_failed_title": "Update check failed",
         "update_check_failed_msg": (
-            "Could not reach the update server. Check your internet "
-            "connection and try again."
+            "Some update information could not be verified. Try checking again later."
         ),
         "up_to_date_title": "You're up to date",
         "app_up_to_date_msg": "BananaFlow {version} is the latest released version.",
+        "all_updates_current_msg": "BananaFlow {version} and its downloader are up to date on the official channels.",
         "components_up_to_date_msg": "All components are current:  {versions}",
 
         "update_prompt_title": "Updates Available",
@@ -1748,8 +1751,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "check_updates": "בדוק עדכונים בהפעלה",
         "check_updates_desc": (
-            "בדוק בשקט את GitHub Releases ואת PyPI בעת ההפעלה והצג "
-            "התראה כשהאפליקציה או הרכיבים שלה מיושנים"
+            "בדוק בעת ההפעלה והצג התראה כשיש עדכון לאפליקציה "
+            "או לרכיבי ההורדה שמתאים להתקנה זו"
         ),
 
         "search_group": "חיפוש",
@@ -1858,8 +1861,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_check_btn": "בדוק עכשיו",
         "check_app_updates_title": "בדוק עדכוני אפליקציה",
         "check_app_updates_desc": (
-            "מומלץ: עדכון BananaFlow הוא מסלול העדכון הראשי — כל גרסה כוללת "
-            "את רכיבי ההורדה הבדוקים"
+            "מומלץ לעדכון BananaFlow וכל הספריות וסביבות הריצה הארוזות בה"
+        ),
+        "check_all_updates_title": "בדוק עדכוני אפליקציה ורכיבים",
+        "check_all_updates_desc": (
+            "בדיקה אם קיימים עדכון מלא או עדכונים נפרדים לרכיבי ההורדה"
         ),
         "check_component_updates_title": "בדוק עדכוני רכיבים",
         "check_component_updates_desc": (
@@ -1868,10 +1874,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "update_check_failed_title": "בדיקת העדכון נכשלה",
         "update_check_failed_msg": (
-            "לא ניתן להגיע לשרת העדכונים. בדוק את חיבור האינטרנט ונסה שוב."
+            "חלק ממידע העדכונים לא אומת. אפשר לנסות לבדוק שוב מאוחר יותר."
         ),
         "up_to_date_title": "הכל מעודכן",
         "app_up_to_date_msg": "BananaFlow {version} היא הגרסה האחרונה שפורסמה.",
+        "all_updates_current_msg": "BananaFlow {version} ורכיב ההורדה שלה מעודכנים לפי הערוצים הרשמיים.",
         "components_up_to_date_msg": "כל הרכיבים מעודכנים:  {versions}",
 
         "update_prompt_title": "עדכונים זמינים",

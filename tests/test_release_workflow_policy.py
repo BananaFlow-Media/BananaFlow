@@ -81,6 +81,15 @@ def test_sbom_is_attached_to_the_public_release(workflow: str):
     assert "dist/SBOM_INVENTORY.md" in workflow
 
 
+@pytest.mark.parametrize("path", [WORKFLOW, MACOS_WORKFLOW])
+def test_packaged_build_resolves_and_records_dependency_freshness(path):
+    workflow = path.read_text(encoding="utf-8")
+    assert "pip install --upgrade --upgrade-strategy eager -r requirements.txt" in workflow
+    assert "pip check" in workflow
+    assert "pip --isolated list --outdated --index-url https://pypi.org/simple --format=json" in workflow
+    assert "python-dependency-freshness.json" in workflow
+
+
 def test_macos_workflow_avoids_bash_4_only_syntax():
     """macOS runners execute `run:` steps via the system /bin/bash, which
     Apple has frozen at 3.2 (the last GPLv2 release) -- it does not support
