@@ -43,7 +43,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
 DIST_NAME = "bgutil-ytdlp-pot-provider"
-PROVIDER_VERSION = "1.3.2"
+PROVIDER_VERSION = "2.0.2"
 STAGING_ROOT = HERE / "yt-dlp-plugins" / DIST_NAME
 BACKEND_ROOT = HERE / "pot-provider-backend" / DIST_NAME
 SERVER_HOME = BACKEND_ROOT / "server"
@@ -78,6 +78,7 @@ SOURCE_URL = (
 PINNED_SOURCE_TREES = {
     "1.3.1": "6ce84380c5226d13cf096d7aea60ea9d015635b75abe7144d9104296d6ebc4ea",
     "1.3.2": "7952a8259fd009c25e5bfc8f48a8525ba73ea792ffb988981da7f14c18d2822f",
+    "2.0.2": "47c3485c47f574b7ca33e312c37f8322876bf58349984ece3bd3ded34a8de0de",
 }
 SCRIPT_MODE_EXTRACTOR_FILES = {
     "getpot_bgutil.py",

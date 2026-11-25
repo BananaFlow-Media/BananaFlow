@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from utils import yt_dlp_opts
 
 
@@ -21,7 +23,7 @@ def test_public_downloads_leave_player_client_to_upstream(monkeypatch):
 
     opts = yt_dlp_opts.build_base_ydl_opts()
 
-    assert "youtube" not in opts.get("extractor_args", {})
+    assert "player_client" not in opts.get("extractor_args", {}).get("youtube", {})
     assert "youtubepot-bgutilscript" in opts.get("extractor_args", {})
 
 
@@ -36,3 +38,17 @@ def test_cookie_file_adds_current_web_embedded_fallback_without_dropping_provide
         "web_embedded",
     ]
     assert "youtubepot-bgutilscript" in opts["extractor_args"]
+
+
+def test_player_script_workaround_is_scoped_to_python_310(monkeypatch):
+    _stub_runtime_and_provider(monkeypatch)
+
+    monkeypatch.setattr(sys, "version_info", (3, 10))
+    legacy = yt_dlp_opts.build_base_ydl_opts(cookies_file="cookies.txt")["extractor_args"]
+    assert legacy["youtube"]["player_js_variant"] == ["tv"]
+    assert legacy["youtube"]["player_client"] == ["default", "web_embedded"]
+    assert "youtubepot-bgutilscript" in legacy
+
+    monkeypatch.setattr(sys, "version_info", (3, 11))
+    current = yt_dlp_opts.build_base_ydl_opts(cookies_file="cookies.txt")["extractor_args"]
+    assert "player_js_variant" not in current["youtube"]

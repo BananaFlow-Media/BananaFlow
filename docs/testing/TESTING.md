@@ -48,6 +48,8 @@ Startup-loading regression tests also verify in fresh interpreter processes that
 
 Startup-preflight shutdown tests must cover cooperative cancellation before the Playwright probe, joining the worker before interpreter teardown, and a Playwright 1.62 availability probe that exits without pending asyncio task/future errors. A passing functional preflight is insufficient if process exit emits cleanup diagnostics.
 
+Packaged-component regression tests must cover discovery against the verified channel, suppression after the installed version is loaded on restart, rejection of unavailable or ineligible assets, and selection of a newer packaged downloader over an older overlay.
+
 Immediate-close coverage must also verify that the startup update worker honours interruption between app and component checks and never emits results after cancellation; Qt must not destroy a running child `QThread`.
 
 ## Application updater acceptance

@@ -2,7 +2,7 @@
 
 Status: **Current release-compliance inventory**
 
-Version reference: BananaFlow `1.2.2` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
+Version reference: BananaFlow `1.2.3` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
 
 BananaFlow is licensed as GPL-3.0-or-later. This document records third-party packages, staged binaries/components, their license families, source locations and release-handling obligations. It is a best-effort open-source compliance document, not legal advice.
 
@@ -35,9 +35,8 @@ These are point-in-time release inputs, not promises about future builds.
 The earlier 1.2.0 release preparation used `N-126455-gecc7eb519e`
 from `autobuild-2026-09-07-15-39`. That daily archive is no longer available
 under upstream retention. The current reviewed Windows staging pin is recorded
-in [`packaging/ffmpeg-windows.json`](packaging/ffmpeg-windows.json): retained
-month-end build `N-127032-g6ae491a26c`, tag `autobuild-2026-09-30-13-08`, archive
-SHA-256 `c73ad424c5f9d94dd48815b4d3531e57130cb9f5c3dc8f21f4aa4e1fdb0658e3`.
+in [`packaging/ffmpeg-windows.json`](packaging/ffmpeg-windows.json), which
+identifies the retained month-end build and its archive checksum.
 The verified archive includes the GNU Lesser General Public License version 3
 text. Treat this Windows input as **LGPL-3.0-or-later**, not as the macOS
 LGPL-2.1-or-later recipe below. Its archive hash, exact executable paths and
@@ -56,7 +55,7 @@ sources are owned by
 
 | Source | Reviewed version | License handling |
 |---|---|---|
-| FFmpeg | 8.1.3 | LGPL-2.1-or-later build; GPL/nonfree options excluded |
+| FFmpeg | See the pinned source manifest above | LGPL-2.1-or-later build; GPL/nonfree options excluded |
 | LAME | 3.100 | LGPL-2.0-or-later; retained source/license for MP3 encoding |
 | Opus | 1.6.1 | BSD-3-Clause; retained source/license |
 | libogg | 1.3.6 | BSD-3-Clause; retained source/license |
@@ -78,7 +77,7 @@ change the source archive pin or license; the conveyed recipe reproduces it.
 |---|---|
 | Project | `bgutil-ytdlp-pot-provider` |
 | License | GPL v3 |
-| Current staged pin | `1.3.2` — source of truth for the staging step is `packaging/stage_pot_provider.py`; `pyproject.toml` exposes the matching source/venv optional dependency |
+| Current staged pin | `2.0.2` — source of truth for the staging step is `packaging/stage_pot_provider.py`; `pyproject.toml` exposes the matching source/venv optional dependency |
 | Source | https://github.com/Brainicism/bgutil-ytdlp-pot-provider |
 | Use | yt-dlp PO Token Provider plugin + matching Deno script backend |
 | Release requirement | Preserve GPL notice/source availability for the plugin/backend, stage the reviewed matching source, and verify the packaged provider path with YouTube Doctor |
@@ -120,7 +119,7 @@ Chromium is intentionally a large packaged dependency because browser-backed Spo
 The important yt-dlp distinction is intentional:
 
 - project/source compatibility floor: **`yt-dlp[default]>=2026.8.19`**;
-- reviewed reproducible CI/release install: currently **`yt-dlp[default]==2026.10.10.233141.dev0`** in `requirements.txt`/the matching release path.
+- reviewed reproducible release install: **`yt-dlp[default]==2026.11.23`** in `requirements.txt`, matched by CI on Python 3.11 and later. Python 3.10 source CI retains its compatible pin in `pyproject.toml` because the release pin requires Python 3.11 or later.
 
 A newer reviewed exact release pin does not change the minimum compatibility floor, and the floor must not be inferred from an old developer environment.
 

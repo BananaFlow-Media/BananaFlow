@@ -62,6 +62,11 @@ Then explicitly verify:
 ### Packaging/license inputs
 
 - Review staged FFmpeg, Deno, PO-provider, browser/runtime and Python dependency versions against release documentation.
+- Review each tagged build's `python-dependency-freshness.json` alongside its
+  SBOM. Release jobs resolve compatible Python dependencies eagerly and check
+  their consistency. The report lists newer PyPI candidates for the installed
+  build environment, including deliberately pinned dependencies. It does not
+  choose substitutes for platform runtimes or override reviewed pins.
 - Ensure no generated/staged binary was accidentally committed.
 - Verify required license/source bundle files are packaged.
 - Stage Windows FFmpeg from the exact retained pin in `packaging/ffmpeg-windows.json`; inspect architecture/license/codecs after extraction. Preserve its LGPLv3 notice rather than labeling it with the native macOS recipe's LGPLv2.1 license.
@@ -88,6 +93,10 @@ architecture validation.
 The daily component-channel workflow compares the exact reviewed `yt-dlp[default]` pin with the newest non-yanked PyPI candidate. A newer candidate emits a visible workflow warning and a job-summary review checklist, not a failed build. Network/JSON errors, malformed release metadata and a missing or fully yanked reviewed pin still fail the check. This is a read-only advisory: it does not create a bot-authored commit, change a pin or publish unreviewed executable code. Maintainers must review the warning, synchronize the exact `requirements.txt` and `pyproject.toml` dev pins, and complete the supply-chain validation before merging.
 
 A downloader-only pin change does not require a new BananaFlow application version for users of an overlay-capable release. Older builds without overlay support need a normal application upgrade. A fresh installer with the newer bundled downloader still requires the normal tagged application release process.
+
+Keep the reviewed component-channel minimum app version explicit when building
+the manifest. Before publication, verify the candidate overlay against the
+existing supported app as well as the new package.
 
 Downloader-pin PRs run `scripts/run_network_tests.py` in a read-only GitHub Actions job. Review its exact-commit evidence alongside deterministic CI before merging; investigate any failure rather than suppressing it. This supporting CI evidence does not replace the normal-network maintainer pre-release check above.
 
@@ -120,7 +129,7 @@ Download the **CI-produced draft artifacts** onto clean/representative machines 
 - a real download succeeds;
 - a conversion succeeds and output verifies;
 - a Tag Editor Apply + Undo Applied Batch cycle succeeds on disposable fixtures;
-- when component-overlay code changes, an approved overlay activates only with a current authenticated control record and a revoked test bundle cannot activate;
+- when component-overlay code changes, an approved overlay activates only with a current authenticated control record, a revoked test bundle cannot activate, an older overlay cannot shadow a newer bundled downloader, and the component check offers only eligible versions from the official install channel;
 - when component-overlay health-check startup changes, the frozen health-check validates its staged `site-packages` without normal startup deleting that staging directory;
 - an independently approved component update offers Restart now/Later and uses new components only in the fresh process;
 - a full in-app update preserves installed/portable/macOS layout and per-user data, waits for explicit restart, refuses unsafe active-work interruption, and opens the new version after replacement;

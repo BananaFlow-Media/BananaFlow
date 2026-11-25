@@ -59,7 +59,9 @@ jobs:
           python -m pip install pytest
           python -m pip check
       - name: Build deterministic component assets
-        run: python scripts/build_component_channel.py --output dist/component-channel
+        # Keep the previously validated installed-release compatibility floor
+        # when a newer full application is tagged.
+        run: python scripts/build_component_channel.py --min-app-version 1.2.1 --output dist/component-channel
       - name: Verify manifest and updater tests
         run: python -m pytest tests/test_component_overlay.py tests/test_component_updates.py -q
       - name: Generate component provenance attestation

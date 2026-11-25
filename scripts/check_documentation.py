@@ -631,8 +631,14 @@ def _ytdlp_exact_release_pins() -> dict[str, str]:
     if match:
         values["requirements.txt"] = match.group(1)
     pyproject = _read("pyproject.toml")
-    exact = re.findall(r"yt-dlp\[default\]==([^\"']+)", pyproject)
-    if exact:
+    # The release pin in dev can be gated to newer interpreters. A separate
+    # Python 3.10 compatibility pin must not be mistaken for the release pin.
+    exact = re.findall(
+        r"""^\s*"yt-dlp\[default\]==([^;"\s]+)(?:; python_version >= '3\.11')?",""",
+        pyproject,
+        re.M,
+    )
+    if len(exact) == 1:
         values["pyproject.toml dev extra"] = exact[0]
     return values
 

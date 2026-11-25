@@ -69,8 +69,8 @@ def test_source_manifest_rejects_incomplete_set(tmp_path):
 
 def test_windows_pin_is_a_retained_month_end():
     pin = stage.load_windows_pin()
-    assert pin["tag"] == "autobuild-2026-09-30-13-08"
-    assert pin["sha256"] == "c73ad424c5f9d94dd48815b4d3531e57130cb9f5c3dc8f21f4aa4e1fdb0658e3"
+    assert pin["tag"] == "autobuild-2026-10-31-12-59"
+    assert pin["sha256"] == "6550f7abc950128fbb0069b4552f2972baccf5fbd819f2fd0abbe4ceb8d48734"
 
 
 @pytest.mark.parametrize("field,value", [

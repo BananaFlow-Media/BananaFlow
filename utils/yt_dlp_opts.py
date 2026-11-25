@@ -410,8 +410,7 @@ def build_base_ydl_opts(
     """
     Return a base yt-dlp options dict with BananaFlow's standard network,
     cookie, and retry settings applied. Lets yt-dlp own its rapidly-changing
-    YouTube client defaults except for the currently documented cookie-session
-    compatibility fallback below.
+    YouTube client defaults except for the cookie-session fallback below.
     """
     opts: dict[str, Any] = {
         # ── Network resilience ────────────────────────────────────────────────
@@ -461,6 +460,12 @@ def build_base_ydl_opts(
     if cookies_file or cookies_browser:
         youtube_args = opts.setdefault("extractor_args", {}).setdefault("youtube", {})
         youtube_args.setdefault("player_client", ["default", "web_embedded"])
+
+    # yt-dlp 2026.11.23 switches to the working TV player script by default
+    # (yt-dlp #18124). Python 3.10 cannot install that release.
+    if sys.version_info < (3, 11):
+        youtube_args = opts.setdefault("extractor_args", {}).setdefault("youtube", {})
+        youtube_args.setdefault("player_js_variant", ["tv"])
 
     # ── Optional HTTP/HTTPS/SOCKS proxy ──────────────────────────────────────
     if proxy:

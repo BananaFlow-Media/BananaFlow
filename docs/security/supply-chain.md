@@ -23,7 +23,14 @@ BananaFlow releases can contain:
 
 Runtime/dev/optional dependencies are declared in `pyproject.toml`, `requirements.txt` and release constraints as appropriate. New runtime dependencies require license review and `THIRD_PARTY_NOTICES.md` updates.
 
+Windows and macOS release jobs resolve newer Python packages within the
+declared requirements, run `pip check`, and retain a PyPI freshness report
+with the build evidence. The report is reviewed alongside the exact SBOM
+and the separately staged platform runtimes before release.
+
 A reviewed downloader-pin update must confirm that the selected release is not yanked, inspect its Python/EJS dependency metadata, install it in a clean environment, pass `pip check`, and run the focused component/downloader plus real-network gates against that exact candidate. The full platform matrix then installs the reviewed pin from scratch before it can enter a tagged build.
+
+When upstream raises its Python minimum, the dev extra follows the packaged pin on supported interpreters and preserves the reviewed compatibility pin for older interpreters still supported by BananaFlow. Release builds use Python 3.12 and the exact pin in `requirements.txt`.
 
 ### Staged binaries/components
 

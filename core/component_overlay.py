@@ -15,6 +15,7 @@ before parsing or unpacking; URLs supplied by the manifest are never trusted.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -269,32 +270,31 @@ def _request_headers() -> dict[str, str]:
     }
 
 
-def _fetch_channel_manifest(client: httpx.Client) -> ComponentManifest:
-    """Fetch and authenticate control metadata without downloading a bundle."""
+def _fetch_channel_release(
+    client: httpx.Client, *, app_version: str | None = FULL_VERSION,
+) -> tuple[dict[str, Any], ComponentManifest]:
     headers = _request_headers()
     response = client.get(RELEASE_API_URL, headers=headers)
     response.raise_for_status()
     release = response.json()
     if release.get("tag_name") != CHANNEL_TAG or release.get("draft") is True:
         raise ComponentUpdateError("The official component channel release is unavailable.")
-    manifest_asset = _asset_from_release(release, MANIFEST_ASSET_NAME, _MAX_MANIFEST_BYTES)
-    return parse_manifest(_download_asset(
-        client, manifest_asset, {**headers, "Accept": "application/octet-stream"},
-    ), app_version=None)
-
-
-def _fetch_release_and_assets(client: httpx.Client) -> tuple[ComponentManifest, bytes]:
-    headers = _request_headers()
-    response = client.get(RELEASE_API_URL, headers=headers)
-    response.raise_for_status()
-    release = response.json()
-    if release.get("tag_name") != CHANNEL_TAG or release.get("draft") is True:
-        raise ComponentUpdateError("The official component channel release is unavailable.")
-
     manifest_asset = _asset_from_release(release, MANIFEST_ASSET_NAME, _MAX_MANIFEST_BYTES)
     manifest = parse_manifest(_download_asset(
         client, manifest_asset, {**headers, "Accept": "application/octet-stream"},
-    ))
+    ), app_version=app_version)
+    return release, manifest
+
+
+def _fetch_channel_manifest(client: httpx.Client) -> ComponentManifest:
+    """Authenticate control metadata even for a build outside the update range."""
+    return _fetch_channel_release(client, app_version=None)[1]
+
+
+def _fetch_installable_bundle(
+    client: httpx.Client,
+) -> tuple[ComponentManifest, VerifiedAsset]:
+    release, manifest = _fetch_channel_release(client)
     if manifest.disabled:
         detail = f" Superseded by {manifest.superseded_by}." if manifest.superseded_by else ""
         raise ComponentUpdateError("The component update channel is temporarily disabled." + detail)
@@ -304,8 +304,19 @@ def _fetch_release_and_assets(client: httpx.Client) -> tuple[ComponentManifest, 
     bundle_asset = _asset_from_release(release, manifest.bundle_asset, _MAX_BUNDLE_BYTES)
     if bundle_asset.size != manifest.bundle_size or bundle_asset.sha256 != manifest.bundle_sha256:
         raise ComponentUpdateError("GitHub metadata and the component manifest disagree about the bundle.")
+    return manifest, bundle_asset
+
+
+def fetch_installable_component_manifest(timeout: float) -> ComponentManifest:
+    """Check that this app can install the channel bundle without downloading it."""
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        return _fetch_installable_bundle(client)[0]
+
+
+def _fetch_release_and_assets(client: httpx.Client) -> tuple[ComponentManifest, bytes]:
+    manifest, bundle_asset = _fetch_installable_bundle(client)
     return manifest, _download_asset(
-        client, bundle_asset, {**headers, "Accept": "application/octet-stream"},
+        client, bundle_asset, {**_request_headers(), "Accept": "application/octet-stream"},
     )
 
 
@@ -591,6 +602,21 @@ def _valid_bundle(root: Path, bundle_id: object, control: dict[str, Any]) -> Pat
     return site_packages
 
 
+def _bundled_downloader_is_newer(overlay: Path) -> bool:
+    """Compare trusted build-local metadata without importing either downloader."""
+    bundled_path = getattr(sys, "_MEIPASS", None)
+    if not bundled_path:
+        return False
+    try:
+        bundled = list(importlib.metadata.distributions(name="yt-dlp", path=[bundled_path]))
+        prepared = list(importlib.metadata.distributions(name="yt-dlp", path=[str(overlay)]))
+        if len(bundled) != 1 or len(prepared) != 1:
+            return False
+        return _version_before(prepared[0].version, bundled[0].version)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def activate_component_overlay(
     *,
     root: Path | None = None,
@@ -608,10 +634,12 @@ def activate_component_overlay(
         except OSError:
             logger.warning("Could not remove abandoned component staging data", exc_info=True)
     state = _read_state(target_root)
+    active_id, previous_id = state.get("active"), state.get("previous")
+    if not active_id and not previous_id:
+        return None
     control = _control_for_activation(target_root, fetcher=control_fetcher, now=now)
     if control is None:
         return None
-    active_id, previous_id = state.get("active"), state.get("previous")
     selected = _valid_bundle(target_root, active_id, control)
     selected_id = active_id
     if selected is None:
@@ -623,6 +651,9 @@ def activate_component_overlay(
             })
             logger.warning("Rolled back invalid component overlay %r to %r", active_id, previous_id)
     if selected is None:
+        return None
+    if _bundled_downloader_is_newer(selected):
+        logger.info("Using the bundled downloader because it is newer than overlay %s", selected_id)
         return None
     selected_text = str(selected)
     if selected_text not in sys.path:

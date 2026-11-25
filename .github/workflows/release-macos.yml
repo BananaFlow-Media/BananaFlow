@@ -75,7 +75,8 @@ jobs:
       - name: Install runtime + build dependencies
         run: |
           python -m pip install --upgrade pip pyinstaller pytest pytest-mock
-          python -m pip install -r requirements.txt
+          python -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
+          python -m pip check
 
       - name: Install Playwright Python package + download Chromium to user cache
         run: |
@@ -180,6 +181,10 @@ jobs:
 
       - name: Generate exact native component SBOM
         run: python scripts/generate_sbom.py --out-dir dist
+
+      - name: Record packaged Python dependency freshness
+        run: |
+          python -m pip --isolated list --outdated --index-url https://pypi.org/simple --format=json > dist/python-dependency-freshness.json
 
       - name: Copy license/source notice docs into bundle (post-PyInstaller)
         # BananaFlow is GPL-3.0-or-later and this package bundles LGPL FFmpeg
@@ -293,6 +298,7 @@ jobs:
             dist/ffmpeg-source-bundle.tar.xz
             dist/sbom.cyclonedx.json
             dist/SBOM_INVENTORY.md
+            dist/python-dependency-freshness.json
           if-no-files-found: error
           retention-days: 60
 

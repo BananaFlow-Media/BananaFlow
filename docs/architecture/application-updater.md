@@ -9,6 +9,10 @@ component does not require downloading the whole application. Both paths require
 an explicit user decision before preparation and another explicit decision to
 restart; checking never authorizes installation or process termination.
 
+Packaged Settings can check both channels at once. Each check reports its own
+result, so one failed lookup cannot suppress a verified update from the other.
+The full release carries the built library and runtime set for that platform.
+
 ## Trust and artifact selection
 
 The full application updater accepts release metadata only from the exact
