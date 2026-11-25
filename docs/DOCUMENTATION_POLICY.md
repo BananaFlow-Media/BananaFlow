@@ -34,6 +34,11 @@ The purpose of this policy is to prevent documentation drift. Code, tests and af
 | Official website URL | `utils/website.py` (code), linked rather than retyped where practical |
 | Documentation ownership/lifecycle | this file |
 
+The downloader pin check compares the exact packaged requirement with the
+development pin for the release interpreter. An older supported source
+interpreter can keep a separate compatibility pin when upstream changes
+its Python requirement.
+
 ## Code → Documentation impact map
 
 Review every matching row. A path listed under **review** is satisfied when the
