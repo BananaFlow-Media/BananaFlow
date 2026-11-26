@@ -260,6 +260,8 @@ def test_previously_unmapped_sensitive_files_cannot_use_unrelated_markdown(monke
         "core/operation_manifest.py": "Tag Editor safety",
         "core/providers/musicbrainz_provider.py": "external metadata services",
         "core/artist_catalog.py": "URL/import catalogs",
+        "core/listing_scraper.py": "URL/import catalogs",
+        "core/output_layout.py": "downloader/reliability",
         "core/playlist_parser.py": "URL/import catalogs",
     }
     for path, expected_rule in cases.items():

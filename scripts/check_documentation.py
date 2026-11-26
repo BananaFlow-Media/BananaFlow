@@ -137,6 +137,7 @@ IMPACT_RULES = (
         (
             r"^error_handler\.py$",
             r"^core/downloader\.py$", r"^core/download_orchestrator\.py$",
+            r"^core/output_layout\.py$",
             r"^core/match_errors\.py$",
             r"^core/retry_policy\.py$", r"^core/youtube_reliability\.py$",
             r"^core/(?:hls_downloader|universal_extractor)\.py$",
@@ -180,7 +181,7 @@ IMPACT_RULES = (
     ),
     ImpactRule(
         "URL/import catalogs",
-        (r"^core/(?:artist_catalog|playlist_parser)\.py$",),
+        (r"^core/(?:artist_catalog|listing_scraper|playlist_parser)\.py$",),
         review_required=(
             "docs/user-guide/user-manual.md", "docs/user-guide/user-guide-he.md",
             "docs/architecture/overview.md", "PRIVACY.md",
