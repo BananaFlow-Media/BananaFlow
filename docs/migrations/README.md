@@ -44,3 +44,14 @@ The same additive release stores `filename_include_artist` in paused requests an
 - **Failure/interruption:** incomplete preparation does not replace live program files. Replacement transactions keep recovery state; interrupted directory replacement must preserve/restore the old installation. Windows installed upgrades use the existing Inno installer rather than claiming atomic directory rollback. Application profiles, history and downloaded media are not migration targets.
 
 See [`../architecture/application-updater.md`](../architecture/application-updater.md) for the trust and lifecycle contract.
+
+## Native tools and same-version maintenance
+
+- **Old state:** prepared application updates described application versions. The per-user downloader overlay covered the downloader pair.
+- **New state:** an optional `maintenance_revision` identifies a library rebuild in the existing application update record. Approved native tool updates create separate per-build state under `components/`.
+- **Trigger:** an approved preparation writes the new state. Existing prepared records keep revision zero, and earlier downloader records remain readable.
+- **Failure and recovery:** a stale or incompatible maintenance record cannot replace the running build. An invalid native tool uses the last authorized copy or the bundled tool. Settings, history and downloaded media keep their existing locations.
+
+See the [application updater](../architecture/application-updater.md) and
+[component updater](../architecture/secure-component-updater.md) for record
+selection and compatibility rules.
