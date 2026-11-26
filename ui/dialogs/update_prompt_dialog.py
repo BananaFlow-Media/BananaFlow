@@ -53,12 +53,15 @@ REMIND_CHOICES: tuple[tuple[str, Optional[float]], ...] = (
 def collect_update_ids(
     app_release: Optional[ReleaseInfo],
     component_updates: list[ComponentStatus],
+    maintenance_release: Optional[ReleaseInfo] = None,
 ) -> list[str]:
     """The exact update-state ids this prompt covers. Remind-later and
     skip-this-version apply to every id shown, individually."""
     ids: list[str] = []
     if app_release is not None:
         ids.append(app_update_id(app_release.version))
+    if maintenance_release is not None:
+        ids.append(app_update_id(maintenance_release.update_key))
     for status in component_updates:
         ids.append(component_update_id(status.key, status.latest_version))
     return ids
@@ -68,6 +71,7 @@ def build_update_prompt_text(
     app_release: Optional[ReleaseInfo],
     component_updates: list[ComponentStatus],
     frozen: bool,
+    maintenance_release: Optional[ReleaseInfo] = None,
 ) -> str:
     """Render both independently available update paths as translated text."""
     lines: list[str] = []
@@ -81,6 +85,12 @@ def build_update_prompt_text(
             lines.append(notes)
         lines.append("")
         lines.append(t("update_prompt_app_note"))
+        lines.append("")
+
+    if maintenance_release is not None:
+        lines.append(t("maintenance_update_line").format(
+            version=maintenance_release.version, revision=maintenance_release.maintenance_revision,
+        ))
         lines.append("")
 
     if component_updates:
@@ -110,13 +120,14 @@ class UpdatePromptDialog(StyledDialog):
         app_release: Optional[ReleaseInfo] = None,
         component_updates: Optional[list[ComponentStatus]] = None,
         parent=None, *, prepared_update=None, components_ready: bool = False,
-        retry_update: bool = False,
+        retry_update: bool = False, maintenance_release: Optional[ReleaseInfo] = None,
     ) -> None:
         super().__init__(parent, minimum_size=(440, 360), resize_to=(640, 520))
         self._store = store
         self._app_release = app_release
+        self._maintenance_release = maintenance_release
         self._component_updates = list(component_updates or [])
-        self._update_ids = collect_update_ids(app_release, self._component_updates)
+        self._update_ids = collect_update_ids(app_release, self._component_updates, maintenance_release)
         self._frozen = is_frozen()
         self._installing = False
         self._install_worker = None
@@ -127,7 +138,7 @@ class UpdatePromptDialog(StyledDialog):
         self._components_ready = components_ready
         self._retry_update = retry_update
         self._app_supported = False
-        if self._frozen and (app_release is not None or prepared_update is not None):
+        if self._frozen and any(value is not None for value in (app_release, maintenance_release, prepared_update)):
             self._app_supported = can_prepare_app_update()
         self.setWindowTitle(t("update_prompt_title"))
         self._build()
@@ -135,7 +146,7 @@ class UpdatePromptDialog(StyledDialog):
             self._show_components_ready()
         if self._prepared_update is not None:
             self._show_app_ready(self._prepared_update)
-        elif self._app_supported and self._app_release is not None:
+        elif self._app_supported and (self._app_release is not None or self._maintenance_release is not None):
             # Persisted downloads can be reused offline. Hashing is deliberately
             # not done in the constructor/on the GUI thread.
             self._start_app_worker(None)
@@ -148,7 +159,7 @@ class UpdatePromptDialog(StyledDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._body_lbl = BodyLabel(build_update_prompt_text(
-            self._app_release, self._component_updates, self._frozen,
+            self._app_release, self._component_updates, self._frozen, self._maintenance_release,
         ))
         self._body_lbl.setWordWrap(True)
         self._body_lbl.setTextFormat(Qt.TextFormat.PlainText)
@@ -166,7 +177,8 @@ class UpdatePromptDialog(StyledDialog):
         root.addWidget(self._progress)
 
         self._action_buttons = []
-        if self._app_release is not None or self._prepared_update is not None:
+        prepared_revision = getattr(self._prepared_update, "maintenance_revision", 0)
+        if self._app_release is not None or (self._prepared_update is not None and not prepared_revision):
             app_buttons = []
             website = make_button(t("update_get_app_btn"), "secondary")
             website.clicked.connect(self._on_get_app_update)
@@ -181,6 +193,12 @@ class UpdatePromptDialog(StyledDialog):
                 root.addWidget(unsupported)
             self._action_buttons.extend(app_buttons)
             root.addWidget(make_footer(*app_buttons))
+
+        if self._app_supported and (self._maintenance_release is not None or prepared_revision):
+            self._maintenance_action_btn = make_button(t("maintenance_update_download_btn"), "secondary")
+            self._maintenance_action_btn.clicked.connect(self._on_maintenance_action)
+            self._action_buttons.append(self._maintenance_action_btn)
+            root.addWidget(make_footer(self._maintenance_action_btn))
 
         # Independent component repair stays available even with a newer app.
         if self._component_updates and (self._frozen or can_update_in_place()):
@@ -257,7 +275,10 @@ class UpdatePromptDialog(StyledDialog):
         from ui.workers.component_install_worker import ComponentInstallWorker
         self._set_busy(True, t("component_install_running"))
         self._component_result = None
-        self._install_worker = ComponentInstallWorker(parent=self)
+        if any(status.key.startswith("runtime:") for status in self._component_updates):
+            self._install_worker = ComponentInstallWorker(parent=self, updates=tuple(self._component_updates))
+        else:
+            self._install_worker = ComponentInstallWorker(parent=self)
         self._install_worker.completed.connect(self._capture_component_result)
         # completed is emitted from run(), before QThread has really stopped.
         # Keep close/restart disabled until its actual finished signal.
@@ -280,6 +301,12 @@ class UpdatePromptDialog(StyledDialog):
                 self._show_app_ready(self._prepared_update)
             else:
                 self._status_lbl.hide()
+            failures = getattr(self._install_worker, "install_failures", ())
+            if failures:
+                self._status_lbl.setText(t("component_install_partial_msg").format(
+                    detail="\n".join(failures)[-400:],
+                ))
+                self._status_lbl.show()
             callback = getattr(self.parentWidget(), "_on_components_prepared", None)
             if callable(callback):
                 callback()
@@ -296,7 +323,7 @@ class UpdatePromptDialog(StyledDialog):
         self._component_ready_lbl.show()
         # The old instructions name a now-hidden component-install button.
         self._body_lbl.setText(build_update_prompt_text(
-            self._app_release, [], self._frozen,
+            self._app_release, [], self._frozen, self._maintenance_release,
         ))
         self._ready_choices()
         self._restart_btn.show()
@@ -308,10 +335,18 @@ class UpdatePromptDialog(StyledDialog):
     def _on_app_action(self) -> None:
         if self._installing:
             return
-        if self._prepared_update is not None:
+        if self._prepared_update is not None and not getattr(self._prepared_update, "maintenance_revision", 0):
             self._request_restart(self._prepared_update)
         elif self._app_release is not None:
             self._start_app_worker(self._app_release)
+
+    def _on_maintenance_action(self) -> None:
+        if self._installing:
+            return
+        if getattr(self._prepared_update, "maintenance_revision", 0):
+            self._request_restart(self._prepared_update)
+        elif self._maintenance_release is not None:
+            self._start_app_worker(self._maintenance_release)
 
     def _start_app_worker(self, release) -> None:
         from ui.workers.app_update_worker import AppUpdateWorker
@@ -342,7 +377,11 @@ class UpdatePromptDialog(StyledDialog):
         self._progress.hide()
         prepared, error = self._app_result or (None, "")
         # Do not offer a previous version's saved update for a newer release.
-        if prepared is not None and (self._app_release is None or prepared.version == self._app_release.version):
+        revision = getattr(prepared, "maintenance_revision", 0)
+        release = self._maintenance_release if revision else self._app_release
+        if prepared is not None and (
+            release is None or (prepared.version == release.version and revision == release.maintenance_revision)
+        ):
             self._show_app_ready(prepared)
             if getattr(self._app_worker, "update_status", {}).get("status") == "error":
                 self._status_lbl.setText(t("app_update_retry_msg"))
@@ -359,13 +398,20 @@ class UpdatePromptDialog(StyledDialog):
 
     def _show_app_ready(self, prepared) -> None:
         self._prepared_update = prepared
-        message = t("app_update_retry_msg") if self._retry_update else t("app_update_ready_msg").format(version=prepared.version)
+        revision = getattr(prepared, "maintenance_revision", 0)
+        ready_key = "maintenance_update_ready_msg" if revision else "app_update_ready_msg"
+        message = t("app_update_retry_msg") if self._retry_update else t(ready_key).format(
+            version=prepared.version, revision=revision,
+        )
         self._status_lbl.setText(message)
         self._status_lbl.show()
         self._ready_choices()
         button = getattr(self, "_app_action_btn", None)
         if button is not None:
-            button.setText(t("app_update_install_restart_btn"))
+            button.setText(t("app_update_download_btn" if revision else "app_update_install_restart_btn"))
+        button = getattr(self, "_maintenance_action_btn", None)
+        if button is not None:
+            button.setText(t("app_update_install_restart_btn" if revision else "maintenance_update_download_btn"))
 
     def _request_restart(self, prepared) -> None:
         if self._installing:

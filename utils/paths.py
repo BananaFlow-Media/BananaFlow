@@ -122,6 +122,11 @@ def get_bundled_ffmpeg_dir() -> Optional[Path]:
     ``ffprobe.exe`` are present, otherwise ``None`` so yt-dlp falls
     back to PATH.
     """
+    if is_frozen():
+        from core.tool_updates import active_tool_dir
+        updated = active_tool_dir("ffmpeg")
+        if updated is not None:
+            return updated
     install = get_install_dir()
     candidates = [
         install,                  # next to bananaflow.exe (frozen install)

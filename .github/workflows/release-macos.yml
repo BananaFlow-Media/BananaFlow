@@ -90,7 +90,9 @@ jobs:
         id: ver
         run: |
           v=$(python -c "from version import FULL_VERSION; print(FULL_VERSION)")
+          revision=$(python -c "from version import MAINTENANCE_REVISION; print(MAINTENANCE_REVISION)")
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "maintenance_revision=$revision" >> "$GITHUB_OUTPUT"
           echo "App version: $v"
 
       - name: Verify the tag matches the application version
@@ -102,6 +104,10 @@ jobs:
         run: |
           tag="${{ github.ref_name }}"
           expected="v${{ steps.ver.outputs.version }}"
+          if [ "${{ steps.ver.outputs.maintenance_revision }}" != "0" ]; then
+            echo "Build maintenance revisions with workflow_dispatch. Regular release tags require revision zero." >&2
+            exit 1
+          fi
           if [ "$tag" != "$expected" ]; then
             echo "Tag '$tag' does not match version.FULL_VERSION ('${{ steps.ver.outputs.version }}'); it would ship artifacts named $expected." >&2
             exit 1
@@ -237,6 +243,11 @@ jobs:
         run: |
           cli="dist/BananaFlow.app/Contents/MacOS/bananaflow-cli"
           reported=$("$cli" --version)
+          revision=$("$cli" --maintenance-revision)
+          if [ "$revision" != "${{ steps.ver.outputs.maintenance_revision }}" ]; then
+            echo "Packaged CLI reports the wrong maintenance revision: $revision" >&2
+            exit 1
+          fi
           echo "CLI reports: $reported"
           case "$reported" in
             *"${{ steps.ver.outputs.version }}"*) : ;;

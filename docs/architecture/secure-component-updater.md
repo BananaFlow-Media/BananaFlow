@@ -75,6 +75,29 @@ The authenticated control plane can disable the whole channel or revoke individu
 - The Windows and macOS release workflows also build full Actions release candidates for a reviewed pin change. They do not create or publish an application release without the existing tag/human release process.
 - Installation remains an explicit user action. A successful update requires a restart. The success UI offers an explicit restart or later choice, and component updates remain independently accessible when a full application release is also available. Restart must respect active work and shutdown ownership; it must not bypass the normal safety checks.
 
+## Native runtime packages
+
+FFmpeg and FFprobe ship together. Deno has its own package. Native runtime
+packages use the official `runtime-channel-v<version>-r<maintenance>`
+prerelease and an exact platform, tool and revision in each asset name.
+Both discovery and preparation verify the official asset metadata. Preparation
+streams the archive to a private staging directory, checks size and digest,
+accepts only the expected executable names and license files, preserves
+Internet origin markers and runs the tools' version checks. Maintainers
+exercise the relevant conversion and download workflows on native systems
+before publishing the package.
+
+The runtime directory under `components/` is scoped to the exact application
+version, maintenance revision and platform. Its atomic per-tool record holds
+the current and prior selections. A new process verifies executable size and
+digest and consults a cached record of the official asset names and digests.
+The cache expires after 24 hours. A withdrawn asset, changed digest, corrupt
+executable or unavailable expired record causes fallback to an authorized
+previous selection or to the bundled runtime. GUI and CLI resolve both
+tools from their process-lifetime selection. GUI startup verifies native
+tools on a worker while the splash remains responsive. GUI and CLI also
+activate the downloader overlay through the existing v1 channel.
+
 ## Change rule
 
 Any change to this updater is security-sensitive. It requires threat-model, privacy/network, supply-chain, release, user-guide and test review in the same change. Do not weaken repository identity, API asset-digest, compatibility, revocation/control freshness, bounded-download, safe-unpack, isolated-health-check, atomic-selection or rollback checks.

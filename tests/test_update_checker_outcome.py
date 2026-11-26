@@ -76,6 +76,15 @@ class TestCheckDetailed:
         ).check_detailed()
         assert outcome.status == "up_to_date"
 
+    def test_component_and_maintenance_channels_do_not_mask_app_prereleases(self):
+        outcome = _checker_returning([
+            _release_json("maintenance-v1.2.3", prerelease=True),
+            _release_json("runtime-channel-v1.2.3-r0", prerelease=True),
+            _release_json("component-channel-v1", prerelease=True),
+            _release_json("v99.0.0-beta.1", prerelease=True),
+        ]).check_detailed(include_prereleases=True)
+        assert outcome.release.version == "99.0.0-beta.1"
+
     def test_network_failure_is_error(self):
         outcome = _checker_raising(httpx.ConnectError("offline")).check_detailed()
         assert outcome.status == "error"

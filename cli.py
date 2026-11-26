@@ -204,7 +204,7 @@ class TerminalCallbacks:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
-    from version import FULL_VERSION, PRODUCT_NAME
+    from version import FULL_VERSION, MAINTENANCE_REVISION, PRODUCT_NAME
     from utils.website import site_url
 
     p = argparse.ArgumentParser(
@@ -233,6 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
         # here would fail the release gate. The website is advertised in
         # --help and in the --doctor header instead.
         version=f"%(prog)s {FULL_VERSION}",
+    )
+    p.add_argument(
+        "--maintenance-revision", action="version",
+        version=str(MAINTENANCE_REVISION), help=argparse.SUPPRESS,
     )
     p.add_argument(
         "--doctor",
@@ -420,9 +424,19 @@ def main() -> int:
     setup_logging(debug=args.debug)
     logger = logging.getLogger("cli")
 
+    from utils.paths import is_frozen
+    if is_frozen():
+        try:
+            from core.component_overlay import activate_component_overlay
+            activate_component_overlay()
+        except Exception:
+            logger.warning("Downloader overlay activation failed (using bundled components)", exc_info=True)
+
     # Activate downloader components bundled with this build (PO Token
     # Provider plugin + JS runtime) before any yt-dlp use or doctor run.
     try:
+        from core.tool_updates import activate_tool_overlays
+        activate_tool_overlays()
         from core.runtime_components import activate_bundled_components
         activate_bundled_components()
     except Exception:

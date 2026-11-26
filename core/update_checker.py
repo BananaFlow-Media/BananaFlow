@@ -100,6 +100,13 @@ class ReleaseInfo:
     # the exact official tag and authenticates its asset size/digest again.
     tag_name:      str = ""
     assets:        tuple[dict, ...] = field(default_factory=tuple)
+    maintenance_revision: int = 0
+
+    @property
+    def update_key(self) -> str:
+        if self.maintenance_revision:
+            return f"{self.version}+maintenance.{self.maintenance_revision}"
+        return self.version
 
     def short_notes(self, max_chars: int = 400) -> str:
         """
@@ -271,8 +278,12 @@ class UpdateChecker:
         """
         try:
             if include_prereleases:
-                releases = self._fetch_all_releases()
-                release = releases[0] if releases else None
+                release = next(
+                    (entry for entry in self._fetch_all_releases()
+                     if isinstance(entry, dict) and not str(entry.get("tag_name", "")).startswith(
+                         ("maintenance-v", "runtime-channel-", "component-channel-"))),
+                    None,
+                )
             else:
                 release = self._fetch_latest_release()
         except Exception:

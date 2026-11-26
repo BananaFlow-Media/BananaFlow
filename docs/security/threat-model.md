@@ -63,6 +63,8 @@ This threat model focuses on security properties of the desktop application and 
 - Bundled components are staged through reviewed scripts and documented with source/license/version information.
 - Independently downloaded `yt-dlp` / `yt-dlp-ejs` updates are accepted only from the exact official GitHub component-channel release, after GitHub asset digest/size verification, manifest/bundle agreement, compatibility and bounded safe-unpack checks. A fresh authenticated control record can disable the channel or revoke a bundle; an expired record must refresh successfully before an overlay is reused.
 - Packaged update discovery validates the same manifest and official bundle asset metadata used for installation. It downloads no executable bundle until the user approves.
+- Runtime overlays use official platform- and build-specific assets. Only the fixed executable names and license documents can be extracted. Each executable is marked as an Internet download, exercised before selection and reverified on startup against the local receipt and current official asset authorization.
+- An application maintenance rebuild is eligible only for the same application version and a greater compiled revision. It uses the existing exact package selection and explicit application replacement path. Standard release discovery excludes maintenance and runtime channels.
 - A prepared overlay is health-checked in a separate process and atomically selected only for the next launch; the previous valid selection is retained for fallback and a failed/interrupted preparation cannot change the active pointer.
 
 ## Important residual risks

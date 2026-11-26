@@ -44,7 +44,7 @@ HERE = Path(SPECPATH).resolve()                 # packaging/
 ROOT = HERE.parent                              # repo root
 
 sys.path.insert(0, str(ROOT))                   # so version.py imports
-from version import __version__, PRODUCT_NAME   # noqa: E402
+from version import __version__, PRODUCT_NAME, WINDOWS_RUNTIME_DIR   # noqa: E402
 
 # ── Hidden imports + data ──────────────────────────────────────────────────
 # qfluentwidgets ships QSS / SVG resources via a generated Qt resource
@@ -297,6 +297,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='bananaflow',
+    contents_directory=WINDOWS_RUNTIME_DIR if IS_WIN else '_internal',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -338,6 +339,7 @@ cli_exe = EXE(
     [],
     exclude_binaries=True,
     name='bananaflow-cli',
+    contents_directory=WINDOWS_RUNTIME_DIR if IS_WIN else '_internal',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

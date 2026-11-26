@@ -1016,12 +1016,18 @@ class SettingsPanel(QWidget):
             component_updates = report.updates
             check_failed = check_failed or not report.all_checks_ok
 
+        maintenance_release = None
+        if results.maintenance is not None:
+            check_failed = check_failed or results.maintenance.status == "error"
+            if results.maintenance.update_available:
+                maintenance_release = results.maintenance.release
+
         if check_failed:
             self._show_update_infobar(
                 "warning", t("update_check_failed_title"), t("update_check_failed_msg"),
             )
 
-        if app_release is None and not component_updates:
+        if app_release is None and not component_updates and maintenance_release is None:
             if check_failed:
                 return
             # Everything the user asked about is current.
@@ -1044,10 +1050,14 @@ class SettingsPanel(QWidget):
         window = self.window()
         show_prompt = getattr(window, "show_update_prompt", None)
         if callable(show_prompt):
-            show_prompt(app_release, component_updates)
+            if maintenance_release is None:
+                show_prompt(app_release, component_updates)
+            else:
+                show_prompt(app_release, component_updates, maintenance_release=maintenance_release)
         else:
             UpdatePromptDialog(
                 UpdateStateStore(), app_release, component_updates, parent=window,
+                maintenance_release=maintenance_release,
             ).exec()
 
     def _show_update_infobar(self, kind: str, title: str, content: str) -> None:

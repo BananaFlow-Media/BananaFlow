@@ -107,7 +107,8 @@ Data + services: `history_db.py` (SQLite + FTS5), `queue_persistence.py`,
 
 Reliability + updates: `youtube_doctor.py`, `warning_classifier.py`,
 `runtime_components.py` (bundled PO Token Provider / JS runtime),
-`update_checker.py` (GitHub releases), `component_updates.py` (PyPI),
+`update_checker.py` (GitHub releases), `component_updates.py` (PyPI and the downloader channel),
+`tool_updates.py` (verified per-build native runtime packages),
 `app_updates.py` (verified full-app preparation and persisted ready state),
 `app_update_helper.py` (standalone platform replacement/relaunch),
 `update_state.py`, `cookie_wizard.py`.

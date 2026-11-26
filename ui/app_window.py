@@ -328,6 +328,7 @@ class AppWindow(FluentWindow):
         self._restart_launched = False
         self._shutdown_accepted = False
         self._prepared_app_update = None
+        self._last_maintenance_release = None
         self._prepared_update_retry = False
         self._components_restart_ready = False
         self._last_update_release = None
@@ -2477,31 +2478,49 @@ class AppWindow(FluentWindow):
                 )
             ]
 
-        if app_release is None and not component_updates:
-            return
-        self.show_update_prompt(app_release, component_updates)
+        maintenance_release = None
+        if results.maintenance is not None and results.maintenance.update_available:
+            release = results.maintenance.release
+            if store.should_notify(app_update_id(release.update_key)):
+                maintenance_release = release
 
-    def show_update_prompt(self, app_release=None, component_updates=None) -> None:
+        if app_release is None and not component_updates and maintenance_release is None:
+            return
+        if maintenance_release is None:
+            self.show_update_prompt(app_release, component_updates)
+        else:
+            self.show_update_prompt(app_release, component_updates, maintenance_release=maintenance_release)
+
+    def show_update_prompt(self, app_release=None, component_updates=None, *, maintenance_release=None) -> None:
         self._last_update_release = app_release
         self._last_component_updates = list(component_updates or [])
+        self._last_maintenance_release = maintenance_release
         self._refresh_update_affordance()
         prepared = self._prepared_app_update
-        if app_release is not None and prepared is not None and prepared.version != app_release.version:
-            prepared = None
+        if prepared is not None:
+            revision = getattr(prepared, "maintenance_revision", 0)
+            candidate = maintenance_release if revision else app_release
+            if candidate is not None and (candidate.version, candidate.maintenance_revision) != (prepared.version, revision):
+                prepared = None
         UpdatePromptDialog(
             UpdateStateStore(), app_release, component_updates, parent=self,
             prepared_update=prepared, components_ready=self._components_restart_ready,
-            retry_update=self._prepared_update_retry,
+            retry_update=self._prepared_update_retry, maintenance_release=maintenance_release,
         ).exec()
 
     def _show_available_updates(self) -> None:
-        self.show_update_prompt(self._last_update_release, self._last_component_updates)
+        self.show_update_prompt(
+            self._last_update_release, self._last_component_updates,
+            maintenance_release=self._last_maintenance_release,
+        )
 
     def _refresh_update_affordance(self) -> None:
         ready = self._prepared_app_update is not None or self._components_restart_ready
         self._update_available_btn.setText(t("update_ready_btn") if ready else t("update_available_btn"))
         self._update_available_btn.setAccessibleName(self._update_available_btn.text())
-        self._update_available_btn.setVisible(bool(ready or self._last_update_release or self._last_component_updates))
+        self._update_available_btn.setVisible(bool(
+            ready or self._last_update_release or self._last_component_updates or self._last_maintenance_release
+        ))
 
     def _on_updates_deferred(self, update_ids) -> None:
         # Remind/Skip should also dismiss this session's badge, while an
@@ -2509,6 +2528,9 @@ class AppWindow(FluentWindow):
         release = self._last_update_release
         if release is not None and app_update_id(release.version) in update_ids:
             self._last_update_release = None
+        release = self._last_maintenance_release
+        if release is not None and app_update_id(release.update_key) in update_ids:
+            self._last_maintenance_release = None
         self._last_component_updates = [
             component for component in self._last_component_updates
             if component_update_id(component.key, component.latest_version) not in update_ids

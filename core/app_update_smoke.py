@@ -62,12 +62,13 @@ def configure_smoke_environment(result_path: Path) -> dict:
 def snapshot() -> dict:
     from config import AppConfig
     from utils.paths import get_app_data_dir
-    from version import FULL_VERSION
+    from version import FULL_VERSION, MAINTENANCE_REVISION
 
     config = AppConfig()
     profile = get_app_data_dir().resolve()
     return {
         "version": FULL_VERSION,
+        "maintenance_revision": MAINTENANCE_REVISION,
         "executable": str(Path(sys.executable).resolve()),
         "pid": os.getpid(),
         "profile": str(profile),
@@ -94,6 +95,9 @@ def report_relaunch(result_path: Path) -> int:
         result["ok"] = (
             bool(getattr(sys, "frozen", False))
             and result["version"] == request.get("expected_relaunch_version", request["new_version"])
+            and result.get("maintenance_revision", 0) == request.get(
+                "expected_relaunch_revision", request.get("new_maintenance_revision", 0),
+            )
             and result["profile"] == request["profile"]
             and result["gui"].get("ok", False)
         )
@@ -161,6 +165,8 @@ def _run_update_smoke(request_path: Path, request: dict) -> int:
         "executable": support.executable, "install_mode": support.install_mode,
         "helper": str(helper),
     }
+    if request.get("new_maintenance_revision"):
+        state["maintenance_revision"] = request["new_maintenance_revision"]
     atomic_json(work / "prepared.json", state)
     atomic_json(update_root / "prepared.json", {"schema": 1, "directory": work.name})
     phase("verifying-prepared-state")
