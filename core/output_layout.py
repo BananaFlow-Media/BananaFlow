@@ -75,7 +75,8 @@ class OutputLayoutDecision:
         parts.append(self.collection_folder)
         if self.disc_number:
             parts.append(disc_label(self.disc_number))
-        return "/".join(_dedupe(parts))
+        # Only the separators that join semantic parts should create folders.
+        return "/".join(part.replace("/", "-").replace("\\", "-") for part in _dedupe(parts))
 
 
 def decide_output_layout(

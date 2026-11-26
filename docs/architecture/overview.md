@@ -87,6 +87,14 @@ Filename numbering is provider-neutral and lives in `core.filename_numbering`. C
 
 Physical folder and filename-body decisions live in `core.output_layout`. `TrackMeta.collection_title` carries the identity of the source playlist/album/release separately from the member track's `album` tag. This prevents Spotify/YTM extraction variants from routing the same direct playlist by track artist or underlying album. The policy also owns artist/category/release hierarchy, collision-safe `Artist - Title` bodies for direct songs and compilations, and per-disc subfolders based on provider `disc_number`/`disc_total` metadata or the complete selected release. The GUI only localizes semantic category/disc segments; it does not contain a second folder policy. Queue persistence carries the collection/disc context, while paused requests persist the already-rendered destination folder and filename-body decision.
 
+The parser stamps the extracted collection identity on tracks before emitting them.
+An opaque redirect can become a playlist once yt-dlp identifies it, and the
+ordered flat playlist supplies positions when explicit provider positions are
+absent. Generic listing fallbacks also emit playlist identity before download
+routing. A direct stream interception produces a single-video result.
+Rendering replaces slashes inside each name before it joins the artist,
+category, collection and disc segments.
+
 Download recovery is process-wide and Qt-free in `core.download_recovery`. Admission has separate rate-limit, systemic-failure and conservative-cadence gates. Ordinary terminal track failures never close process-wide admission: the controller snapshots each failed request at a clean retry boundary and aggregates equivalent errors into a live UI incident. Authentication/cookie, bot-challenge and connectivity scopes close only at three consecutive terminal failures; a successful completed track resets a scope that has not yet closed. Missing local prerequisites close immediately. Resolving an incident resets its scope, and Retry creates fresh requests for every collected key with current cookie settings and rebuilt lazy Spotify resolvers.
 
 A zero-result incident also supports explicit source repair. The UI serializes one failed Spotify row at a time into the existing YouTube search surface. Selecting a track validates that it is a single YouTube/YouTube Music item, replaces only the request URL and disables automatic re-resolution for that retry. Selected rows are staged and then submitted through one bounded retry worker instead of starting an independent worker per click. Forced Spotify title/artist/album, numbering and output-routing fields remain unchanged. Stopping source selection submits the choices already made and returns to the unresolved aggregate incident; weak candidates are never accepted without the user's action.

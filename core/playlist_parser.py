@@ -520,9 +520,9 @@ class PlaylistParser:
                 spotify_key_kind=track_data.get("spotify_key_kind", "spotify_id"),
                 match_status=match_status,
                 resolution_error=track_data.get("resolution_error", ""),
-                platform=platform,
-                source_kind=kind.name,
-                source_url=url,
+                platform=result.platform,
+                source_kind=result.kind.name,
+                source_url=result.url,
                 selected=match_status not in ("metadata_invalid", "unresolved"),
             )
             result.tracks.append(track)
@@ -614,14 +614,19 @@ class PlaylistParser:
                     self._notify(on_progress, "Trying paginated listing scraper…")
                     try:
                         from core.listing_scraper import scrape_listing_page
+
+                        def _on_listing_item(track_data: dict) -> None:
+                            result.kind = UrlKind.PLAYLIST
+                            _on_scraper_item(track_data)
+
                         title, _ = scrape_listing_page(
                             url,
-                            on_item=_on_scraper_item,
+                            on_item=_on_listing_item,
                             cancel_check=lambda: self._cancel.is_set(),
                         )
                         if result.tracks:
                             result.playlist_title = title
-                            result.kind = UrlKind.PLAYLIST
+                            result.error = ""
                     except Exception:
                         pass
                 # Final fallback: Playwright stream interception (single video pages)
@@ -636,7 +641,10 @@ class PlaylistParser:
 
             if result.total_count == 0:
                 result.total_count = len(result.tracks)
-            if result.total_count == 1 and result.tracks:
+            if (
+                result.total_count == 1 and result.tracks
+                and result.kind in {UrlKind.SINGLE_VIDEO, UrlKind.UNKNOWN}
+            ):
                 result.playlist_title = result.tracks[0].title
             
             self._notify(on_progress, f"Successfully resolved {result.total_count} items.")
@@ -782,15 +790,34 @@ class PlaylistParser:
 
             entries = info.get("entries") if isinstance(info, dict) else None
             if entries:
+                if result.kind is UrlKind.UNKNOWN and info.get("_type") == "playlist":
+                    result.kind = UrlKind.PLAYLIST
+                    # Redirects can hide the playlist until yt-dlp resolves it.
+                    canonical_url = info.get("webpage_url")
+                    if isinstance(canonical_url, str):
+                        try:
+                            canonical = urlparse(canonical_url)
+                            if canonical.scheme in {"http", "https"} and host_matches_domain(
+                                canonical.hostname or "", "youtube.com", "youtu.be",
+                            ):
+                                result.platform, _ = classify_url(canonical_url)
+                                result.url = canonical_url
+                        except ValueError:
+                            pass
                 playlist_title = info.get("title") or info.get("playlist_title") or "Unknown Playlist"
                 result.playlist_title = playlist_title
-                for idx, entry in enumerate((e for e in entries if e), start=1):
+                for position, entry in enumerate(entries, start=1):
+                    if not entry:
+                        continue
                     if self._cancel.is_set():
                         result.cancelled = True
                         break
-                    track = _entry_to_track(entry, idx, platform=platform, album=playlist_title)
-                    track.source_kind = kind.name
-                    track.source_url = url
+                    idx = len(result.tracks) + 1
+                    track = _entry_to_track(entry, idx, platform=result.platform, album=playlist_title)
+                    if result.kind is UrlKind.PLAYLIST and not track.album_index:
+                        track.album_index = position
+                    track.source_kind = result.kind.name
+                    track.source_url = result.url
                     result.tracks.append(track)
                     if on_item:
                         on_item(track, idx, len(entries))
@@ -867,6 +894,7 @@ class PlaylistParser:
                 or url
             )
             result.playlist_title = playlist_title
+            result.kind = UrlKind.PLAYLIST
 
             for idx, link in enumerate(links, start=1):
                 if self._cancel.is_set():
@@ -877,13 +905,15 @@ class PlaylistParser:
                     url=link["url"],
                     title=link["title"] or f"Video {idx}",
                     artist="",
+                    album_index=idx,
+                    collection_title=playlist_title,
                     thumbnail_url=link.get("thumbnail_url", ""),
                     platform=SourcePlatform.GENERIC,
                     # 'stream_intercept' tells the downloader to open this video
                     # page and intercept its HLS/DASH stream at download time.
                     category="stream_intercept",
-                    source_kind=kind.name,
-                    source_url=url,
+                    source_kind=result.kind.name,
+                    source_url=result.url,
                 )
                 result.tracks.append(track)
                 if on_item:
@@ -893,6 +923,8 @@ class PlaylistParser:
                         pass
 
             result.total_count = len(result.tracks)
+            if result.tracks:
+                result.error = ""
             return result
 
         # ── Step 2: Direct stream interception (single video page) ────────────
@@ -927,6 +959,7 @@ class PlaylistParser:
             page_title = parsed2.path.split("/")[-1] or parsed2.netloc or url
 
         result.playlist_title = page_title
+        result.kind = UrlKind.SINGLE_VIDEO
 
         for idx, stream in enumerate(streams, start=1):
             if self._cancel.is_set():
@@ -941,8 +974,8 @@ class PlaylistParser:
                 # Carry the stream type in the category field so DownloadRequest
                 # can route to the correct downloader without a schema change.
                 category=f"stream:{stream.stream_type}",
-                source_kind=kind.name,
-                source_url=url,
+                source_kind=result.kind.name,
+                source_url=result.url,
             )
             result.tracks.append(track)
             if on_item:
@@ -952,6 +985,8 @@ class PlaylistParser:
                     pass
 
         result.total_count = len(result.tracks)
+        if result.tracks:
+            result.error = ""
         return result
 
     # ── Utility ────────────────────────────────────────────────────────────────

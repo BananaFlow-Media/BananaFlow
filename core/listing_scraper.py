@@ -288,6 +288,8 @@ def scrape_listing_page(
                             "duration_sec": duration_sec if duration_sec else None,
                             "artist": "",
                             "album": playlist_title,
+                            "collection_title": playlist_title,
+                            "album_index": len(items) + 1,
                             "platform": "generic",
                             # At download time, open this video page and intercept its stream
                             "category": "stream_intercept",
