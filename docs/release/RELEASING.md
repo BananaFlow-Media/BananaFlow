@@ -70,6 +70,7 @@ Then explicitly verify:
 - Ensure no generated/staged binary was accidentally committed.
 - Verify required license/source bundle files are packaged.
 - Stage Windows FFmpeg from the exact retained pin in `packaging/ffmpeg-windows.json`; inspect architecture/license/codecs after extraction. Preserve its LGPLv3 notice rather than labeling it with the native macOS recipe's LGPLv2.1 license.
+- Verify the frozen Windows `pot-provider/` directory includes the upstream license, server script and production modules. Its shorter path accommodates the revision-specific runtime directory and Inno Setup's file path limit.
 - Build macOS arm64 FFmpeg from `packaging/ffmpeg-macos-sources.json` with `scripts/build_ffmpeg_macos.py`; retain the verified source bundle, configure/license/architecture evidence and codec smoke outputs. Do not reuse the former Intel/GPL evermeet binary as native LGPL input.
 - Generate/verify SBOM and checksum assets.
 

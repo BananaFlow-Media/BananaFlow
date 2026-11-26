@@ -183,8 +183,9 @@ jobs:
             "runtime\deno.exe",
             "yt-dlp-plugins\bgutil-ytdlp-pot-provider\yt_dlp_plugins\extractor\getpot_bgutil.py",
             "yt-dlp-plugins\bgutil-ytdlp-pot-provider\yt_dlp_plugins\extractor\getpot_bgutil_script.py",
-            "pot-provider-backend\bgutil-ytdlp-pot-provider\server\src\generate_once.ts",
-            "pot-provider-backend\bgutil-ytdlp-pot-provider\server\node_modules"
+            "pot-provider\LICENSE",
+            "pot-provider\server\src\generate_once.ts",
+            "pot-provider\server\node_modules"
           )
           $searchDirs = @($dist, (Join-Path $dist '${{ steps.ver.outputs.runtime_dir }}'))
           foreach ($rel in $relative) {

@@ -246,6 +246,7 @@ def test_packaging_bundles_full_po_provider_backend_inputs():
     assert 'pip install "bgutil-ytdlp-pot-provider==2.0.2"' in build_script
     assert "Staging PO Token Provider plugin and Deno script backend" in build_script
     assert "PO Token Provider staging failed" in build_script
+    assert "_stage_tree(HERE / 'pot-provider-backend' / 'bgutil-ytdlp-pot-provider', 'pot-provider')" in spec
     assert "_stage_tree(HERE / 'pot-provider-backend', 'pot-provider-backend')" in spec
 
 

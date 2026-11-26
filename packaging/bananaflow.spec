@@ -217,7 +217,12 @@ def _stage_tree(src_root: Path, dest_prefix: str) -> list[tuple[str, str]]:
 
 datas += _stage_tree(HERE / 'yt-dlp-plugins', 'yt-dlp-plugins')
 datas += _stage_tree(HERE / 'runtime', 'runtime')
-datas += _stage_tree(HERE / 'pot-provider-backend', 'pot-provider-backend')
+if IS_WIN:
+    # Deep node_modules paths must fit when Inno Setup installs into a
+    # revision-specific runtime directory under a user's chosen location.
+    datas += _stage_tree(HERE / 'pot-provider-backend' / 'bgutil-ytdlp-pot-provider', 'pot-provider')
+else:
+    datas += _stage_tree(HERE / 'pot-provider-backend', 'pot-provider-backend')
 
 # The app's own custom icons. ui.app_window.CustomIcon loads an SVG at
 # runtime from a path built off ui/app_window.py's __file__
