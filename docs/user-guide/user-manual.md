@@ -175,17 +175,19 @@ You normally do not need to understand the implementation behind those checks â€
 
 ## 13. Updates
 
-When update checks are enabled, BananaFlow checks for a newer official application release and for downloader updates available for that installation. Checking does not install anything.
+When update checks are enabled, BananaFlow checks at launch. Installation requires your approval.
 
-In a packaged build, **Check for App and Component Updates** in Settings checks both channels at once. A full application update carries its bundled libraries and runtimes, including FFmpeg and the browser/runtime components shipped for that platform. Independently installable downloader updates are available as a separate action.
+In a packaged build, **Check for App and Component Updates** in Settings checks for a new application version, separate component updates, and maintenance packages for the version you already have. BananaFlow offers published packages that match your platform and build.
 
-### Update downloader components without reinstalling BananaFlow
+### Update components and libraries for your current version
 
-**Update Components** is available independently of a full application update. In a packaged build it downloads the reviewed `yt-dlp` / `yt-dlp-ejs` pair from BananaFlow's official GitHub component channel, verifies its size, SHA-256 and compatibility, and health-checks it in a separate process. It prepares a per-user overlay without rewriting the installed application. The previous valid bundle remains available for fallback. After approval, a small public safety record is refreshed at most daily before reusing the overlay; an unsafe bundle is not activated.
+**Update Components** can prepare the reviewed `yt-dlp` / `yt-dlp-ejs` pair, FFmpeg and FFprobe together, and Deno when a compatible package is available. BananaFlow verifies each package from its official GitHub channel and tests it before preparing it in your user data. The next launch selects the prepared components. The previous verified component or the bundled copy remains available if a package fails or is withdrawn.
 
-Packaged builds also check that official channel for updates. Once the installed pair is active after restart, BananaFlow stops offering the same update. If a full application upgrade includes a newer downloader than the saved overlay, BananaFlow uses the newer bundled downloader.
+**Download Maintenance Update** prepares a tested rebuild with updated internal libraries and runtimes, which can include Python, Qt, Playwright and its matching browser. The package keeps the same BananaFlow version and has a numbered maintenance revision. Choose **Install and restart** to apply it. A version must support maintenance updates and have a package published for its platform and installation type.
 
-In a source environment the component button runs the documented pip upgrade in that environment. After successful preparation, choose **Restart now** to use the new components, or continue working and restart later. The running process keeps its current components until it exits. This path updates the downloader pair, not every bundled runtime; other bundled components arrive with a full application release.
+Once the installed components or maintenance revision are active after restart, BananaFlow stops offering that update. If a full application upgrade includes a newer downloader than the saved overlay, BananaFlow uses the newer bundled downloader.
+
+For a source install, **Update Components** runs the documented pip upgrade of the downloader pair in that environment. After successful preparation, choose **Restart now** to use the prepared components or continue working and restart later. The running process keeps its current components until it exits.
 
 If both updates are ready, the component-ready explanation remains separate: **Restart now** activates the components without installing the saved application update. Choose **Install and restart** instead when you also want to apply that application update.
 

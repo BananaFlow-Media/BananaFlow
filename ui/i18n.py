@@ -326,7 +326,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "check_all_updates_title": "Check for App and Component Updates",
         "check_all_updates_desc": (
-            "Check for a full release and for downloader updates available separately"
+            "Check for component updates, maintenance packages and new app versions"
         ),
         "check_component_updates_title": "Check for Component Updates",
         "check_component_updates_desc": (
@@ -339,7 +339,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "up_to_date_title": "You're up to date",
         "app_up_to_date_msg": "BananaFlow {version} is the latest released version.",
-        "all_updates_current_msg": "BananaFlow {version} and its downloader are up to date on the official channels.",
+        "all_updates_current_msg": "BananaFlow {version} and its components are up to date on the official channels.",
         "components_up_to_date_msg": "All components are current:  {versions}",
 
         "update_prompt_title": "Updates Available",
@@ -354,7 +354,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "This update also includes updated downloader components "
             "({names}) — updating BananaFlow is all you need to do."
         ),
-        "update_prompt_components_heading": "Outdated downloader components:",
+        "update_prompt_components_heading": "Component updates",
         "update_prompt_component_line": "{name}:  {cur}  →  {new}",
         "update_prompt_component_note": (
             "You are running BananaFlow from source, so components can be updated "
@@ -365,12 +365,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "most common cause of failing YouTube downloads."
         ),
         "update_prompt_frozen_note": (
-            "This installed build can update its downloader components separately. "
-            "Choosing “Update Components” downloads a reviewed bundle from the "
-            "official BananaFlow repository, verifies its exact size and SHA-256, "
-            "health-checks it in a separate process, and prepares it in per-user "
-            "app data. It becomes active only after BananaFlow restarts; the "
-            "installed application files are not rewritten."
+            "Update Components prepares the listed packages from the official BananaFlow channel. "
+            "BananaFlow verifies and tests the packages before they take effect after a restart."
         ),
         "update_get_app_btn": "Open Download Page",
         "update_components_btn": "Update Components",
@@ -391,6 +387,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         'app_update_downloading': 'Downloading and verifying the application update…',
         'app_update_download_progress': 'Downloading update: {done} / {total} MB. Verification follows.',
         'app_update_ready_msg': 'Version {version} is downloaded and verified. Choose Install and restart when you are ready, or Later to keep working. The saved update remains available.',
+        "maintenance_update_line": "A library maintenance update is available for BananaFlow {version} (revision {revision}). It keeps the same app version and requires a restart.",
+        "maintenance_update_download_btn": "Download Maintenance Update",
+        "maintenance_update_ready_msg": "Maintenance revision {revision} for BananaFlow {version} is verified and ready to install.",
+        "component_install_partial_msg": "Some components are ready. These updates could not be prepared: {detail}",
         'app_update_retry_msg': 'The previous update could not be completed. The saved update is available to retry with Install and restart. You can also use the official download page.',
         'app_update_failed_msg': 'The application update could not be prepared. Your installed application has not been replaced. Try again or use the official download page. Technical details are in the log.',
         'restart_busy_downloads': 'Downloads are still running. Finish or pause them first, then choose Restart now again. The update remains ready.',
@@ -1865,7 +1865,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "check_all_updates_title": "בדוק עדכוני אפליקציה ורכיבים",
         "check_all_updates_desc": (
-            "בדיקה אם קיימים עדכון מלא או עדכונים נפרדים לרכיבי ההורדה"
+            "בדיקת עדכוני רכיבים, חבילות תחזוקה וגרסאות חדשות של האפליקציה"
         ),
         "check_component_updates_title": "בדוק עדכוני רכיבים",
         "check_component_updates_desc": (
@@ -1878,7 +1878,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "up_to_date_title": "הכל מעודכן",
         "app_up_to_date_msg": "BananaFlow {version} היא הגרסה האחרונה שפורסמה.",
-        "all_updates_current_msg": "BananaFlow {version} ורכיב ההורדה שלה מעודכנים לפי הערוצים הרשמיים.",
+        "all_updates_current_msg": "BananaFlow {version} ורכיביה מעודכנים לפי הערוצים הרשמיים.",
         "components_up_to_date_msg": "כל הרכיבים מעודכנים:  {versions}",
 
         "update_prompt_title": "עדכונים זמינים",
@@ -1893,7 +1893,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "עדכון זה כולל גם רכיבי הורדה מעודכנים ({names}) — עדכון BananaFlow "
             "הוא כל מה שצריך לעשות."
         ),
-        "update_prompt_components_heading": "רכיבי הורדה מיושנים:",
+        "update_prompt_components_heading": "עדכוני רכיבים",
         "update_prompt_component_line": "{name}:  {cur}  →  {new}",
         "update_prompt_component_note": (
             "אתה מריץ את BananaFlow מקוד מקור, ולכן ניתן לעדכן את הרכיבים "
@@ -1904,11 +1904,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "YouTube שנכשלות."
         ),
         "update_prompt_frozen_note": (
-            "גרסת ההתקנה הזו יכולה לעדכן את רכיבי ההורדה בנפרד. "
-            "בחירה ב“עדכן רכיבים” מורידה חבילה שנבדקה מהמאגר הרשמי של "
-            "BananaFlow, מאמתת את הגודל ואת SHA-256, ומריצה בדיקת תקינות בתהליך "
-            "נפרד. העדכון נשמר בנתוני המשתמש ונכנס לתוקף רק לאחר הפעלה מחדש; "
-            "קובצי התוכנה המותקנת אינם משתנים."
+            "בחירה ב״עדכן רכיבים״ מכינה את החבילות שמופיעות ברשימה מהערוץ הרשמי של BananaFlow. "
+            "BananaFlow מאמתת ובודקת אותן לפני השימוש בהן בהפעלה הבאה."
         ),
         "update_get_app_btn": "פתח עמוד הורדה",
         "update_components_btn": "עדכן רכיבים",
@@ -1929,6 +1926,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         'app_update_downloading': 'מוריד ומאמת את עדכון התוכנה…',
         'app_update_download_progress': 'מוריד עדכון: {done} מתוך {total} מגה־בייט. לאחר ההורדה יתבצע אימות.',
         'app_update_ready_msg': 'גרסה {version} הורדה ואומתה. אפשר לבחור בהתקנה ובהפעלה מחדש כשנוח לך, או במאוחר יותר כדי להמשיך לעבוד. העדכון נשאר שמור.',
+        "maintenance_update_line": "זמין עדכון תחזוקה לספריות של BananaFlow {version} (מהדורה {revision}). העדכון ישמור על אותה גרסת אפליקציה וייכנס לתוקף אחרי הפעלה מחדש.",
+        "maintenance_update_download_btn": "הורד עדכון תחזוקה",
+        "maintenance_update_ready_msg": "עדכון תחזוקה {revision} ל־BananaFlow {version} אומת ומוכן להתקנה.",
+        "component_install_partial_msg": "חלק מהרכיבים מוכנים. עדכונים אלה לא הוכנו: {detail}",
         'app_update_retry_msg': 'לא ניתן היה להשלים את העדכון הקודם. העדכון השמור זמין לניסיון חוזר באמצעות התקנה והפעלה מחדש. אפשר גם להשתמש בעמוד ההורדה הרשמי.',
         'app_update_failed_msg': 'לא ניתן היה להכין את עדכון התוכנה. התוכנה המותקנת לא הוחלפה. אפשר לנסות שוב או להשתמש בעמוד ההורדה הרשמי. פרטים טכניים זמינים ביומן.',
         'restart_busy_downloads': 'עדיין מתבצעות הורדות. יש לסיים או להשהות אותן, ואז לבחור שוב בהפעלה מחדש. העדכון נשאר מוכן.',

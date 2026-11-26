@@ -1,13 +1,14 @@
 """
 ui/workers/update_worker.py  –  App-release + component update check worker
 ============================================================================
-One background thread that can run either or both of the app's two
-update checks and hand the combined result back to the UI thread:
+One background thread runs the requested update checks and hands their
+combined result back to the UI thread:
 
   * App releases   — core.update_checker (GitHub Releases API)
   * Components     — core.component_updates (official GitHub channel or PyPI)
+  * Packaged tools and maintenance — official assets for this app build
 
-Both underlying checkers are guaranteed never to raise — failures are
+Check failures are
 expressed in their result objects — so run() needs no try/except and a
 flaky network can never produce a startup error dialog.
 
@@ -15,7 +16,7 @@ Used from two places:
   * AppWindow startup (check_app=True, check_components=True): results
     are filtered through core.update_state.UpdateStateStore and only
     non-dismissed, non-snoozed updates produce a notification.
-  * Settings can check the app release alone or check both channels in a
+  * Settings can check the app release alone or check all channels in a
     packaged build. Source mode can check the PyPI components separately.
     Results include "up to date" and "check failed".
 
@@ -42,6 +43,7 @@ class UpdateCheckResults:
     check was not requested for this run."""
     app:        Optional[UpdateCheckOutcome] = None
     components: Optional[ComponentUpdateReport] = None
+    maintenance: Optional[UpdateCheckOutcome] = None
 
 
 class UpdateWorker(QThread):
@@ -54,7 +56,7 @@ class UpdateWorker(QThread):
     repo_name           : Repository name on GitHub.
     include_prereleases : When True, pre-release versions are also considered.
     check_app           : Query GitHub Releases for a newer BananaFlow build.
-    check_components    : Check for installable yt-dlp / yt-dlp-ejs updates.
+    check_components    : Check components and, for packaged builds, maintenance.
     parent              : Optional Qt parent object.
     """
 
@@ -90,5 +92,16 @@ class UpdateWorker(QThread):
             return
         if self._check_components:
             results.components = ComponentUpdateChecker().check()
+        if self.isInterruptionRequested():
+            return
+        if self._check_components:
+            from utils.paths import is_frozen
+            if is_frozen():
+                from core.app_updates import check_app_maintenance
+                from core.tool_updates import check_tools
+                results.components.components.extend(check_tools(timeout=8))
+                if self.isInterruptionRequested():
+                    return
+                results.maintenance = check_app_maintenance()
         if not self.isInterruptionRequested():
             self.results_ready.emit(results)

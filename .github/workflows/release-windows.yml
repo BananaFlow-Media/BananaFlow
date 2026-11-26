@@ -89,7 +89,11 @@ jobs:
         shell: pwsh
         run: |
           $v = (& python -c "from version import FULL_VERSION; print(FULL_VERSION)").Trim()
+          $revision = (& python -c "from version import MAINTENANCE_REVISION; print(MAINTENANCE_REVISION)").Trim()
+          $runtimeDir = (& python -c "from version import WINDOWS_RUNTIME_DIR; print(WINDOWS_RUNTIME_DIR)").Trim()
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "maintenance_revision=$revision" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "runtime_dir=$runtimeDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "App version: $v"
 
       - name: Verify the tag matches the application version
@@ -103,6 +107,9 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $expected = "v${{ steps.ver.outputs.version }}"
+          if ('${{ steps.ver.outputs.maintenance_revision }}' -ne '0') {
+            throw 'Build maintenance revisions with workflow_dispatch. Regular release tags require revision zero.'
+          }
           if ($tag -ne $expected) {
             throw "Tag '$tag' does not match version.FULL_VERSION ('${{ steps.ver.outputs.version }}'); artifacts would be named for $expected. Bump version.py or retag."
           }
@@ -176,10 +183,11 @@ jobs:
             "runtime\deno.exe",
             "yt-dlp-plugins\bgutil-ytdlp-pot-provider\yt_dlp_plugins\extractor\getpot_bgutil.py",
             "yt-dlp-plugins\bgutil-ytdlp-pot-provider\yt_dlp_plugins\extractor\getpot_bgutil_script.py",
-            "pot-provider-backend\bgutil-ytdlp-pot-provider\server\src\generate_once.ts",
-            "pot-provider-backend\bgutil-ytdlp-pot-provider\server\node_modules"
+            "pot-provider\LICENSE",
+            "pot-provider\server\src\generate_once.ts",
+            "pot-provider\server\node_modules"
           )
-          $searchDirs = @($dist, "$dist\_internal")
+          $searchDirs = @($dist, (Join-Path $dist '${{ steps.ver.outputs.runtime_dir }}'))
           foreach ($rel in $relative) {
             $found = $false
             foreach ($dir in $searchDirs) {
@@ -195,6 +203,10 @@ jobs:
 
           $reported = & "$dist\bananaflow-cli.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "bananaflow-cli.exe --version failed" }
+          $revision = & "$dist\bananaflow-cli.exe" --maintenance-revision
+          if ($LASTEXITCODE -ne 0 -or $revision -ne '${{ steps.ver.outputs.maintenance_revision }}') {
+            throw "Packaged CLI reports the wrong maintenance revision: $revision"
+          }
           Write-Host "CLI reports: $reported"
           if ($reported -notmatch [regex]::Escape("${{ steps.ver.outputs.version }}")) {
             throw "Packaged CLI reports '$reported', which does not contain the build version ${{ steps.ver.outputs.version }}."

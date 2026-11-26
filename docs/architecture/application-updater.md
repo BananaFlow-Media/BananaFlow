@@ -9,9 +9,32 @@ component does not require downloading the whole application. Both paths require
 an explicit user decision before preparation and another explicit decision to
 restart; checking never authorizes installation or process termination.
 
-Packaged Settings can check both channels at once. Each check reports its own
+Packaged Settings can check all update channels at once. Each check reports its own
 result, so one failed lookup cannot suppress a verified update from the other.
 The full release carries the built library and runtime set for that platform.
+
+## Same-version maintenance packages
+
+A maintenance rebuild carries the same application version and a positive
+compiled `MAINTENANCE_REVISION`. It can update the complete dependency set,
+including Python, Qt, browser/runtime pairs and provider libraries. The
+maintainer builds the supported platform artifacts, tests the exact revision
+and publishes them in the `maintenance-v<version>` prerelease. The package
+name includes the revision and install kind. Normal stable releases retain
+revision zero and their existing tags and asset names.
+
+Discovery and preparation both select the newest authenticated asset for the
+exact application version and layout. Preparation rejects a selection that
+has changed since the prompt. The existing download, verification, explicit
+restart, helper and recovery path handles replacement. The compiled revision
+controls version comparisons after restart. Windows maintenance builds use a
+revision-specific runtime directory, which prevents old dependency files
+in the installed tree from being imported by the rebuilt executable.
+
+The existing `app-updates/` record accepts an optional
+`maintenance_revision` field. Saved regular updates created before this
+change retain revision zero. An applied maintenance revision or a later
+application version makes the saved maintenance package ineligible.
 
 ## Trust and artifact selection
 

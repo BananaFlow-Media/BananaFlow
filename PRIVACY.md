@@ -20,7 +20,7 @@ The exact requests depend on selected features and configuration.
 | Spotify web pages | Resolving/importing Spotify track/album/playlist/artist metadata, including artist-category discovery and selected-category expansion, through the browser-backed scraper | Spotify URL/ID, selected public artist categories and normal browser request metadata |
 | User-configured Spotify search proxy | Spotify **search** in the Search panel | Search query, requested result limit and optional `X-App-Token` |
 | BananaFlow official website | Opening the application download page after the user approves that action | Requested localized download page and normal connection metadata; the website publishes its own privacy information |
-| GitHub API / Releases | App and packaged-component update checks, explicitly approved application artifact and component bundle downloads, and (after a component update) a control-manifest refresh at most once per 24 hours before reusing its overlay | Repository/version/asset request, downloaded public application artifacts or component manifest/bundle and normal connection metadata |
+| GitHub API / Releases | App, maintenance and packaged-component checks, explicitly approved package downloads, and periodic public authorization refresh for selected per-user overlays | Repository/version/asset request, downloaded public package or authorization metadata and normal connection metadata |
 | PyPI | Source/developer component-version checks and updates | Package names and normal connection metadata |
 | MusicBrainz | Explicit or enabled metadata enrichment | Track/artist/album/duration metadata needed for matching |
 | Cover Art Archive | Optional artwork lookup | MusicBrainz release identifier and normal connection metadata |
@@ -48,6 +48,7 @@ The per-user application-data directory is resolved by `utils.paths` (Windows `%
 - `update_state.json` — update reminder/skip state;
 - `app-updates/` — explicitly downloaded application artifacts, copied updater helper, prepared/transaction metadata and local installation status; replacement backups may also remain beside the application for recovery. These do not upload settings, history or media;
 - `components/downloader/` — verified versioned `yt-dlp` / `yt-dlp-ejs` overlays plus the active/previous selection pointer after an approved packaged-component update;
+- `components/runtime-channel-*/` — verified per-build runtime tools, active/previous selection and a time-limited authorization cache after approved runtime updates;
 - rotating local logs;
 - protected/minimized BananaFlow-owned YouTube cookie data (`app_cookies.dpapi` on Windows or an owner-permission cookie file on other supported paths);
 - `browser_profile/` — dedicated sign-in-helper profile separate from normal browser profiles;

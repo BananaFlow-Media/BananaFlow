@@ -202,6 +202,7 @@ def test_update_deferral_clears_available_items_not_prepared_update():
     prepared = object()
     window = SimpleNamespace(
         _last_update_release=SimpleNamespace(version="9.9.9"),
+        _last_maintenance_release=None,
         _last_component_updates=[SimpleNamespace(key="yt-dlp", latest_version="2026.10.1")],
         _prepared_app_update=prepared,
         _refresh_update_affordance=lambda: refreshed.append(True),

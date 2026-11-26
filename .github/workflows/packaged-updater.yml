@@ -5,6 +5,11 @@ name: Packaged updater validation
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      maintenance:
+        description: Exercise a same-version maintenance rebuild
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,7 +47,7 @@ jobs:
       - name: Validate updater tests before packaging
         shell: bash
         run: |
-          python scripts/run_isolated_tests.py --evidence-dir update-evidence/unit --files tests/test_app_update*.py tests/test_packaged_updater*.py
+          python scripts/run_isolated_tests.py --evidence-dir update-evidence/unit --files tests/test_app_update*.py tests/test_packaged_updater*.py tests/test_maintenance_updates.py
       - name: Stage Windows release components
         if: runner.os == 'Windows'
         shell: pwsh
@@ -52,10 +57,17 @@ jobs:
           pwsh -NoProfile -File scripts/fetch_deno_runtime.ps1
           if ($LASTEXITCODE -ne 0) { throw "Deno staging failed" }
       - name: Build real old and new packages without publishing
-        run: python scripts/build_update_test_packages.py
+        shell: bash
+        run: |
+          args=()
+          if [ "${{ inputs.maintenance }}" = "true" ]; then
+            args+=(--maintenance)
+          fi
+          python scripts/build_update_test_packages.py "${args[@]}"
       - name: Install, update, relaunch and verify preserved data
         run: python scripts/run_packaged_update_smoke.py --old-dist update-fixtures/old --new-dist dist --versions update-fixtures/versions.json --evidence-dir update-evidence
       - name: Verify published 1.2.0 package migration
+        if: inputs.maintenance != true
         run: python scripts/run_packaged_update_smoke.py --published-baseline --new-dist dist --versions update-fixtures/versions.json --evidence-dir update-evidence/published
       - name: Upload real platform update evidence
         if: always()

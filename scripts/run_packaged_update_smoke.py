@@ -305,6 +305,7 @@ def exercise_rejected_artifact(request: dict, current_dist: Path, env: dict, cli
     failure_request = {
         **request, "result": str(case / "relaunch.json"),
         "expected_relaunch_version": request["old_version"],
+        "expected_relaunch_revision": 0,
     }
     atomic_json(case / "request.json", failure_request)
     artifact = Path(request["artifact"])
@@ -441,6 +442,7 @@ def _exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) -
         "appdata": env["APPDATA"], "kind": kind, "target": str(target),
         "executable": executable, "old_version": old_version,
         "new_version": versions["new"], "artifact": str(new),
+        "new_maintenance_revision": versions.get("new_maintenance_revision", 0),
         "size": new.stat().st_size, "sha256": digest(new),
         "result": str(case / "relaunch.json"),
     }
@@ -487,9 +489,13 @@ def _exercise(root: Path, kind: str, args: argparse.Namespace, versions: dict) -
         new_cli = run([str(cli), "--version"], env=env).strip()
         if versions["new"] not in new_cli:
             raise RuntimeError(f"Replaced CLI reports wrong version: {new_cli}")
+        revision = versions.get("new_maintenance_revision", 0)
+        if revision and run([str(cli), "--maintenance-revision"], env=env).strip() != str(revision):
+            raise RuntimeError("Replaced CLI reports the wrong maintenance revision")
         summary = {
             "ok": True, "kind": kind, "baseline": "published" if args.published_baseline else "synthetic",
             "old_version": old_version, "new_version": versions["new"],
+            "new_maintenance_revision": revision,
             "old_sha256": digest(old), "new_sha256": request["sha256"],
             "old_process_pid": process.pid, "new_process_pid": result["pid"],
             "old_process_exit": code,

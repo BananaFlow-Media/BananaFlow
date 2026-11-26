@@ -28,8 +28,8 @@ from core.app_update_helper import (
     read_macos_quarantine, update_lock_is_held, verify_artifact,
     write_macos_quarantine,
 )
-from core.update_checker import ReleaseInfo, _is_newer
-from version import FULL_VERSION
+from core.update_checker import ReleaseInfo, UpdateCheckOutcome, _is_newer
+from version import FULL_VERSION, MAINTENANCE_REVISION
 
 OFFICIAL_REPO = "BananaFlow-Media/BananaFlow"
 API_ROOT = f"https://api.github.com/repos/{OFFICIAL_REPO}"
@@ -70,6 +70,7 @@ class PreparedAppUpdate:
     size: int
     sha256: str
     install_mode: str = ""
+    maintenance_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,7 @@ def app_update_support() -> AppUpdateSupport:
     return AppUpdateSupport(True, "", kind, target, relative, helper, architecture, mode)
 
 
-def _asset_name(version: str, support: AppUpdateSupport) -> str:
+def _asset_name(version: str, support: AppUpdateSupport, revision: int = 0) -> str:
     if not VERSION_RE.fullmatch(version):
         raise AppUpdateError("The release version is invalid.")
     endings = {
@@ -152,23 +153,34 @@ def _asset_name(version: str, support: AppUpdateSupport) -> str:
     }
     if support.kind not in endings:
         raise AppUpdateError("This application cannot update itself; use the download website.")
-    return f"BananaFlow-v{version}-{endings[support.kind]}"
+    channel = f"-maintenance-r{revision}" if revision else ""
+    return f"BananaFlow-v{version}{channel}-{endings[support.kind]}"
 
 
-def select_release_asset(release: dict, version: str, support: AppUpdateSupport) -> ReleaseAsset:
+def select_release_asset(
+    release: dict, version: str, support: AppUpdateSupport, revision: int = 0,
+) -> ReleaseAsset:
     """Only an exact ready asset of the exact official published tag qualifies."""
-    if release.get("tag_name") != f"v{version}" or release.get("draft") is not False:
+    tag = f"maintenance-v{version}" if revision else f"v{version}"
+    if (
+        release.get("tag_name") != tag or release.get("draft") is not False
+        or (revision and release.get("prerelease") is not True)
+    ):
         raise AppUpdateError("The official release tag is missing, different, or unpublished.")
+    return select_verified_asset(release, _asset_name(version, support, revision))
+
+
+def select_verified_asset(release: dict, name: str, *, maximum: int = MAX_ARTIFACT_BYTES) -> ReleaseAsset:
+    """Read an exact official uploaded asset from already authenticated release metadata."""
     assets = release.get("assets")
     if not isinstance(assets, list):
         raise AppUpdateError("The official release has no usable assets.")
-    name = _asset_name(version, support)
     matches = [item for item in assets if isinstance(item, dict) and item.get("name") == name]
     if len(matches) != 1:
         raise AppUpdateError("The official release does not contain exactly one compatible package.")
     asset = matches[0]
     size = asset.get("size")
-    if asset.get("state") != "uploaded" or isinstance(size, bool) or not isinstance(size, int) or not 0 < size <= MAX_ARTIFACT_BYTES:
+    if asset.get("state") != "uploaded" or isinstance(size, bool) or not isinstance(size, int) or not 0 < size <= maximum:
         raise AppUpdateError("The official package is not ready or has an unsafe size.")
     api_url = str(asset.get("url", ""))
     if not api_url.startswith(ASSET_API_PREFIX) or not api_url[len(ASSET_API_PREFIX):].isdigit():
@@ -195,8 +207,10 @@ def _safe_transport_url(url: str) -> bool:
     )
 
 
-def _fetch_release(client: httpx.Client, version: str) -> dict:
-    with client.stream("GET", f"{API_ROOT}/releases/tags/v{version}", headers=_headers()) as response:
+def _fetch_tag_release(client: httpx.Client, tag: str, *, optional: bool = False) -> dict | None:
+    with client.stream("GET", f"{API_ROOT}/releases/tags/{tag}", headers=_headers()) as response:
+        if optional and response.status_code == 404:
+            return None
         response.raise_for_status()
         chunks = bytearray()
         for chunk in response.iter_bytes():
@@ -208,6 +222,61 @@ def _fetch_release(client: httpx.Client, version: str) -> dict:
     if not isinstance(release, dict):
         raise AppUpdateError("The release metadata is malformed.")
     return release
+
+
+def _fetch_release(client: httpx.Client, version: str) -> dict:
+    return _fetch_tag_release(client, f"v{version}")
+
+
+def _maintenance_asset(client: httpx.Client, support: AppUpdateSupport) -> tuple[int, ReleaseAsset] | None:
+    release = _fetch_tag_release(client, f"maintenance-v{FULL_VERSION}", optional=True)
+    if release is None:
+        return None
+    assets = release.get("assets")
+    if (
+        release.get("tag_name") != f"maintenance-v{FULL_VERSION}"
+        or release.get("draft") is not False or release.get("prerelease") is not True
+        or not isinstance(assets, list)
+    ):
+        raise AppUpdateError("The official maintenance channel is invalid.")
+    prefix, suffix = _asset_name(FULL_VERSION, support, 1).rsplit("-maintenance-r1-", 1)
+    pattern = re.compile(re.escape(prefix) + r"-maintenance-r([1-9][0-9]{0,5})-" + re.escape(suffix))
+    revisions = []
+    for asset in assets:
+        if isinstance(asset, dict):
+            match = pattern.fullmatch(str(asset.get("name", "")))
+            if match:
+                revisions.append(int(match[1]))
+    revision = max(revisions, default=0)
+    if revision <= MAINTENANCE_REVISION:
+        return None
+    return revision, select_release_asset(release, FULL_VERSION, support, revision)
+
+
+def check_app_maintenance() -> UpdateCheckOutcome:
+    """Discover an exact-version maintenance rebuild for the installed layout."""
+    try:
+        support = app_update_support()
+        if not support.supported:
+            return UpdateCheckOutcome("up_to_date")
+        with httpx.Client(timeout=8, follow_redirects=False, trust_env=False) as client:
+            candidate = _maintenance_asset(client, support)
+        if candidate is not None:
+            revision, _ = candidate
+            return UpdateCheckOutcome("update_available", ReleaseInfo(
+                FULL_VERSION, "", "", "", maintenance_revision=revision,
+            ))
+        return UpdateCheckOutcome("up_to_date")
+    except (OSError, ValueError, TypeError, httpx.HTTPError, RuntimeError):
+        return UpdateCheckOutcome("error")
+
+
+def _eligible_update(version: str, revision: int) -> bool:
+    if type(revision) is not int or not (0 <= revision <= 999999) or not VERSION_RE.fullmatch(version):
+        return False
+    if revision:
+        return version == FULL_VERSION and revision > MAINTENANCE_REVISION
+    return _is_newer(version, FULL_VERSION)
 
 
 def _download(client: httpx.Client, asset: ReleaseAsset, output: Path, progress: Progress | None, cancelled: Callable[[], bool] | None) -> None:
@@ -262,7 +331,8 @@ def prepare_app_update(
     support = app_update_support()
     if not support.supported:
         raise AppUpdateError("This installation needs the manual download website.")
-    if not VERSION_RE.fullmatch(release.version) or not _is_newer(release.version, FULL_VERSION):
+    revision = release.maintenance_revision
+    if not _eligible_update(release.version, revision):
         raise AppUpdateError("The selected release is not newer than this application.")
     root = _update_root().resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -271,8 +341,14 @@ def prepare_app_update(
     work.mkdir(mode=0o700)
     try:
         with httpx.Client(timeout=httpx.Timeout(60, connect=15), follow_redirects=False, trust_env=False) as client:
-            metadata = _fetch_release(client, release.version)
-            asset = select_release_asset(metadata, release.version, support)
+            if revision:
+                candidate = _maintenance_asset(client, support)
+                if candidate is None or candidate[0] != revision:
+                    raise AppUpdateError("The maintenance package changed; check for updates again.")
+                asset = candidate[1]
+            else:
+                metadata = _fetch_release(client, release.version)
+                asset = select_release_asset(metadata, release.version, support)
             artifact = work / asset.name
             partial = work / (asset.name + ".partial")
             _download(client, asset, partial, progress, cancelled)
@@ -287,6 +363,8 @@ def prepare_app_update(
             "install_mode": support.install_mode, "helper": str(helper),
             "asset_api_url": asset.api_url, "asset_name": asset.name,
         }
+        if revision:
+            state["maintenance_revision"] = revision
         state_path = work / "prepared.json"
         atomic_json(state_path, state)
         atomic_json(root / "prepared.json", {"schema": 1, "directory": work.name})
@@ -299,19 +377,19 @@ def prepare_app_update(
 
 
 def _prepared_from_state(path: Path, data: dict, support: AppUpdateSupport, *, verify: bool) -> PreparedAppUpdate:
+    revision = data.get("maintenance_revision", 0)
     if (
         data.get("schema") != 1 or data.get("kind") != support.kind
         or data.get("target") != str(support.target) or data.get("executable") != support.executable
         or data.get("install_mode", "") != support.install_mode
-        or not VERSION_RE.fullmatch(str(data.get("version", "")))
-        or not _is_newer(data["version"], FULL_VERSION)
+        or not _eligible_update(str(data.get("version", "")), revision)
     ):
         raise AppUpdateError("The prepared update does not match this installation.")
     artifact = Path(data["artifact"])
     helper = Path(data["helper"])
     if (
         artifact.parent != path.parent or helper.parent != path.parent
-        or artifact.name != _asset_name(data["version"], support)
+        or artifact.name != _asset_name(data["version"], support, revision)
         or helper.name != support.helper_path.name or helper.is_symlink() or not helper.is_file()
     ):
         raise AppUpdateError("The prepared update paths are unsafe.")
@@ -319,7 +397,7 @@ def _prepared_from_state(path: Path, data: dict, support: AppUpdateSupport, *, v
         verify_artifact(artifact, data["size"], data["sha256"])
     return PreparedAppUpdate(
         data["version"], artifact, data["kind"], path, helper, support.target,
-        support.executable, data["size"], data["sha256"], support.install_mode,
+        support.executable, data["size"], data["sha256"], support.install_mode, revision,
     )
 
 
@@ -401,6 +479,8 @@ def launch_prepared_app_update(
         "install_mode": prepared.install_mode, "transaction": uuid.uuid4().hex,
         "relaunch_args": arguments,
     }
+    if prepared.maintenance_revision:
+        plan["maintenance_revision"] = prepared.maintenance_revision
     plan_path = prepared.state_path.parent / f"plan-{plan['transaction']}.json"
     atomic_json(plan_path, plan)
     environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}

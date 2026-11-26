@@ -47,6 +47,10 @@ unchanged; `ffmpeg-build.json` records the adjusted file's before/after hashes.
 
 ## Requesting source
 
+The matching runtime or maintenance release lists the reviewed upstream
+source revisions and supplies the corresponding source evidence for separately
+distributed builds. See the [release procedure](docs/release/RELEASING.md#publish-component-maintenance).
+
 If you received a BananaFlow binary and cannot obtain the corresponding
 source from the repository or the release page, open an issue at
 https://github.com/BananaFlow-Media/BananaFlow/issues (or use the

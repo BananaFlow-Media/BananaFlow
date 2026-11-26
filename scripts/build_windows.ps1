@@ -218,6 +218,7 @@ Write-Host "    Python: $pyVer ($($py.Source))"
 
 # Read the canonical version so we can name the output ZIP correctly.
 $AppVersion = (& python -c "from version import FULL_VERSION; print(FULL_VERSION)").Trim()
+$BundledContentsSubdirectory = (& python -c "from version import WINDOWS_RUNTIME_DIR; print(WINDOWS_RUNTIME_DIR)").Trim()
 Write-Host "    App version: $AppVersion"
 
 # Optional: require staged FFmpeg binaries.
@@ -343,7 +344,7 @@ if ($RequireBundledFfmpeg) {
     # way; this check must accept either location too, or a real
     # PyInstaller 6.x build always fails here even though FFmpeg is
     # genuinely bundled and will genuinely be found at runtime.
-    $FfmpegSearchDirs = @($DistDir, (Join-Path $DistDir '_internal'))
+    $FfmpegSearchDirs = @($DistDir, (Join-Path $DistDir $BundledContentsSubdirectory))
     $FoundFfmpegDir = $null
     foreach ($dir in $FfmpegSearchDirs) {
         $hasAll = $true

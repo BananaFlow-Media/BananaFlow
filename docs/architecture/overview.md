@@ -36,6 +36,12 @@ Lazy provider initialization stays inside the same background worker paths used 
 
 Network access, scraping, downloading, conversion, metadata scans and other long operations never run on the GUI thread. Workers communicate back through Qt signals; they do not mutate widgets from worker threads. Shutdown of disk-changing operations must be bounded and event-loop safe.
 
+Settings presents component, maintenance and full application update results
+together. Verified native tool overlays take effect during process startup.
+Same-version library maintenance uses the existing application replacement
+helper. See the [component updater](secure-component-updater.md) and
+[application updater](application-updater.md) contracts.
+
 ## Main data flows
 
 ### URL/download

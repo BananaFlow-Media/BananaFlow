@@ -4,6 +4,17 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.3.0]
+
+### Added
+
+- Settings checks verified FFmpeg/FFprobe and Deno updates and compatible
+  dependency-only maintenance packages for the installed application version.
+- Maintenance packages carry a separate revision. The installed application
+  can receive a compatible dependency rebuild and retain its feature version.
+- Packaged CLI commands use the same verified downloader and native tool
+  selections as the desktop app.
+
 ## [1.2.3]
 
 ### Fixed

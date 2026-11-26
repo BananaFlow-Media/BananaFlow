@@ -2,7 +2,7 @@
 
 Status: **Current release-compliance inventory**
 
-Version reference: BananaFlow `1.2.3` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
+Version reference: BananaFlow `1.3.0` (must match [`version.py`](version.py); CI enforces this release-compliance snapshot).
 
 BananaFlow is licensed as GPL-3.0-or-later. This document records third-party packages, staged binaries/components, their license families, source locations and release-handling obligations. It is a best-effort open-source compliance document, not legal advice.
 
@@ -183,6 +183,10 @@ Current categories include:
 There is currently no BananaFlow-operated public Spotify Search Proxy. If a future BananaFlow service replaces the self-hosted setting, Privacy/Security/threat-model/API documentation must be updated as part of that service launch.
 
 ## 5. Source availability and license texts
+
+The specific native tools and libraries in separately distributed component
+or maintenance packages carry their applicable license and source evidence
+with the numbered release asset.
 
 Corresponding-source handling is described by [`SOURCE_OFFER.md`](SOURCE_OFFER.md). The Windows/package license bundle includes the project license/source/notice files required by [`LICENSES.md`](LICENSES.md) and the release checklist.
 

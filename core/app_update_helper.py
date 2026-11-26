@@ -194,6 +194,9 @@ def validate_plan(path: Path) -> dict:
         raise AppUpdateError("The update plan is unsupported.")
     if not VERSION_RE.fullmatch(str(plan.get("version", ""))):
         raise AppUpdateError("The update version is invalid.")
+    revision = plan.get("maintenance_revision", 0)
+    if type(revision) is not int or not 0 <= revision <= 999999:
+        raise AppUpdateError("The update maintenance revision is invalid.")
     target = _absolute_path(plan.get("target"))
     artifact = _absolute_path(plan.get("artifact"))
     if target == target.parent or target == Path.home().resolve():
@@ -331,7 +334,7 @@ def ensure_no_other_app_processes() -> None:
             kernel.CloseHandle(snapshot)
 
 
-def extract_portable(artifact: Path, destination: Path) -> None:
+def extract_portable(artifact: Path, destination: Path, *, runtime_dir: str = "_internal") -> None:
     """Extract the release's flat ZIP with Windows-safe, bounded paths."""
     zone_identifier = _read_windows_zone_identifier(artifact) if _IS_WINDOWS else None
     seen: set[str] = set()
@@ -366,7 +369,7 @@ def extract_portable(artifact: Path, destination: Path) -> None:
             total += entry.file_size
             if total > MAX_EXPANDED_BYTES:
                 raise AppUpdateError("The expanded application exceeds the safe limit.")
-        if "bananaflow.exe" not in seen or not any(p.startswith("_internal/") for p in seen):
+        if "bananaflow.exe" not in seen or not any(p.startswith(runtime_dir.casefold() + "/") for p in seen):
             raise AppUpdateError("The archive is not a BananaFlow portable application.")
         for entry in entries:
             destination_path = destination.joinpath(*PurePosixPath(entry.filename).parts)
@@ -718,7 +721,12 @@ def apply_update_plan(plan_path: Path, *, wait_timeout: float = 300) -> int:
                 shutil.rmtree(staging)
             staging.mkdir()
             if plan["kind"] == "windows-portable":
-                extract_portable(Path(plan["artifact"]), staging)
+                revision = plan.get("maintenance_revision", 0)
+                if revision:
+                    runtime_dir = f"_internal-maintenance-{plan['version']}-r{revision}"
+                    extract_portable(Path(plan["artifact"]), staging, runtime_dir=runtime_dir)
+                else:
+                    extract_portable(Path(plan["artifact"]), staging)
             else:
                 stage_macos(Path(plan["artifact"]), staging, plan["version"], plan_path.parent)
             # Hashing/extraction may take time. A user might have reopened

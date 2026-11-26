@@ -70,6 +70,7 @@ Then explicitly verify:
 - Ensure no generated/staged binary was accidentally committed.
 - Verify required license/source bundle files are packaged.
 - Stage Windows FFmpeg from the exact retained pin in `packaging/ffmpeg-windows.json`; inspect architecture/license/codecs after extraction. Preserve its LGPLv3 notice rather than labeling it with the native macOS recipe's LGPLv2.1 license.
+- Verify the frozen Windows `pot-provider/` directory includes the upstream license, server script and production modules. Its shorter path accommodates the revision-specific runtime directory and Inno Setup's file path limit.
 - Build macOS arm64 FFmpeg from `packaging/ffmpeg-macos-sources.json` with `scripts/build_ffmpeg_macos.py`; retain the verified source bundle, configure/license/architecture evidence and codec smoke outputs. Do not reuse the former Intel/GPL evermeet binary as native LGPL input.
 - Generate/verify SBOM and checksum assets.
 
@@ -140,6 +141,51 @@ Download the **CI-produced draft artifacts** onto clean/representative machines 
 - critical Hebrew/English UI and the YouTube Doctor/manual QA surfaces render correctly when changed by the release.
 
 For Linux source support, the CI matrix plus a source-install smoke on a representative Linux environment are the release evidence until an official Linux package is introduced.
+
+## Publish component maintenance
+
+Use a maintained application branch that already has component maintenance
+support. Keep `FULL_VERSION` and feature code at that version when preparing a
+dependency-only rebuild. Increment `MAINTENANCE_REVISION` and update the reviewed
+dependencies and their inventory. Build both target platforms with manual
+workflow dispatch. The native builds check the compiled revision and emit the
+usual local artifacts, checksums, inventory, SBOM and source evidence.
+
+1. On the same maintenance source revision, collect the validated installer,
+   portable ZIP and DMG into a directory and run
+   `python scripts/prepare_component_assets.py maintenance --source <artifacts> --output <new-directory>`.
+   Compare the generated SHA-256 values with the native build manifests.
+2. Stage the renamed artifacts in the official `maintenance-v<version>`
+   prerelease with the matching source reference, notices, inventory, SBOM and
+   corresponding source evidence. Keep numbered assets immutable. Upload
+   later revisions only after acceptance because uploaded artifacts become
+   eligible immediately in an already published channel.
+3. Exercise discovery, explicit installation from the previous revision,
+   expected platform warnings, preserved user data and a fresh process reporting
+   the same `--version` and the new `--maintenance-revision`. Verify that the
+   fresh process no longer offers the applied revision. Use isolated fixtures
+   for unpublished candidates. Complete native manual acceptance before
+   making new assets available to users.
+
+The **Packaged updater validation** workflow takes a manual `maintenance`
+input. It creates disposable r0 and r1 packages with the same version,
+then exercises the real helper and checks the compiled revision after
+relaunch. Use the platform release workflows to test the actual candidate
+and complete the manual checklist for its release assets.
+
+For a standalone FFmpeg/FFprobe or Deno update, build from reviewed native
+inputs. Run `python scripts/prepare_component_assets.py runtime --tool <ffmpeg-or-deno> --revision <number> --source <native-tools> --license <license-file> --output <new-directory>` on each target platform. Put
+the archive, its SHA-256 and corresponding license/source evidence in the
+`runtime-channel-v<version>-r<maintenance>` prerelease. The version and
+maintenance revision describe the app build that was tested with the tool.
+Test conversion and probing for FFmpeg and the download/Doctor path for Deno.
+Keep the still-authorized last-known-good asset when publishing a newer
+revision. Removing an asset withdraws permission to use it at the next
+successful control refresh. Deno/FFmpeg archives may be published independently.
+
+Keep channel tags marked as prereleases. Normal app tags use revision zero.
+The standard GitHub release and website remain the distribution path for
+new application versions.
 
 ## Release notes
 

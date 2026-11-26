@@ -68,6 +68,31 @@ def setup(tmp_path, monkeypatch):
     parent.deleteLater()
 
 
+def test_maintenance_download_is_independent_of_app_upgrade(setup):
+    parent, store, release, component = setup
+    maintenance = ReleaseInfo("1.2.3", "", "", "", maintenance_revision=1)
+    dialog = UpdatePromptDialog(
+        store, release, [component], parent=parent, maintenance_release=maintenance,
+    )
+    restore = ControlledAppWorker.created[-1]
+    restore.completed.emit(None, "")
+    restore.finished.emit()
+    dialog._maintenance_action_btn.click()
+    download = ControlledAppWorker.created[-1]
+    assert download.release is maintenance
+    assert parent.restarts == []
+    prepared = SimpleNamespace(version="1.2.3", maintenance_revision=1)
+    download.completed.emit(prepared, "")
+    download.finished.emit()
+    assert dialog._maintenance_action_btn.text() == t("app_update_install_restart_btn")
+    assert dialog._app_action_btn.text() == t("app_update_download_btn")
+    assert parent.prepared == [prepared]
+    assert parent.restarts == []
+    dialog._maintenance_action_btn.click()
+    QApplication.processEvents()
+    assert parent.restarts == [prepared]
+
+
 def test_download_verify_then_explicit_restart_only(setup, monkeypatch):
     parent, store, release, component = setup
     dialog = UpdatePromptDialog(store, release, [component], parent=parent)

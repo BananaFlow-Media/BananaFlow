@@ -50,6 +50,12 @@ Startup-preflight shutdown tests must cover cooperative cancellation before the 
 
 Packaged-component regression tests must cover discovery against the verified channel, suppression after the installed version is loaded on restart, rejection of unavailable or ineligible assets, and selection of a newer packaged downloader over an older overlay.
 
+Maintenance coverage must also exercise an authenticated platform-specific
+tool offer, next-launch activation, corrupted or withdrawn tools, failure
+before activation, and reuse of the previous verified selection. Verify
+that a compiled same-version build revision suppresses only its own applied
+maintenance package and preserves the regular full-release update path.
+
 Immediate-close coverage must also verify that the startup update worker honours interruption between app and component checks and never emits results after cancellation; Qt must not destroy a running child `QThread`.
 
 ## Application updater acceptance

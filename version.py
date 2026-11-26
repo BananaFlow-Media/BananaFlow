@@ -28,12 +28,12 @@ new release; every other representation derives from them.
 
 from __future__ import annotations
 
-__version__: str = "1.2.3"
+__version__: str = "1.3.0"
 
 # Convenience tuple form for code that needs to compare versions
 # numerically without parsing the string. Also feeds the numeric
 # fields of the Windows VS_VERSIONINFO block.
-VERSION_INFO: tuple[int, int, int] = (1, 2, 3)
+VERSION_INFO: tuple[int, int, int] = (1, 3, 0)
 
 # Pre-release suffix in SemVer notation, or None for a stable release.
 # Examples: "beta.1", "beta.2", "rc.1".
@@ -42,6 +42,14 @@ PRERELEASE: str | None = None
 # Public SemVer string: tags (v-prefixed), artifact names, updater,
 # About dialog, CLI --version.
 FULL_VERSION: str = f"{__version__}-{PRERELEASE}" if PRERELEASE else __version__
+
+# Revision of a dependency-only rebuild of this exact application version.
+# Standard release branches start at zero. Maintenance branches increment it.
+MAINTENANCE_REVISION: int = 0
+WINDOWS_RUNTIME_DIR: str = (
+    f"_internal-maintenance-{FULL_VERSION}-r{MAINTENANCE_REVISION}"
+    if MAINTENANCE_REVISION else "_internal"
+)
 
 
 def _pep440(core: str, prerelease: str | None) -> str:

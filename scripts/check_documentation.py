@@ -258,7 +258,8 @@ IMPACT_RULES = (
     ImpactRule(
         "updaters/components",
         (
-            r"^core/(?:update_checker|component_updates|runtime_components|component_overlay|app_updates|app_update_helper|app_update_smoke)\.py$",
+            r"^core/(?:update_checker|component_updates|runtime_components|component_overlay|tool_updates|app_updates|app_update_helper|app_update_smoke)\.py$",
+            r"^scripts/prepare_component_assets\.py$",
             r"^scripts/run_packaged_update_smoke\.py$",
             r"^\.github/workflows/component-channel\.yml$",
             r"^scripts/check_downloader_freshness\.py$",

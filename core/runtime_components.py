@@ -183,6 +183,11 @@ def find_bundled_plugins_dir() -> Optional[Path]:
 def _candidate_runtime_dirs() -> list[Path]:
     install = get_install_dir()
     candidates: list[Path] = []
+    if is_frozen():
+        from core.tool_updates import active_tool_dir
+        updated = active_tool_dir("deno")
+        if updated is not None:
+            candidates.append(updated)
     for name in _RUNTIME_FOLDER_NAMES:
         candidates.append(install / name)
     meipass = getattr(sys, "_MEIPASS", None)
@@ -196,8 +201,11 @@ def _candidate_runtime_dirs() -> list[Path]:
 
 def _candidate_provider_backend_dirs() -> list[Path]:
     install = get_install_dir()
-    candidates = [install / _POT_BACKEND_FOLDER_NAME / _BGUTIL_SERVER_REL]
+    candidates = []
     meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "pot-provider" / "server")
+    candidates.append(install / _POT_BACKEND_FOLDER_NAME / _BGUTIL_SERVER_REL)
     if meipass:
         candidates.append(Path(meipass) / _POT_BACKEND_FOLDER_NAME / _BGUTIL_SERVER_REL)
     candidates.append(install / "packaging" / _POT_BACKEND_FOLDER_NAME / _BGUTIL_SERVER_REL)

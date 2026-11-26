@@ -53,8 +53,13 @@ def _make_runtime(runtime_dir: Path, exe_name: str) -> Path:
     return exe
 
 
-def _make_backend(root: Path, version: str = "1.3.1") -> Path:
-    server = root / "pot-provider-backend" / "bgutil-ytdlp-pot-provider" / "server"
+def _make_backend(root: Path, version: str = "1.3.1", *, compact: bool = False) -> Path:
+    provider = (
+        root / "pot-provider"
+        if compact
+        else root / "pot-provider-backend" / "bgutil-ytdlp-pot-provider"
+    )
+    server = provider / "server"
     (server / "src").mkdir(parents=True, exist_ok=True)
     (server / "src" / "generate_once.ts").write_text("// fake script\n", encoding="utf-8")
     (server / "node_modules").mkdir(parents=True, exist_ok=True)
@@ -175,6 +180,17 @@ class TestProviderBackendScan:
         info = rc.detect_bundled_components()
         assert info.provider_backend_dir is None
         assert not info.has_bundled_provider_backend
+
+    def test_frozen_maintenance_uses_backend_from_active_bundle(self, tmp_path, monkeypatch):
+        _point_install_dir(monkeypatch, tmp_path)
+        bundle = tmp_path / "_internal-maintenance-1.3.0-r1"
+        monkeypatch.setattr(rc.sys, "_MEIPASS", str(bundle), raising=False)
+        _make_backend(tmp_path, "1.3.1")
+        server = _make_backend(bundle, "2.0.2", compact=True)
+
+        info = rc.detect_bundled_components()
+        assert info.provider_backend_dir == server
+        assert info.provider_backend_version == "2.0.2"
 
     def test_extractor_args_point_to_server_home(self, tmp_path, monkeypatch):
         _point_install_dir(monkeypatch, tmp_path)

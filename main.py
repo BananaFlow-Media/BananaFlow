@@ -134,17 +134,46 @@ def _activate_selected_component_overlay():
             should_activate_component_overlay,
         )
         from utils.paths import is_frozen as _is_frozen
-        return (
-            activate_component_overlay()
-            if should_activate_component_overlay(argv=sys.argv, frozen=_is_frozen())
-            else None
-        )
+        if not should_activate_component_overlay(argv=sys.argv, frozen=_is_frozen()):
+            return None
+    except Exception:
+        logger.warning("Component-overlay policy unavailable", exc_info=True)
+        return None
+    try:
+        return activate_component_overlay()
     except Exception:
         logger.warning(
             "Component-overlay activation failed (using bundled components)",
             exc_info=True,
         )
         return None
+
+
+def _select_runtime_tools() -> None:
+    try:
+        from core.tool_updates import activate_tool_overlays
+        activate_tool_overlays()
+    except Exception:
+        logger.warning("Runtime tool activation failed", exc_info=True)
+
+
+def _activate_runtime_tools_with_splash() -> None:
+    """Verify native tools before use while the splash event loop stays live."""
+    from utils.paths import is_frozen
+    if not is_frozen():
+        return
+    from PySide6.QtCore import QEventLoop, Qt, QThread
+
+    class RuntimeActivationWorker(QThread):
+        def run(self) -> None:
+            _select_runtime_tools()
+
+    worker = RuntimeActivationWorker()
+    loop = QEventLoop()
+    worker.finished.connect(loop.quit, Qt.ConnectionType.QueuedConnection)
+    worker.start()
+    loop.exec()
+    worker.wait()
 
 
 def _allow_startup_during_app_update() -> bool:
@@ -213,6 +242,7 @@ def main() -> int:
 
     _set_startup_status(app, splash, t("startup_loading_components"))
     _activate_selected_component_overlay()
+    _activate_runtime_tools_with_splash()
     from core.services import ServiceContainer
     _load_qfluentwidgets_without_console_ad()
     from ui.app_window import AppWindow
@@ -343,6 +373,7 @@ def _run_internal_smoke_test(argv: list[str]) -> int:
     # The component-healthcheck mode is routed separately and must never run
     # normal activation against its private staging directory.
     _activate_selected_component_overlay()
+    _select_runtime_tools()
     index = argv.index("--internal-smoke-test")
     target = argv[index + 1] if index + 1 < len(argv) else ""
     if target == "tag-editor":

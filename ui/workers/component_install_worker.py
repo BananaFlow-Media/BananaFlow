@@ -26,6 +26,7 @@ from PySide6.QtCore import QThread, Signal
 
 from core.component_updates import pip_upgrade_command
 from utils.paths import is_frozen
+from utils.security import redact_text
 
 _TIMEOUT_SECONDS = 600          # pip resolving + downloading can be slow
 _OUTPUT_TAIL_CHARS = 2000
@@ -36,6 +37,11 @@ class ComponentInstallWorker(QThread):
 
     completed = Signal(bool, str)
 
+    def __init__(self, parent=None, *, updates=None) -> None:
+        super().__init__(parent)
+        self._updates = updates
+        self.install_failures: list[str] = []
+
     def run(self) -> None:
         if is_frozen():
             self._run_packaged_update()
@@ -43,14 +49,27 @@ class ComponentInstallWorker(QThread):
         self._run_source_update()
 
     def _run_packaged_update(self) -> None:
-        try:
-            from core.component_overlay import install_verified_component_update
-            result = install_verified_component_update()
-        except Exception as exc:
-            self.completed.emit(False, str(exc)[-_OUTPUT_TAIL_CHARS:])
-            return
-        versions = ", ".join(f"{name} {version}" for name, version in result.versions)
-        self.completed.emit(True, versions)
+        versions = []
+        downloader = self._updates is None or any(
+            status.key in {"yt-dlp", "yt-dlp-ejs"} for status in self._updates
+        )
+        if downloader:
+            try:
+                from core.component_overlay import install_verified_component_update
+                result = install_verified_component_update()
+                versions.extend(f"{name} {version}" for name, version in result.versions)
+            except Exception as exc:
+                self.install_failures.append(f"yt-dlp: {redact_text(str(exc))}")
+        for status in self._updates or ():
+            if status.key.startswith("runtime:"):
+                try:
+                    from core.tool_updates import install_tool_update
+                    install_tool_update(status.key.split(":")[1], status.latest_version)
+                    versions.append(f"{status.display_name} {status.latest_version}")
+                except Exception as exc:
+                    self.install_failures.append(f"{status.display_name}: {redact_text(str(exc))}")
+        detail = ", ".join(versions) if versions else "\n".join(self.install_failures)
+        self.completed.emit(bool(versions), detail[-_OUTPUT_TAIL_CHARS:])
 
     def _run_source_update(self) -> None:
         command = pip_upgrade_command()
