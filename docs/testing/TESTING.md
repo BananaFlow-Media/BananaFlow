@@ -120,6 +120,12 @@ The gate validates internal Markdown references, canonical documentation structu
 - Output-layout tests must keep collection identity separate from per-track
   album/artist tags, cover direct and artist-import folder trees, and exercise
   title-collision and multi-disc behavior.
+- Playlist redirect tests must verify that an extracted playlist uses its
+  resolved collection title. For flat playlists, verify source positions with
+  gaps and check that an explicit provider position takes precedence.
+- Generic fallback tests cover collection identity and direct streams. Test
+  slash characters inside artist and collection names through path rendering
+  and filename sanitization.
 - Download-recovery tests must prove that local errors do not close admission,
   equivalent failures update one incident, authentication/network work stops
   exactly on the third consecutive failure, every collected authentication

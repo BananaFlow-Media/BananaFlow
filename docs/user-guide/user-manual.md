@@ -89,6 +89,8 @@ Filename prefixes follow the source's original position on both Spotify and YouT
 With collection subfolders enabled, the source collection—not a member track's album tag—controls the folder:
 
 - a direct playlist uses `Playlist/` and a direct album uses `Album/`;
+- a redirect that opens a playlist uses the resolved playlist's title and source order;
+- a slash in an artist or collection name becomes a hyphen in the folder name;
 - an artist import uses `Artist/Albums/Album`, `Artist/Singles & EPs/EP`, `Artist/Compilations/Compilation` or `Artist/Playlists/Playlist`;
 - when provider metadata identifies a multi-disc album, it adds `Disc 1`, `Disc 2`, ... below the release folder so equal track numbers on different discs cannot collide, even when only one disc is selected;
 - disabling collection subfolders keeps every automatic folder out of the path. Disabling the Singles & EPs category keeps EP release folders directly below the artist.

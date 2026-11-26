@@ -15,6 +15,12 @@ All notable changes to BananaFlow are recorded here. The format follows [Keep a 
 - Packaged CLI commands use the same verified downloader and native tool
   selections as the desktop app.
 
+### Fixed
+
+- Keep redirected and fallback playlists in their named download folders and
+  preserve the source order for optional filename numbering.
+- Keep slashes inside artist or collection names from splitting output folders.
+
 ## [1.2.3]
 
 ### Fixed
